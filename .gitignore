@@ -77,3 +77,8 @@ secrets.json
 
 grammars/
 bin/
+/reports/
+/indexes/
+gitstats_metrics.json
+test_metrics.json
+git

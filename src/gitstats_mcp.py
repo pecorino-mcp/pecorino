@@ -1,10 +1,10 @@
-import os
-import sys
-import json
 import asyncio
 import glob
-from typing import List, Dict, Any, Optional, Set
+import json
+import os
+import sys
 from pathlib import Path
+from typing import Any, List, Optional
 
 # Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
 workspace_root = Path(__file__).resolve().parent.parent
@@ -15,13 +15,12 @@ sdk_path = workspace_root / "modules" / "python-sdk" / "src"
 if str(sdk_path) not in sys.path:
     sys.path.insert(0, str(sdk_path))
 
-from pydantic import BaseModel, Field
 import time
+
 import jwt
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from starlette.requests import Request
-from starlette.responses import Response, JSONResponse
-from starlette.exceptions import HTTPException
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from fastapi import Request, HTTPException, Response
+from fastapi.responses import JSONResponse
 
 # OAuth 2.1 Configurations
 OAUTH_JWT_SECRET = os.getenv("OAUTH_JWT_SECRET", "gitstats3-secret-key-change-in-prod")
@@ -59,7 +58,11 @@ def verify_oauth_token(request: Request) -> dict:
     if not token:
         sys.stderr.write("[AUTH ERROR] Missing authorization token\n")
         sys.stderr.flush()
-        raise HTTPException(status_code=401, detail="Bearer token required")
+        raise HTTPException(
+            status_code=401, 
+            detail="Bearer token required",
+            headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Bearer token required"'}
+        )
 
     try:
         payload = jwt.decode(
@@ -71,16 +74,28 @@ def verify_oauth_token(request: Request) -> dict:
     except jwt.ExpiredSignatureError as e:
         sys.stderr.write(f"[AUTH ERROR] Token expired: {e}\n")
         sys.stderr.flush()
-        raise HTTPException(status_code=401, detail="Token has expired")
+        raise HTTPException(
+            status_code=401, 
+            detail="Token has expired",
+            headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Token has expired"'}
+        )
     except jwt.InvalidTokenError as e:
         sys.stderr.write(f"[AUTH ERROR] Invalid token: {e}\n")
         sys.stderr.flush()
-        raise HTTPException(status_code=401, detail="Invalid token signature or format")
+        raise HTTPException(
+            status_code=401, 
+            detail="Invalid token signature or format",
+            headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Invalid token signature or format"'}
+        )
 
     if OAUTH_ISSUER and payload.get("iss") != OAUTH_ISSUER:
         sys.stderr.write(f"[AUTH ERROR] Issuer mismatch: got {payload.get('iss')}, expected {OAUTH_ISSUER}\n")
         sys.stderr.flush()
-        raise HTTPException(status_code=401, detail="Issuer mismatch")
+        raise HTTPException(
+            status_code=401, 
+            detail="Issuer mismatch",
+            headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Issuer mismatch"'}
+        )
 
     # Verify Resource Indicator (RFC 8707)
     resources = payload.get("resource") or payload.get("aud") or []
@@ -90,31 +105,29 @@ def verify_oauth_token(request: Request) -> dict:
     if OAUTH_RESOURCE not in resources:
         sys.stderr.write(f"[AUTH ERROR] Resource mismatch: expected {OAUTH_RESOURCE} in {resources}\n")
         sys.stderr.flush()
-        raise HTTPException(status_code=403, detail="Invalid resource indicator (resource mismatch)")
+        raise HTTPException(
+            status_code=403, 
+            detail="Invalid resource indicator (resource mismatch)",
+            headers={"www-authenticate": 'Bearer error="invalid_target", error_description="Invalid resource indicator (resource mismatch)"'}
+        )
 
     return payload
 
-def make_auth_error_response(status_code: int, error: str, description: str) -> JSONResponse:
-    www_authenticate = f'Bearer error="{error}", error_description="{description}"'
-    return JSONResponse(
-        {"error": error, "error_description": description},
-        status_code=status_code,
-        headers={"www-authenticate": www_authenticate}
-    )
-
-from src.gitstats_oopmetrics import OOPMetricsAnalyzer, parse
-from src.gitstats_ast import walk, ClassDef, InterfaceDef, FunctionDef
-from src.gitstats_maintainability import (
-    calculate_loc_metrics, calculate_halstead_metrics,
-    calculate_mccabe_complexity, calculate_maintainability_index
-)
-from src.gitstats_hotspot import HotspotDetector
-from src.gitstats_gitdatacollector import GitDataCollector
-from src.gitstats_export import MetricsExporter
-
 import mcp.types as types
-from mcp.server.lowlevel import Server
+from mcp.server.lowlevel import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
+
+from src.gitstats_ast import ClassDef, InterfaceDef, walk
+from src.gitstats_export import MetricsExporter
+from src.gitstats_gitdatacollector import GitDataCollector
+from src.gitstats_hotspot import HotspotDetector
+from src.gitstats_maintainability import (
+    calculate_halstead_metrics,
+    calculate_loc_metrics,
+    calculate_maintainability_index,
+    calculate_mccabe_complexity,
+)
+from src.gitstats_oopmetrics import OOPMetricsAnalyzer, parse
 
 server = Server("OOP Metrics Analyzer Server 🚀")
 
@@ -138,7 +151,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         index = CodeSearchIndex()
         results = await asyncio.to_thread(index.search, query, limit)
         return {"query": query, "results": results}
-        
+
     path = safe_path(target)
     from src.gitstats_index import CodeSearchIndex
     index = CodeSearchIndex()
@@ -146,10 +159,10 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     if path.is_dir():
         if view not in ["summary", "search"]:
             raise ValueError(f"View '{view}' is only supported for specific files, not directories.")
-        
+
         nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
         indexed_files = len(set(n['filepath'] for n in nodes))
-        
+
         return {
             "target": str(path),
             "type": "directory",
@@ -158,16 +171,17 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 "total_files_found": indexed_files
             }
         }
-        
+
     if path.suffix not in SUPPORTED:
         raise ValueError(f"Unsupported extension: {path.suffix}")
-        
+
     result = {"target": str(path), "type": "file"}
-    
+
     if view == "tree":
+        import tree_sitter
+
         from src.gitstats_tree_sitter_parser import get_language_from_extension
         from src.tsgm import TreeSitterGrammarManager
-        import tree_sitter
         content = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='ignore')
         lang = TreeSitterGrammarManager().get_language(get_language_from_extension(path.suffix))
         parser = tree_sitter.Parser(lang)
@@ -196,7 +210,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 "classes": classes,
                 "functions": functions
             }
-            
+
     return result
 
 async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
@@ -233,7 +247,7 @@ async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
                     pass
             analyzer.calculate_afferent_coupling()
             result["metrics_summary"] = analyzer.analyze_package(str(path))
-            
+
     if "hotspots" in what_set and path.is_dir() and (path/".git").exists():
         data = GitDataCollector()
         await asyncio.to_thread(data.collect, str(path))
@@ -242,26 +256,26 @@ async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
         detector = HotspotDetector(data)
         hotspots = await asyncio.to_thread(detector.analyze)
         result["hotspots"] = hotspots[:30]
-        
+
     return result
 
 async def do_report(repo_path: str, output_path: str) -> dict:
     path = safe_path(repo_path)
     if not (path/".git").exists():
         raise ValueError(f"Not a git repository: {path}")
-        
+
     import re
     repo_name = path.name
     safe_repo_name = re.sub(r'[<>:"/\\|?*]', '_', repo_name).strip('. ')
     if not safe_repo_name:
         safe_repo_name = 'unnamed_repo'
-        
+
     out_dir = Path(output_path).expanduser().resolve() / f"{safe_repo_name}_report"
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     from src.gitstats_config import conf
     conf['calculate_mi_per_repository'] = True
-    
+
     data = GitDataCollector()
     await asyncio.to_thread(data.collect, str(path))
     await asyncio.to_thread(data.calculate_mi_for_repository, str(path))
@@ -269,14 +283,14 @@ async def do_report(repo_path: str, output_path: str) -> dict:
     await asyncio.to_thread(data.calculate_halstead_for_repository, str(path))
     await asyncio.to_thread(data.calculate_oop_for_repository, str(path))
     await asyncio.to_thread(data.refine)
-    
+
     detector = HotspotDetector(data)
     hotspots = await asyncio.to_thread(detector.analyze)
     summary = detector.get_summary()
-    
+
     exporter = MetricsExporter(data, {"hotspots": hotspots, "summary": summary})
     json_file = await asyncio.to_thread(exporter.export_json, str(out_dir))
-    
+
     return {
         "status": "success",
         "report_path": json_file
@@ -291,7 +305,7 @@ async def do_update_index(target: str) -> dict:
         await asyncio.to_thread(index.clear_file, filepath)
         content_lines = content.splitlines()
         nodes_to_index = []
-        
+
         for node in walk(tree):
             if isinstance(node, ClassDef):
                 body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
@@ -337,7 +351,7 @@ async def do_update_index(target: str) -> dict:
                         'end_line': m.end_lineno,
                         'metrics': {'cyclomatic_complexity': getattr(m, 'cyclomatic_complexity', 1)}
                     })
-        
+
         for func in tree.functions:
             f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
             nodes_to_index.append({
@@ -349,7 +363,7 @@ async def do_update_index(target: str) -> dict:
                 'end_line': func.end_lineno,
                 'metrics': {'cyclomatic_complexity': getattr(func, 'cyclomatic_complexity', 1)}
             })
-            
+
         if nodes_to_index:
             await asyncio.to_thread(index.index_nodes, nodes_to_index)
 
@@ -366,7 +380,7 @@ async def do_update_index(target: str) -> dict:
             except Exception:
                 pass
         return {"status": "success", "indexed_files": indexed_count, "total_files_found": len(files)}
-        
+
     if path.suffix not in SUPPORTED:
         raise ValueError(f"Unsupported extension: {path.suffix}")
 
@@ -602,7 +616,7 @@ async def handle_completion(
                     if len(files) >= 50:
                         break
                 result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
-                
+
         elif ref.name == "metrics":
             if argument.name == "what":
                 whats = ["oop", "complexity", "hotspots", "all"]
@@ -615,14 +629,14 @@ async def handle_completion(
                 matches = glob.glob(val + "*")
                 paths = sorted(matches)[:20]
                 result = types.Completion(values=paths, has_more=len(matches) > 20)
-                
+
         elif ref.name == "report":
             if argument.name == "repo_path":
                 val = argument.value or ""
                 matches = [m for m in glob.glob(val + "*") if os.path.isdir(m)]
                 paths = sorted(matches)[:20]
                 result = types.Completion(values=paths, has_more=len(matches) > 20)
-                
+
         elif ref.name == "update_index":
             if argument.name == "target":
                 val = argument.value or ""
@@ -668,19 +682,27 @@ async def run_stdio():
 
 async def run_sse(host: str, port: int):
     import uvicorn
-    from starlette.applications import Starlette
-    from starlette.routing import Route
     from mcp.server.sse import SseServerTransport
-    
-    transport = SseServerTransport("/messages/")
+    from fastapi import FastAPI, Request
+    from fastapi.responses import Response, JSONResponse
+    from fastapi.exceptions import HTTPException
 
-    async def handle_sse(request):
+    transport = SseServerTransport("/messages/")
+    app = FastAPI(title="gitstats3 MCP Server (SSE)")
+
+    @app.middleware("http")
+    async def oauth_middleware(request: Request, call_next):
         try:
             verify_oauth_token(request)
         except HTTPException as e:
-            error_name = "invalid_token" if e.status_code == 401 else "invalid_target"
-            return make_auth_error_response(e.status_code, error_name, e.detail)
+            return JSONResponse(
+                status_code=e.status_code,
+                content={"error": "invalid_token", "error_description": e.detail},
+                headers=e.headers
+            )
+        return await call_next(request)
 
+    async def handle_sse(request: Request):
         ACTIVE_SESSIONS.inc()
         try:
             async with transport.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
@@ -691,7 +713,7 @@ async def run_sse(host: str, port: int):
                         server_name="gitstats3",
                         server_version="3.0.0",
                         capabilities=server.get_capabilities(
-                            notification_options=mcp.server.lowlevel.NotificationOptions(),
+                            notification_options=NotificationOptions(),
                             experimental_capabilities={},
                         ),
                     )
@@ -700,31 +722,51 @@ async def run_sse(host: str, port: int):
             ACTIVE_SESSIONS.dec()
         return Response()
 
-    async def handle_messages(request):
-        try:
-            verify_oauth_token(request)
-        except HTTPException as e:
-            error_name = "invalid_token" if e.status_code == 401 else "invalid_target"
-            return make_auth_error_response(e.status_code, error_name, e.detail)
-
-        await transport.handle_post_message(request.scope, request.receive, request._send)
-
-    async def handle_metrics(request):
-        try:
-            verify_oauth_token(request)
-        except HTTPException as e:
-            error_name = "invalid_token" if e.status_code == 401 else "invalid_target"
-            return make_auth_error_response(e.status_code, error_name, e.detail)
-
+    @app.get("/metrics")
+    async def handle_metrics(request: Request):
         data = generate_latest()
-        return Response(data, media_type=CONTENT_TYPE_LATEST)
+        return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
-    app = Starlette(routes=[
-        Route("/sse", endpoint=handle_sse),
-        Route("/messages/", endpoint=handle_messages, methods=["POST"]),
-        Route("/metrics", endpoint=handle_metrics, methods=["GET"]),
-    ])
-    
+    app.add_route("/sse", handle_sse, methods=["GET"])
+    app.mount("/messages/", transport.handle_post_message)
+
+    config = uvicorn.Config(app, host=host, port=port)
+    server_uv = uvicorn.Server(config)
+    await server_uv.serve()
+
+async def run_streamable_http(host: str, port: int):
+    import uvicorn
+    from fastapi import FastAPI, Request
+    from fastapi.responses import Response, JSONResponse
+    from fastapi.exceptions import HTTPException
+
+    app = FastAPI(title="gitstats3 MCP Server (Streamable HTTP)")
+
+    @app.middleware("http")
+    async def oauth_middleware(request: Request, call_next):
+        try:
+            verify_oauth_token(request)
+        except HTTPException as e:
+            return JSONResponse(
+                status_code=e.status_code,
+                content={"error": "invalid_token", "error_description": e.detail},
+                headers=e.headers
+            )
+        return await call_next(request)
+
+    @app.get("/metrics")
+    async def handle_metrics(request: Request):
+        data = generate_latest()
+        return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+    streamable_app = server.streamable_http_app(
+        streamable_http_path="/",
+        json_response=True,
+        stateless_http=True
+    )
+
+    app.mount("/mcp", streamable_app)
+
     config = uvicorn.Config(app, host=host, port=port)
     server_uv = uvicorn.Server(config)
     await server_uv.serve()
@@ -743,14 +785,19 @@ def main():
     elif args.transport == "sse":
         try:
             import uvicorn
-            from starlette.applications import Starlette
+            import fastapi
         except ImportError:
-            print("Error: starlette and uvicorn must be installed to use SSE transport.", file=sys.stderr)
+            print("Error: fastapi and uvicorn must be installed to use SSE transport.", file=sys.stderr)
             sys.exit(1)
         asyncio.run(run_sse(args.host, args.port))
     elif args.transport == "streamable-http":
-        print("streamable-http is not currently supported directly without custom routing.", file=sys.stderr)
-        sys.exit(1)
+        try:
+            import uvicorn
+            import fastapi
+        except ImportError:
+            print("Error: fastapi and uvicorn must be installed to use streamable-http transport.", file=sys.stderr)
+            sys.exit(1)
+        asyncio.run(run_streamable_http(args.host, args.port))
 
 if __name__ == "__main__":
     main()

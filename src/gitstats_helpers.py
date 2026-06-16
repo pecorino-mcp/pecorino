@@ -8,10 +8,9 @@ import os
 import platform
 import re
 import time
-from typing import Dict, List, Any, Tuple
+from typing import Any, Dict, List
 
 from .gitstats_config import get_config
-
 
 # Platform detection
 ON_LINUX = platform.system() == 'Linux'
@@ -90,27 +89,27 @@ def should_include_file(filename: str) -> bool:
         True if the file should be included, False otherwise
     """
     config = get_config()
-    
+
     if not config.filter_by_extensions:
         return True
-    
+
     # Handle hidden files (starting with .)
     basename = os.path.basename(filename)
     if basename.startswith('.') and basename != '.':
         return False
-    
+
     # Check if filename has an extension
     if filename.find('.') == -1:
         # No extension - include common extensionless files
         extensionless_includes = ['Makefile', 'Dockerfile', 'Rakefile', 'Gemfile', 'CMakeLists']
         return basename in extensionless_includes
-    
+
     # Check multi-part extensions first (e.g., .d.ts, .spec.ts)
     filename_lower = filename.lower()
     for ext in config.allowed_extensions:
         if filename_lower.endswith(ext):
             return True
-    
+
     return False
 
 

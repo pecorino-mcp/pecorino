@@ -1,6 +1,7 @@
 import importlib
-import tree_sitter
 from typing import Dict, Optional
+
+import tree_sitter
 
 # Default repository mapping for known languages
 KNOWN_GRAMMARS = {
@@ -20,7 +21,7 @@ class TreeSitterGrammarManager:
     """
     Manages loading Tree-sitter grammars from PyPI packages.
     """
-    
+
     def __init__(self, cache_dir: Optional[str] = None):
         # cache_dir is ignored, kept for backwards compatibility in the constructor
         from pathlib import Path
@@ -55,7 +56,7 @@ class TreeSitterGrammarManager:
 
         if language not in self.grammars:
             raise ValueError(f"Unknown language: {language}. Please add it using add_grammar() first.")
-            
+
         module_name = self.grammars[language]
         try:
             module = importlib.import_module(module_name)

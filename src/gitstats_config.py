@@ -5,9 +5,9 @@ Provides a dataclass-based configuration with sensible defaults
 and a global configuration accessor.
 """
 
-from dataclasses import dataclass, field
-from typing import Set, Optional
 import os
+from dataclasses import dataclass, field
+from typing import Optional, Set
 
 from .gitstats_constants import ALLOWED_EXTENSIONS
 
@@ -15,37 +15,37 @@ from .gitstats_constants import ALLOWED_EXTENSIONS
 @dataclass
 class GitStatsConfig:
     """Configuration settings for gitstats3 analysis."""
-    
+
     # Display settings
     max_domains: int = 10
     max_ext_length: int = 10
     style: str = 'gitstats.css'
     max_authors: int = 20
     authors_top: int = 5
-    
+
     # Commit range settings
     commit_begin: str = ''
     commit_end: str = 'HEAD'
     linear_linestats: int = 1
     project_name: str = ''
     start_date: str = ''
-    
+
     # Processing settings (optimized for low-resource systems)
     processes: int = field(default_factory=lambda: min(2, os.cpu_count() or 1))
-    
+
     # Low memory mode settings
     low_memory_mode: bool = False
     max_cache_entries: int = 1000  # Limit cache size to reduce memory usage
     chunk_size: int = 500  # Process commits in chunks to reduce peak memory
     gc_threshold_mb: int = 512  # Run garbage collection when exceeding this
-    
+
     # Debug settings
     debug: bool = False
     verbose: bool = False
-    
+
     # Branch scanning
     scan_default_branch_only: bool = True
-    
+
     # Multi-repo configuration
     multi_repo_max_depth: int = 10
     multi_repo_include_patterns: Optional[str] = None
@@ -57,12 +57,12 @@ class GitStatsConfig:
     multi_repo_fast_scan: bool = True
     multi_repo_batch_size: int = 10
     multi_repo_progress_interval: int = 5
-    
+
     # File extension filtering (uses centralized constants by default)
     allowed_extensions: Set[str] = field(default_factory=lambda: ALLOWED_EXTENSIONS.copy())
     filter_by_extensions: bool = True
     calculate_mi_per_repository: bool = True
-    
+
     def to_dict(self) -> dict:
         """Convert config to dictionary (for backward compatibility)."""
         return {
@@ -98,7 +98,7 @@ class GitStatsConfig:
             'chunk_size': self.chunk_size,
             'gc_threshold_mb': self.gc_threshold_mb,
         }
-    
+
     @classmethod
     def from_dict(cls, d: dict) -> 'GitStatsConfig':
         """Create config from dictionary."""
@@ -124,11 +124,45 @@ def set_config(config: GitStatsConfig) -> None:
     _config = config
 
 
+from collections.abc import MutableMapping
+
+
+class ConfigDictProxy(MutableMapping):
+    """Proxy object that acts like a dict but delegates to the global _config."""
+
+    def __getitem__(self, key):
+        if not hasattr(_config, key):
+            raise KeyError(key)
+        return getattr(_config, key)
+
+    def __setitem__(self, key, value):
+        if hasattr(_config, key):
+            setattr(_config, key, value)
+        else:
+            # For backward compatibility, some code might set keys that don't exist in dataclass
+            # but we should avoid it. If we must allow it, we can just setattr.
+            # GitStatsConfig doesn't restrict new attributes.
+            setattr(_config, key, value)
+
+    def __delitem__(self, key):
+        if hasattr(_config, key):
+            delattr(_config, key)
+        else:
+            raise KeyError(key)
+
+    def __iter__(self):
+        return iter(_config.to_dict())
+
+    def __len__(self):
+        return len(_config.to_dict())
+
+    def copy(self):
+        return _config.to_dict()
+
 # Backward compatibility: dict-like access
-conf = _config.to_dict()
+conf = ConfigDictProxy()
 
 
 def update_conf_from_config():
-    """Update the backward-compatible conf dict from current config."""
-    global conf
-    conf = _config.to_dict()
+    """Deprecated: conf is now a proxy that automatically reflects _config."""
+    pass

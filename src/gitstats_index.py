@@ -1,14 +1,15 @@
-import sqlite3
-import os
-import json
 import hashlib
-from typing import List, Dict, Any
+import json
+import os
+import sqlite3
+from typing import Any, Dict, List
+
 
 def find_repo_root(filepath: str) -> str:
     """Find the root directory of the repository containing the given filepath."""
     filepath = os.path.abspath(filepath)
     current_dir = filepath if os.path.isdir(filepath) else os.path.dirname(filepath)
-    
+
     while current_dir and current_dir != '/':
         if os.path.isdir(os.path.join(current_dir, '.git')):
             return current_dir
@@ -16,7 +17,7 @@ def find_repo_root(filepath: str) -> str:
         if parent == current_dir:
             break
         current_dir = parent
-        
+
     return filepath if os.path.isdir(filepath) else os.path.dirname(filepath)
 
 def get_db_path_for_repo(repo_path: str) -> str:
@@ -29,7 +30,7 @@ def get_db_path_for_repo(repo_path: str) -> str:
 
 class CodeSearchIndex:
     """SQLite FTS5-backed Semantic Code Search Index."""
-    
+
     def __init__(self, db_path: str = None):
         if db_path is None:
             # Default to a centralized DB for the current working directory's repository
@@ -40,7 +41,7 @@ class CodeSearchIndex:
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
-            # Create an FTS5 virtual table. Note that metrics_json, start_line, end_line 
+            # Create an FTS5 virtual table. Note that metrics_json, start_line, end_line
             # are marked UNINDEXED so they don't bloat the full-text index but can still be returned.
             conn.execute('''
                 CREATE VIRTUAL TABLE IF NOT EXISTS code_nodes_fts USING fts5(
@@ -92,7 +93,7 @@ class CodeSearchIndex:
                 ORDER BY rank
                 LIMIT ?
             ''', (query, limit))
-            
+
             results = []
             for row in cursor:
                 results.append({
@@ -114,7 +115,7 @@ class CodeSearchIndex:
                 FROM code_nodes_fts
                 WHERE filepath = ?
             ''', (filepath,))
-            
+
             results = []
             for row in cursor:
                 results.append({
@@ -138,7 +139,7 @@ class CodeSearchIndex:
                 FROM code_nodes_fts
                 WHERE filepath LIKE ?
             ''', (f"{prefix}%",))
-            
+
             results = []
             for row in cursor:
                 results.append({

@@ -5,8 +5,7 @@ This module centralizes language-specific constants used across the codebase,
 including file extensions for analysis and language keywords for parsing.
 """
 
-from typing import Set, Dict
-
+from typing import Dict, Set
 
 # ============================================================================
 # ALLOWED FILE EXTENSIONS
@@ -17,59 +16,59 @@ from typing import Set, Dict
 ALLOWED_EXTENSIONS: Set[str] = {
     # C/C++ family
     '.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx',
-    
+
     # Objective-C
     '.m', '.mm',
-    
+
     # Apple Swift
     '.swift',
-    
+
     # CUDA
     '.cu', '.cuh',
-    
+
     # OpenCL
     '.cl',
-    
+
     # Java/JVM languages
     '.java', '.scala', '.kt', '.kts',
-    
+
     # Go
     '.go',
-    
+
     # Rust
     '.rs',
-    
+
     # Python
     '.py', '.pyi', '.pyx', '.pxd',
-    
+
     # JavaScript/TypeScript
     '.js', '.mjs', '.cjs', '.jsx',
     '.ts', '.tsx', '.d.ts',
-    
+
     # Lua
     '.lua',
-    
+
     # Protocol Buffers / Thrift
     '.proto', '.thrift',
-    
+
     # Assembly
     '.asm', '.s', '.S',
-    
+
     # R language
     '.R', '.r',
-    
+
     # Ruby
     '.rb', '.rake', '.gemspec',
-    
+
     # PHP
     '.php', '.phtml',
-    
+
     # C#
     '.cs',
-    
+
     # Shell scripts
     '.sh', '.bash', '.zsh',
-    
+
     # Perl
     '.pl', '.pm',
 }
@@ -99,7 +98,7 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
         # Other
         'pass', 'del',
     },
-    
+
     'java': {
         # Control flow
         'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
@@ -119,7 +118,7 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
         # Values
         'void', 'null', 'true', 'false',
     },
-    
+
     'javascript': {
         # Control flow
         'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
@@ -138,7 +137,7 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
         # Values
         'null', 'undefined', 'true', 'false', 'NaN', 'Infinity',
     },
-    
+
     'typescript': {
         # Control flow (same as JS)
         'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
@@ -160,7 +159,7 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
         # Values
         'null', 'undefined', 'true', 'false',
     },
-    
+
     'cpp': {
         # Control flow
         'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
@@ -182,7 +181,7 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
         # Values
         'nullptr', 'true', 'false',
     },
-    
+
     'go': {
         # Control flow
         'if', 'else', 'for', 'switch', 'case', 'default',
@@ -197,7 +196,7 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
         # Values
         'nil', 'true', 'false', 'iota',
     },
-    
+
     'rust': {
         # Control flow
         'if', 'else', 'for', 'while', 'loop', 'match',
@@ -214,7 +213,7 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
         # Other
         'where', 'as', 'in',
     },
-    
+
     'swift': {
         # Control flow
         'if', 'else', 'guard', 'switch', 'case', 'default',
@@ -249,32 +248,32 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
 EXTENSION_TO_LANGUAGE: Dict[str, str] = {
     # Python
     '.py': 'python', '.pyi': 'python', '.pyx': 'python', '.pxd': 'python',
-    
+
     # JavaScript
     '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.jsx': 'javascript',
-    
+
     # TypeScript
     '.ts': 'typescript', '.tsx': 'typescript', '.d.ts': 'typescript',
-    
+
     # Java
     '.java': 'java',
-    
+
     # Kotlin
     '.kt': 'java', '.kts': 'java',  # Similar keywords
-    
+
     # Scala
     '.scala': 'java',  # Similar keywords
-    
+
     # C/C++
     '.c': 'cpp', '.cc': 'cpp', '.cpp': 'cpp', '.cxx': 'cpp',
     '.h': 'cpp', '.hh': 'cpp', '.hpp': 'cpp', '.hxx': 'cpp',
-    
+
     # Go
     '.go': 'go',
-    
+
     # Rust
     '.rs': 'rust',
-    
+
     # Swift
     '.swift': 'swift',
 }
@@ -289,16 +288,16 @@ CONTROL_FLOW_KEYWORDS: Set[str] = {
     # Conditionals
     'if', 'else', 'elif', 'elsif', 'elseif',
     'switch', 'case', 'default', 'match', 'when', 'guard',
-    
+
     # Loops
     'for', 'while', 'do', 'loop', 'repeat', 'foreach',
-    
+
     # Loop control
     'break', 'continue', 'fallthrough', 'goto',
-    
+
     # Exception handling
     'try', 'catch', 'except', 'finally', 'throw', 'raise',
-    
+
     # Return
     'return', 'yield',
 }

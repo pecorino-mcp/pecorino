@@ -22,25 +22,20 @@ Author: GitStats3 Enhancement
 Date: 2025
 """
 
-import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Dict, List, Optional, Set, Any, Iterator, Tuple
+from typing import Dict, List
 
-
-from src.gitstats_ast import (
-    ASTNode, ClassDef, InterfaceDef, FunctionDef, ImportDef, AttributeDef, ModuleDef, walk, iter_child_nodes
-)
+from src.gitstats_ast import ClassDef, ImportDef, InterfaceDef, walk
 from src.gitstats_tree_sitter_parser import parse_with_tree_sitter
+
 
 def parse(source: str, extension: str = '.py'):
     return parse_with_tree_sitter(source, extension)
 
 class OOPMetricsAnalyzer:
 	"""Analyzer for Object-Oriented Programming metrics with focus on Distance from Main Sequence."""
-	
+
 	def __init__(self, use_ast: bool = True, repo_path: str = None):
 		"""Initialize the OOP metrics analyzer.
 		
@@ -56,7 +51,7 @@ class OOPMetricsAnalyzer:
 		from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo
 		db_path = get_db_path_for_repo(repo_path) if repo_path else None
 		self.search_index = CodeSearchIndex(db_path)
-		
+
 	def analyze_file(self, filepath: str, content: str, file_extension: str) -> Dict:
 		"""
 		Analyze a single file for OOP metrics.
@@ -102,10 +97,10 @@ class OOPMetricsAnalyzer:
 				'avg_lcom': 0.0,
 			}
 		}
-		
+
 		if not content.strip():
 			return metrics
-		
+
 		try:
 			# Try AST-based analysis first (more accurate)
 			if self.use_ast:
@@ -118,18 +113,18 @@ class OOPMetricsAnalyzer:
 			else:
 				# Use regex-based analysis
 				metrics.update(self._analyze_with_regex(content, filepath, file_extension))
-			
+
 			# Calculate derived metrics
 			metrics = self._calculate_derived_metrics(metrics)
-			
+
 			# Store for package-level analysis
 			self.files[filepath] = metrics
-			
+
 		except Exception as e:
 			print(f'Warning: OOP metrics calculation failed for {filepath}: {e}')
-		
+
 		return metrics
-	
+
 	def _analyze_with_ast(self, content: str, filepath: str, file_extension: str) -> Dict:
 		"""
 		Analyze file using AST-based parsing (more accurate than regex).
@@ -144,12 +139,12 @@ class OOPMetricsAnalyzer:
 		"""
 		if False:  # AST always available in combined module
 			return None
-		
+
 		try:
 			tree = parse(content, file_extension)
 			content_lines = content.splitlines()
 			self.search_index.clear_file(filepath)
-			
+
 			metrics = {
 				'classes_defined': 0,
 				'abstract_classes': 0,
@@ -170,15 +165,15 @@ class OOPMetricsAnalyzer:
 				},
 				# Drill-down: per-class metrics
 				'classes': [],
-				# Drill-down: per-function metrics 
+				# Drill-down: per-function metrics
 				'functions': []
 			}
-			
+
 			# Collect all classes for CK metrics calculation
 			all_classes = []
 			all_class_names = set()
 			inheritance_map = {}
-			
+
 			# First pass: collect class info
 			for node in walk(tree):
 				if isinstance(node, ClassDef):
@@ -187,7 +182,7 @@ class OOPMetricsAnalyzer:
 					inheritance_map[node.name] = node.bases
 				elif isinstance(node, InterfaceDef):
 					all_class_names.add(node.name)
-			
+
 			# Second pass: calculate metrics
 			for node in walk(tree):
 				if isinstance(node, ClassDef):
@@ -196,15 +191,15 @@ class OOPMetricsAnalyzer:
 						metrics['abstract_classes'] += 1
 					metrics['method_count'] += len(node.methods)
 					metrics['attribute_count'] += len(node.attributes)
-					
+
 					# Apply CK metrics to this class
 					apply_ck_metrics_to_class(node, all_classes, inheritance_map, all_class_names)
-					
+
 					# Aggregate CK metrics at file level
 					metrics['ck_metrics']['wmc_total'] += node.wmc
 					metrics['ck_metrics']['max_dit'] = max(metrics['ck_metrics']['max_dit'], node.dit)
 					metrics['ck_metrics']['total_noc'] += node.noc
-					
+
 					# Index class
 					body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
 					self.search_index.index_node(
@@ -216,7 +211,7 @@ class OOPMetricsAnalyzer:
 						end_line=node.end_lineno,
 						metrics={'wmc': node.wmc, 'cbo': node.cbo, 'rfc': node.rfc, 'lcom': node.lcom}
 					)
-					
+
 					# Store per-class details for drill-down
 					class_info = {
 						'name': node.name,
@@ -247,7 +242,7 @@ class OOPMetricsAnalyzer:
 						]
 					}
 					metrics['classes'].append(class_info)
-					
+
 					for m in node.methods:
 						m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
 						self.search_index.index_node(
@@ -259,16 +254,16 @@ class OOPMetricsAnalyzer:
 							end_line=m.end_lineno,
 							metrics={'cyclomatic_complexity': m.cyclomatic_complexity}
 						)
-				
+
 				elif isinstance(node, InterfaceDef):
 					metrics['interfaces_defined'] += 1
 					metrics['abstract_classes'] += 1  # Interfaces are abstract
 					metrics['method_count'] += len(node.methods)
-				
+
 				elif isinstance(node, ImportDef):
 					if node.module:
 						metrics['dependencies'].append(node.module)
-			
+
 			# Calculate averages for CK metrics
 			if metrics['classes_defined'] > 0:
 				metrics['ck_metrics']['avg_wmc'] = metrics['ck_metrics']['wmc_total'] / metrics['classes_defined']
@@ -278,7 +273,7 @@ class OOPMetricsAnalyzer:
 				metrics['ck_metrics']['avg_cbo'] = total_cbo / metrics['classes_defined']
 				metrics['ck_metrics']['avg_rfc'] = total_rfc / metrics['classes_defined']
 				metrics['ck_metrics']['avg_lcom'] = total_lcom / metrics['classes_defined']
-			
+
 			# Store standalone function metrics for drill-down
 			for func in tree.functions:
 				metrics['functions'].append({
@@ -288,7 +283,7 @@ class OOPMetricsAnalyzer:
 					'accessed_attributes': list(func.accessed_attributes),
 					'called_methods': list(func.called_methods),
 				})
-				
+
 				f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
 				self.search_index.index_node(
 					name=func.name,
@@ -299,23 +294,23 @@ class OOPMetricsAnalyzer:
 					end_line=func.end_lineno,
 					metrics={'cyclomatic_complexity': func.cyclomatic_complexity}
 				)
-			
+
 			# Calculate function-level metrics for all files (OOP and non-OOP)
 			metrics['function_count'] = len(tree.functions)
 			metrics['function_wmc'] = sum(f['cyclomatic_complexity'] for f in metrics['functions'])
-			
+
 			# Deduplicate dependencies
 			metrics['dependencies'] = list(set(metrics['dependencies']))
 			metrics['efferent_coupling'] = len(metrics['dependencies'])
-			
+
 			# Store dependencies for afferent coupling calculation
 			self.dependencies[filepath] = set(metrics['dependencies'])
-			
+
 			return metrics
-			
+
 		except Exception:
 			return None
-	
+
 	def _analyze_with_regex(self, content: str, filepath: str, file_extension: str) -> Dict:
 		"""
 		Analyze file using regex-based parsing (fallback method).
@@ -330,7 +325,7 @@ class OOPMetricsAnalyzer:
 		"""
 		# Remove comments and strings for accurate analysis
 		cleaned_content = self._remove_comments_and_strings(content, file_extension)
-		
+
 		# Language-specific OOP analysis
 		if file_extension in ['.java', '.scala', '.kt']:
 			return self._analyze_java_oop(cleaned_content, filepath)
@@ -346,9 +341,9 @@ class OOPMetricsAnalyzer:
 			return self._analyze_go_oop(cleaned_content, filepath)
 		elif file_extension in ['.rs']:
 			return self._analyze_rust_oop(cleaned_content, filepath)
-		
+
 		return {}
-	
+
 	def _calculate_derived_metrics(self, metrics: Dict) -> Dict:
 		"""
 		Calculate derived OOP metrics from base measurements.
@@ -364,31 +359,31 @@ class OOPMetricsAnalyzer:
 			metrics['abstractness'] = metrics['abstract_classes'] / metrics['classes_defined']
 		else:
 			metrics['abstractness'] = 0.0
-		
+
 		# Calculate Instability: I = Ce / (Ce + Ca)
 		ce = metrics['efferent_coupling']
 		ca = metrics['afferent_coupling']
-		
+
 		if (ce + ca) > 0:
 			metrics['instability'] = ce / (ce + ca)
 		else:
 			metrics['instability'] = 0.0
-		
+
 		# Calculate Distance from Main Sequence: D = |A + I - 1|
 		a = metrics['abstractness']
 		i = metrics['instability']
 		metrics['distance_main_sequence'] = abs(a + i - 1.0)
-		
+
 		# Add overall coupling metric
 		metrics['coupling'] = ce + ca
-		
+
 		# Determine zone and interpretation
 		metrics['zone'] = self._determine_zone(a, i, metrics['distance_main_sequence'])
-		metrics['interpretation'] = self._interpret_distance(metrics['distance_main_sequence'], 
+		metrics['interpretation'] = self._interpret_distance(metrics['distance_main_sequence'],
 															  a, i, metrics['zone'])
-		
+
 		return metrics
-	
+
 	def _determine_zone(self, abstractness: float, instability: float, distance: float) -> str:
 		"""
 		Determine which zone the package/file falls into.
@@ -404,24 +399,24 @@ class OOPMetricsAnalyzer:
 		# Main Sequence: Ideal zone where D is close to 0
 		if distance < 0.2:
 			return 'main_sequence'
-		
+
 		# Zone of Pain: High stability (low I), low abstraction (low A)
 		# A → 0, I → 0, making A + I - 1 → -1, so D → 1
 		if abstractness < 0.3 and instability < 0.3:
 			return 'zone_of_pain'
-		
+
 		# Zone of Uselessness: High abstraction (high A), low stability (high I)
 		# A → 1, I → 1, making A + I - 1 → 1, so D → 1
 		if abstractness > 0.7 and instability > 0.7:
 			return 'zone_of_uselessness'
-		
+
 		# Transitional zones
 		if distance < 0.4:
 			return 'near_main_sequence'
 		else:
 			return 'far_from_main_sequence'
-	
-	def _interpret_distance(self, distance: float, abstractness: float, 
+
+	def _interpret_distance(self, distance: float, abstractness: float,
 						   instability: float, zone: str) -> str:
 		"""
 		Provide interpretation of the distance metric.
@@ -442,9 +437,9 @@ class OOPMetricsAnalyzer:
 			'zone_of_uselessness': 'Poor - Package is too abstract and unstable (unused abstractions)',
 			'far_from_main_sequence': 'Poor - Package needs significant refactoring'
 		}
-		
+
 		return interpretations.get(zone, 'Unknown design state')
-	
+
 	def _remove_comments_and_strings(self, content: str, file_extension: str) -> str:
 		"""
 		Remove comments and string literals from code.
@@ -463,17 +458,17 @@ class OOPMetricsAnalyzer:
 			content = re.sub(r"'''.*?'''", '', content, flags=re.DOTALL)
 			content = re.sub(r'"[^"]*"', '', content)
 			content = re.sub(r"'[^']*'", '', content)
-			
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.kt', 
+
+		elif file_extension in ['.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.kt',
 							   '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.go', '.rs']:
 			# Remove C-style comments and strings
 			content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
 			content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
 			content = re.sub(r'"[^"]*"', '', content)
 			content = re.sub(r"'[^']*'", '', content)
-		
+
 		return content
-	
+
 	def _analyze_java_oop(self, content: str, filepath: str) -> Dict:
 		"""Analyze OOP metrics for Java/Scala/Kotlin files."""
 		metrics = {
@@ -486,7 +481,7 @@ class OOPMetricsAnalyzer:
 			'attribute_count': 0,
 			'dependencies': []
 		}
-		
+
 		# Count classes (including inner classes)
 		class_patterns = [
 			r'\bclass\s+(\w+)',
@@ -496,7 +491,7 @@ class OOPMetricsAnalyzer:
 		for pattern in class_patterns:
 			matches = re.findall(pattern, content, re.MULTILINE)
 			metrics['classes_defined'] += len(matches)
-		
+
 		# Count abstract classes
 		abstract_patterns = [
 			r'\babstract\s+class\s+(\w+)',
@@ -505,12 +500,12 @@ class OOPMetricsAnalyzer:
 		for pattern in abstract_patterns:
 			matches = re.findall(pattern, content, re.MULTILINE)
 			metrics['abstract_classes'] += len(matches)
-		
+
 		# Count interfaces
 		interface_matches = re.findall(r'\binterface\s+(\w+)', content, re.MULTILINE)
 		metrics['interfaces_defined'] = len(interface_matches)
 		metrics['abstract_classes'] += len(interface_matches)  # Interfaces are abstract
-		
+
 		# Count methods
 		method_patterns = [
 			r'\b(public|private|protected|static).*\s+\w+\s*\([^)]*\)\s*\{',
@@ -519,7 +514,7 @@ class OOPMetricsAnalyzer:
 		for pattern in method_patterns:
 			matches = re.findall(pattern, content, re.MULTILINE)
 			metrics['method_count'] += len(matches)
-		
+
 		# Count attributes/fields
 		field_patterns = [
 			r'\b(public|private|protected|static)\s+[\w<>,\[\]]+\s+\w+\s*[=;]'
@@ -527,17 +522,17 @@ class OOPMetricsAnalyzer:
 		for pattern in field_patterns:
 			matches = re.findall(pattern, content, re.MULTILINE)
 			metrics['attribute_count'] += len(matches)
-		
+
 		# Analyze dependencies (efferent coupling)
 		import_matches = re.findall(r'\bimport\s+([\w.]+)', content)
 		metrics['dependencies'] = list(set(import_matches))
 		metrics['efferent_coupling'] = len(metrics['dependencies'])
-		
+
 		# Store dependencies for later analysis
 		self.dependencies[filepath] = set(metrics['dependencies'])
-		
+
 		return metrics
-	
+
 	def _analyze_python_oop(self, content: str, filepath: str) -> Dict:
 		"""Analyze OOP metrics for Python files."""
 		metrics = {
@@ -550,11 +545,11 @@ class OOPMetricsAnalyzer:
 			'attribute_count': 0,
 			'dependencies': []
 		}
-		
+
 		# Count classes
 		class_matches = re.findall(r'^class\s+(\w+).*:', content, re.MULTILINE)
 		metrics['classes_defined'] = len(class_matches)
-		
+
 		# Count abstract classes (ABC or abstractmethod)
 		abstract_patterns = [
 			r'from\s+abc\s+import',
@@ -578,15 +573,15 @@ class OOPMetricsAnalyzer:
 				metrics['abstract_classes'] = 0
 		else:
 			metrics['abstract_classes'] = 0
-		
+
 		# Count methods (def within classes)
 		method_matches = re.findall(r'^\s+def\s+(\w+)\s*\(.*\):', content, re.MULTILINE)
 		metrics['method_count'] = len(method_matches)
-		
+
 		# Count attributes (self.attribute assignments)
 		attribute_matches = re.findall(r'self\.(\w+)\s*=', content)
 		metrics['attribute_count'] = len(set(attribute_matches))
-		
+
 		# Analyze dependencies (efferent coupling)
 		import_patterns = [
 			r'^from\s+([\w.]+)\s+import',
@@ -596,15 +591,15 @@ class OOPMetricsAnalyzer:
 		for pattern in import_patterns:
 			matches = re.findall(pattern, content, re.MULTILINE)
 			dependencies.extend(matches)
-		
+
 		metrics['dependencies'] = list(set(dependencies))
 		metrics['efferent_coupling'] = len(metrics['dependencies'])
-		
+
 		# Store dependencies for later analysis
 		self.dependencies[filepath] = set(metrics['dependencies'])
-		
+
 		return metrics
-	
+
 	def _analyze_cpp_oop(self, content: str, filepath: str) -> Dict:
 		"""Analyze OOP metrics for C++ files."""
 		metrics = {
@@ -617,7 +612,7 @@ class OOPMetricsAnalyzer:
 			'attribute_count': 0,
 			'dependencies': []
 		}
-		
+
 		# Count classes and structs
 		class_patterns = [
 			r'\bclass\s+(\w+)',
@@ -626,12 +621,12 @@ class OOPMetricsAnalyzer:
 		for pattern in class_patterns:
 			matches = re.findall(pattern, content)
 			metrics['classes_defined'] += len(matches)
-		
+
 		# Count abstract classes (virtual methods = 0)
 		virtual_matches = re.findall(r'virtual\s+.*\s*=\s*0\s*;', content)
 		if virtual_matches:
 			metrics['abstract_classes'] = 1  # Conservative estimate
-		
+
 		# Count methods
 		method_patterns = [
 			r'\b\w+\s*\([^)]*\)\s*\{',
@@ -640,7 +635,7 @@ class OOPMetricsAnalyzer:
 		for pattern in method_patterns:
 			matches = re.findall(pattern, content, re.MULTILINE)
 			metrics['method_count'] += len(matches)
-		
+
 		# Count attributes (member variables)
 		member_patterns = [
 			r'\b(public|private|protected):\s*\n\s*[\w<>,\*&\[\]]+\s+\w+\s*;'
@@ -648,17 +643,17 @@ class OOPMetricsAnalyzer:
 		for pattern in member_patterns:
 			matches = re.findall(pattern, content, re.MULTILINE)
 			metrics['attribute_count'] += len(matches)
-		
+
 		# Analyze dependencies (includes)
 		include_matches = re.findall(r'#include\s*[<"]([\w./]+)[>"]', content)
 		metrics['dependencies'] = list(set(include_matches))
 		metrics['efferent_coupling'] = len(metrics['dependencies'])
-		
+
 		# Store dependencies
 		self.dependencies[filepath] = set(metrics['dependencies'])
-		
+
 		return metrics
-	
+
 	def _analyze_javascript_oop(self, content: str, filepath: str) -> Dict:
 		"""Analyze OOP metrics for JavaScript/TypeScript files."""
 		metrics = {
@@ -671,20 +666,20 @@ class OOPMetricsAnalyzer:
 			'attribute_count': 0,
 			'dependencies': []
 		}
-		
+
 		# Count classes
 		class_matches = re.findall(r'\bclass\s+(\w+)', content)
 		metrics['classes_defined'] = len(class_matches)
-		
+
 		# Count interfaces (TypeScript)
 		interface_matches = re.findall(r'\binterface\s+(\w+)', content)
 		metrics['interfaces_defined'] = len(interface_matches)
 		metrics['abstract_classes'] += len(interface_matches)
-		
+
 		# Count abstract classes (TypeScript)
 		abstract_matches = re.findall(r'\babstract\s+class\s+(\w+)', content)
 		metrics['abstract_classes'] += len(abstract_matches)
-		
+
 		# Count methods
 		method_patterns = [
 			r'\b\w+\s*\([^)]*\)\s*\{',
@@ -693,7 +688,7 @@ class OOPMetricsAnalyzer:
 		for pattern in method_patterns:
 			matches = re.findall(pattern, content)
 			metrics['method_count'] += len(matches)
-		
+
 		# Count properties/attributes
 		property_patterns = [
 			r'this\.(\w+)\s*=',
@@ -702,7 +697,7 @@ class OOPMetricsAnalyzer:
 		for pattern in property_patterns:
 			matches = re.findall(pattern, content)
 			metrics['attribute_count'] += len(matches)
-		
+
 		# Analyze dependencies
 		import_patterns = [
 			r'import\s+.*\s+from\s+["\']+([\w./]+)["\']',
@@ -712,15 +707,15 @@ class OOPMetricsAnalyzer:
 		for pattern in import_patterns:
 			matches = re.findall(pattern, content)
 			dependencies.extend(matches)
-		
+
 		metrics['dependencies'] = list(set(dependencies))
 		metrics['efferent_coupling'] = len(metrics['dependencies'])
-		
+
 		# Store dependencies
 		self.dependencies[filepath] = set(metrics['dependencies'])
-		
+
 		return metrics
-	
+
 	def _analyze_swift_oop(self, content: str, filepath: str) -> Dict:
 		"""Analyze OOP metrics for Swift files."""
 		metrics = {
@@ -733,7 +728,7 @@ class OOPMetricsAnalyzer:
 			'attribute_count': 0,
 			'dependencies': []
 		}
-		
+
 		# Count classes and structs
 		class_patterns = [
 			r'\bclass\s+(\w+)',
@@ -742,16 +737,16 @@ class OOPMetricsAnalyzer:
 		for pattern in class_patterns:
 			matches = re.findall(pattern, content)
 			metrics['classes_defined'] += len(matches)
-		
+
 		# Count protocols (Swift's interfaces)
 		protocol_matches = re.findall(r'\bprotocol\s+(\w+)', content)
 		metrics['interfaces_defined'] = len(protocol_matches)
 		metrics['abstract_classes'] += len(protocol_matches)
-		
+
 		# Count methods/functions
 		method_matches = re.findall(r'\bfunc\s+(\w+)\s*\(', content)
 		metrics['method_count'] = len(method_matches)
-		
+
 		# Count properties
 		property_patterns = [
 			r'\bvar\s+(\w+)\s*:',
@@ -760,17 +755,17 @@ class OOPMetricsAnalyzer:
 		for pattern in property_patterns:
 			matches = re.findall(pattern, content)
 			metrics['attribute_count'] += len(matches)
-		
+
 		# Analyze dependencies
 		import_matches = re.findall(r'\bimport\s+(\w+)', content)
 		metrics['dependencies'] = list(set(import_matches))
 		metrics['efferent_coupling'] = len(metrics['dependencies'])
-		
+
 		# Store dependencies
 		self.dependencies[filepath] = set(metrics['dependencies'])
-		
+
 		return metrics
-	
+
 	def _analyze_go_oop(self, content: str, filepath: str) -> Dict:
 		"""Analyze OOP-like metrics for Go files."""
 		metrics = {
@@ -783,34 +778,34 @@ class OOPMetricsAnalyzer:
 			'attribute_count': 0,
 			'dependencies': []
 		}
-		
+
 		# Count structs (Go's equivalent to classes)
 		struct_matches = re.findall(r'\btype\s+(\w+)\s+struct\s*\{', content)
 		metrics['classes_defined'] = len(struct_matches)
-		
+
 		# Count interfaces
 		interface_matches = re.findall(r'\btype\s+(\w+)\s+interface\s*\{', content)
 		metrics['interfaces_defined'] = len(interface_matches)
 		metrics['abstract_classes'] = len(interface_matches)
-		
+
 		# Count methods (functions with receivers)
 		method_matches = re.findall(r'\bfunc\s*\([^)]*\)\s*(\w+)\s*\(', content)
 		metrics['method_count'] = len(method_matches)
-		
+
 		# Count struct fields
 		field_matches = re.findall(r'^\s*(\w+)\s+[\w\[\]\*]+\s*$', content, re.MULTILINE)
 		metrics['attribute_count'] = len(field_matches)
-		
+
 		# Analyze dependencies
 		import_matches = re.findall(r'\bimport\s+["\']([\\w/.-]+)["\']', content)
 		metrics['dependencies'] = list(set(import_matches))
 		metrics['efferent_coupling'] = len(metrics['dependencies'])
-		
+
 		# Store dependencies
 		self.dependencies[filepath] = set(metrics['dependencies'])
-		
+
 		return metrics
-	
+
 	def _analyze_rust_oop(self, content: str, filepath: str) -> Dict:
 		"""Analyze OOP-like metrics for Rust files."""
 		metrics = {
@@ -823,37 +818,37 @@ class OOPMetricsAnalyzer:
 			'attribute_count': 0,
 			'dependencies': []
 		}
-		
+
 		# Count structs and enums
 		struct_matches = re.findall(r'\bstruct\s+(\w+)', content)
 		enum_matches = re.findall(r'\benum\s+(\w+)', content)
 		metrics['classes_defined'] = len(struct_matches) + len(enum_matches)
-		
+
 		# Count traits (Rust's interfaces)
 		trait_matches = re.findall(r'\btrait\s+(\w+)', content)
 		metrics['interfaces_defined'] = len(trait_matches)
 		metrics['abstract_classes'] = len(trait_matches)
-		
+
 		# Count impl methods
 		method_matches = re.findall(r'\bfn\s+(\w+)\s*\(', content)
 		metrics['method_count'] = len(method_matches)
-		
+
 		# Count struct fields
 		field_matches = re.findall(r'^\s*(\w+)\s*:\s*[\w<>,\[\]]+\s*,?', content, re.MULTILINE)
 		metrics['attribute_count'] = len(field_matches)
-		
+
 		# Analyze dependencies
 		use_matches = re.findall(r'\buse\s+([\w:]+)', content)
 		extern_matches = re.findall(r'\bextern\s+crate\s+(\w+)', content)
 		dependencies = use_matches + extern_matches
 		metrics['dependencies'] = list(set(dependencies))
 		metrics['efferent_coupling'] = len(metrics['dependencies'])
-		
+
 		# Store dependencies
 		self.dependencies[filepath] = set(metrics['dependencies'])
-		
+
 		return metrics
-	
+
 	def calculate_afferent_coupling(self):
 		"""
 		Calculate afferent coupling (Ca) for all files based on dependency analysis.
@@ -867,15 +862,15 @@ class OOPMetricsAnalyzer:
 					# Simple matching: if dependency name is in target file path
 					if dep.replace('.', '/') in target_file or dep in target_file:
 						self.dependents[target_file].add(filepath)
-		
+
 		# Update afferent coupling counts
 		for filepath, metrics in self.files.items():
 			metrics['afferent_coupling'] = len(self.dependents.get(filepath, set()))
 			metrics['dependents'] = list(self.dependents.get(filepath, set()))
-			
+
 			# Recalculate derived metrics with updated afferent coupling
 			self.files[filepath] = self._calculate_derived_metrics(metrics)
-	
+
 	def analyze_package(self, package_path: str) -> Dict:
 		"""
 		Aggregate OOP metrics at the package level.
@@ -887,16 +882,16 @@ class OOPMetricsAnalyzer:
 			Dictionary containing aggregated package metrics
 		"""
 		package_files = [fp for fp in self.files.keys() if fp.startswith(package_path)]
-		
+
 		if not package_files:
 			return None
-		
+
 		# Aggregate metrics
 		total_classes = sum(self.files[fp]['classes_defined'] for fp in package_files)
 		total_abstract = sum(self.files[fp]['abstract_classes'] for fp in package_files)
 		total_ce = sum(self.files[fp]['efferent_coupling'] for fp in package_files)
 		total_ca = sum(self.files[fp]['afferent_coupling'] for fp in package_files)
-		
+
 		# Calculate package-level metrics
 		package_metrics = {
 			'package_path': package_path,
@@ -908,7 +903,7 @@ class OOPMetricsAnalyzer:
 			'abstractness': total_abstract / total_classes if total_classes > 0 else 0.0,
 			'instability': total_ce / (total_ce + total_ca) if (total_ce + total_ca) > 0 else 0.0
 		}
-		
+
 		# Calculate distance from main sequence
 		a = package_metrics['abstractness']
 		i = package_metrics['instability']
@@ -917,10 +912,10 @@ class OOPMetricsAnalyzer:
 		package_metrics['interpretation'] = self._interpret_distance(
 			package_metrics['distance_main_sequence'], a, i, package_metrics['zone']
 		)
-		
+
 		self.packages[package_path] = package_metrics
 		return package_metrics
-	
+
 	def get_summary_report(self) -> Dict:
 		"""
 		Generate a summary report of all analyzed OOP metrics.
@@ -930,10 +925,10 @@ class OOPMetricsAnalyzer:
 		"""
 		if not self.files:
 			return {'error': 'No files analyzed'}
-		
+
 		distances = [m['distance_main_sequence'] for m in self.files.values()]
 		zones = [m['zone'] for m in self.files.values()]
-		
+
 		report = {
 			'total_files_analyzed': len(self.files),
 			'average_distance': sum(distances) / len(distances) if distances else 0.0,
@@ -953,9 +948,9 @@ class OOPMetricsAnalyzer:
 			},
 			'recommendations': self._generate_recommendations(distances, zones)
 		}
-		
+
 		return report
-	
+
 	def _generate_recommendations(self, distances: List[float], zones: List[str]) -> List[str]:
 		"""
 		Generate recommendations based on OOP metrics analysis.
@@ -968,9 +963,9 @@ class OOPMetricsAnalyzer:
 			List of recommendation strings
 		"""
 		recommendations = []
-		
+
 		avg_distance = sum(distances) / len(distances) if distances else 0.0
-		
+
 		if avg_distance > 0.4:
 			recommendations.append(
 				"⚠️  Average distance from main sequence is high (> 0.4). "
@@ -986,21 +981,21 @@ class OOPMetricsAnalyzer:
 				"✅ Average distance from main sequence is good (< 0.2). "
 				"Package design is well-balanced."
 			)
-		
+
 		pain_count = zones.count('zone_of_pain')
 		if pain_count > 0:
 			recommendations.append(
 				f"🔴 {pain_count} file(s) in Zone of Pain (stable but concrete). "
 				"Consider adding abstraction layers to improve extensibility."
 			)
-		
+
 		useless_count = zones.count('zone_of_uselessness')
 		if useless_count > 0:
 			recommendations.append(
 				f"🟡 {useless_count} file(s) in Zone of Uselessness (abstract but unstable). "
 				"Consider adding concrete implementations or removing unused abstractions."
 			)
-		
+
 		return recommendations
 
 

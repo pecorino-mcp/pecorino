@@ -11,8 +11,8 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from typing import Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict
 
 from .gitstats_config import conf
 from .gitstats_export import DateTimeEncoder, MetricsExporter, export_to_json
@@ -110,10 +110,6 @@ class GitStats:
 				conf['verbose'] = True
 			elif o == '--multi-repo':
 				multi_repo_mode = True
-			elif o == '--export-json':
-				export_json = True
-			elif o == '--export-yaml':
-				export_yaml = True
 			elif o == '--no-hotspots':
 				analyze_hotspots_enabled = False
 			elif o in ('-h', '--help'):

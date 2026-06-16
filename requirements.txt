@@ -11,6 +11,7 @@ tree-sitter-rust
 tree-sitter-ruby
 tree-sitter-swift
 pydantic
+fastapi
 
 -e ./modules/python-sdk
 

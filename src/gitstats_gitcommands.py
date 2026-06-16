@@ -6,13 +6,12 @@ Provides safe wrappers for executing git commands via subprocess.
 
 import os
 import subprocess
-import time
 import threading
-from typing import List, Optional, Tuple
+import time
+from typing import List
 
 from .gitstats_config import get_config
 from .gitstats_helpers import ON_LINUX
-
 
 # Thread-safe tracking of external execution time
 _exectime_external = 0.0
@@ -48,7 +47,7 @@ def getpipeoutput(cmds: List[str], quiet: bool = False) -> str:
     global _exectime_external
     config = get_config()
     start = time.time()
-    
+
     # Basic input validation to prevent command injection
     for cmd in cmds:
         if not isinstance(cmd, str):
@@ -56,34 +55,34 @@ def getpipeoutput(cmds: List[str], quiet: bool = False) -> str:
         # Check for obvious command injection attempts
         if any(dangerous in cmd for dangerous in [';', '&&', '||', '`', '$(']):
             print(f'Warning: Potentially dangerous command detected: {cmd}')
-    
+
     if (not quiet and ON_LINUX and os.isatty(1)) or config.verbose:
         print('>> ' + ' | '.join(cmds), end='')
         import sys
         sys.stdout.flush()
-    
+
     p = subprocess.Popen(cmds[0], stdout=subprocess.PIPE, shell=True)
     processes = [p]
     for x in cmds[1:]:
         p = subprocess.Popen(x, stdin=p.stdout, stdout=subprocess.PIPE, shell=True)
         processes.append(p)
-    
+
     output = p.communicate()[0]
     for proc in processes:
         proc.wait()
-    
+
     end = time.time()
     if not quiet or config.verbose or config.debug:
         if ON_LINUX and os.isatty(1):
             print('\r', end='')
         print('[%.5f] >> %s' % (end - start, ' | '.join(cmds)))
-    
+
     if config.debug:
         print(f'DEBUG: Command output ({len(output)} bytes): {output[:200].decode("utf-8", errors="replace")}...')
-    
+
     with _exectime_lock:
         _exectime_external += (end - start)
-    
+
     return output.decode('utf-8', errors='replace').rstrip('\n')
 
 
@@ -101,12 +100,12 @@ def getpipeoutput_list(cmd_list: List[str], quiet: bool = False) -> str:
     global _exectime_external
     config = get_config()
     start = time.time()
-    
+
     if (not quiet and ON_LINUX and os.isatty(1)) or config.verbose:
         print('>> ' + ' '.join(cmd_list), end='')
         import sys
         sys.stdout.flush()
-    
+
     try:
         p = subprocess.Popen(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, error = p.communicate()
@@ -119,19 +118,19 @@ def getpipeoutput_list(cmd_list: List[str], quiet: bool = False) -> str:
         if not quiet:
             print(f'\nCommand execution failed: {e}')
         return ''
-    
+
     end = time.time()
     if not quiet or config.verbose or config.debug:
         if ON_LINUX and os.isatty(1):
             print('\r', end='')
         print('[%.5f] >> %s' % (end - start, ' '.join(cmd_list)))
-    
+
     if config.debug:
         print(f'DEBUG: Command output ({len(output)} bytes): {output[:200].decode("utf-8", errors="replace")}...')
-    
+
     with _exectime_lock:
         _exectime_external += (end - start)
-    
+
     return output.decode('utf-8', errors='replace').rstrip('\n')
 
 
@@ -152,7 +151,7 @@ def get_default_branch() -> str:
                 return branch
     except Exception:
         pass
-    
+
     # Try to get from current HEAD if in a repository
     try:
         current_branch = getpipeoutput(['git rev-parse --abbrev-ref HEAD 2>/dev/null']).strip()
@@ -160,7 +159,7 @@ def get_default_branch() -> str:
             return current_branch
     except Exception:
         pass
-    
+
     # Try to get from git config init.defaultBranch
     try:
         default_branch = getpipeoutput(['git config --get init.defaultBranch 2>/dev/null']).strip()
@@ -168,27 +167,27 @@ def get_default_branch() -> str:
             return default_branch
     except Exception:
         pass
-    
+
     # Try common main branch names in order of preference
     main_branch_candidates = ['main', 'master', 'develop', 'development']
-    
+
     # Get all local branches
     try:
         branches_output = getpipeoutput(['git branch 2>/dev/null'])
         if branches_output:
             local_branches = [line.strip().lstrip('* ') for line in branches_output.split('\n') if line.strip()]
-            
+
             # Check if any of the common main branches exist
             for candidate in main_branch_candidates:
                 if candidate in local_branches:
                     return candidate
-            
+
             # If none found and we have branches, use the first branch
             if local_branches:
                 return local_branches[0]
     except Exception:
         pass
-    
+
     # Fall back to master
     return 'master'
 
@@ -234,19 +233,19 @@ def getcommitrange(defaultrange: str = 'HEAD', end_only: bool = False) -> str:
         Git commit range string
     """
     config = get_config()
-    
+
     if len(config.commit_end) > 0:
         if end_only or len(config.commit_begin) == 0:
             return config.commit_end
         return '%s..%s' % (config.commit_begin, config.commit_end)
-    
+
     # If configured to scan only default branch and using default range
     if config.scan_default_branch_only and defaultrange == 'HEAD':
         default_branch = get_default_branch()
         if config.verbose:
             print(f'Scanning only default branch: {default_branch}')
         return default_branch
-    
+
     return defaultrange
 
 
@@ -262,7 +261,7 @@ def is_git_repository(path: str) -> bool:
     """
     if not os.path.exists(path) or not os.path.isdir(path):
         return False
-    
+
     # Check if .git directory exists
     git_dir = os.path.join(path, '.git')
     if os.path.exists(git_dir):
@@ -270,7 +269,7 @@ def is_git_repository(path: str) -> bool:
         # For worktrees, .git might be a file pointing to the real .git directory
         if os.path.isdir(git_dir) or os.path.isfile(git_dir):
             return True
-    
+
     # Also check if we're inside a git repository
     try:
         current_dir = os.getcwd()
@@ -285,7 +284,7 @@ def is_git_repository(path: str) -> bool:
             os.chdir(current_dir)
     except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
         return False
-    
+
     return False
 
 

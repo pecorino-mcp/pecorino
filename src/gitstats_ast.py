@@ -6,7 +6,7 @@ supporting Python, Java, JavaScript/TypeScript, C++, Go, Rust, and Swift.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Iterator, Set
+from typing import Iterator, List, Optional, Set
 
 
 @dataclass
@@ -16,7 +16,7 @@ class ASTNode:
     col_offset: int = 0
     end_lineno: int = 0
     end_col_offset: int = 0
-    
+
     @property
     def _fields(self) -> tuple:
         """Returns names of child node fields (like Python's ast)."""
@@ -29,19 +29,19 @@ class ImportDef(ASTNode):
     module: str = ""
     names: List[str] = field(default_factory=list)
     is_from: bool = False  # True for 'from X import Y'
-    
+
     @property
     def _fields(self) -> tuple:
         return ('module', 'names')
 
 
-@dataclass 
+@dataclass
 class AttributeDef(ASTNode):
     """Represents a class attribute/field."""
     name: str = ""
     type_annotation: Optional[str] = None
     visibility: str = "public"  # public, private, protected
-    
+
     @property
     def _fields(self) -> tuple:
         return ('name', 'type_annotation', 'visibility')
@@ -63,7 +63,7 @@ class FunctionDef(ASTNode):
     called_methods: Set[str] = field(default_factory=set)
     accessed_attributes: Set[str] = field(default_factory=set)
     parameter_types: List[str] = field(default_factory=list)
-    
+
     @property
     def _fields(self) -> tuple:
         return ('name', 'args', 'decorators')
@@ -87,7 +87,7 @@ class ClassDef(ASTNode):
     rfc: int = 0
     lcom: int = 0
     coupled_classes: Set[str] = field(default_factory=set)
-    
+
     @property
     def _fields(self) -> tuple:
         return ('name', 'bases', 'methods', 'attributes', 'decorators', 'nested_classes')
@@ -99,7 +99,7 @@ class InterfaceDef(ASTNode):
     name: str = ""
     methods: List[FunctionDef] = field(default_factory=list)
     extends: List[str] = field(default_factory=list)
-    
+
     @property
     def _fields(self) -> tuple:
         return ('name', 'methods', 'extends')
@@ -113,7 +113,7 @@ class ModuleDef(ASTNode):
     classes: List[ClassDef] = field(default_factory=list)
     interfaces: List[InterfaceDef] = field(default_factory=list)
     functions: List[FunctionDef] = field(default_factory=list)
-    
+
     @property
     def _fields(self) -> tuple:
         return ('imports', 'classes', 'interfaces', 'functions')

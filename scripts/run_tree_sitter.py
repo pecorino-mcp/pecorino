@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 # Add project root to sys.path
-project_root = Path(__file__).resolve().parent.parent.parent
+project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
@@ -49,28 +49,12 @@ def main():
     # Initialize the manager. It will use the 'grammars' folder in workspace root.
     manager = TreeSitterGrammarManager()
     print(f"Grammar cache directory: {manager.cache_dir}")
-    print(f"Library path: {manager.lib_path}")
     
-    # 1. Install python grammar (if not already cached)
-    print("\n1. Installing Python grammar...")
-    try:
-        manager.install("python")
-        print("Python grammar installed successfully.")
-    except Exception as e:
-        print(f"Error installing Python grammar: {e}")
-        sys.exit(1)
+    # 1. Pip-installed languages are ready to be retrieved
+    print("\n1. Retrieving Python grammar via Manager...")
         
-    # 2. Build the grammar library
-    print("\n2. Compiling grammar library...")
-    try:
-        manager.build_all()
-        print("Grammar library compiled successfully.")
-    except Exception as e:
-        print(f"Error compiling grammar library: {e}")
-        sys.exit(1)
-        
-    # 3. Load the language
-    print("\n3. Loading Python language module...")
+    # 2. Load the language
+    print("\n2. Loading Python language module...")
     try:
         py_lang = manager.get_language("python")
         print("Python language module loaded.")
@@ -78,17 +62,16 @@ def main():
         print(f"Error loading Python language: {e}")
         sys.exit(1)
         
-    # 4. Parse a file from the repository
+    # 3. Parse a file from the repository
     # Let's parse src/tsgm.py itself
     target_file = project_root / "src" / "tsgm.py"
-    print(f"\n4. Parsing file: {target_file.relative_to(project_root)}")
+    print(f"\n3. Parsing file: {target_file.relative_to(project_root)}")
     
     try:
         with open(target_file, "rb") as f:
             source_content = f.read()
             
-        parser = Parser()
-        parser.set_language(py_lang)
+        parser = Parser(py_lang)
         tree = parser.parse(source_content)
         
         # Traverse AST and collect some stats
