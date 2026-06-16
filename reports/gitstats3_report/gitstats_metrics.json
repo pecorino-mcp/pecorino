@@ -1,0 +1,784 @@
+{
+  "metadata": {
+    "generated_at": "2026-06-16T12:03:49.062857",
+    "gitstats_version": "3.0",
+    "repository_name": "gitstats3",
+    "repository_path": "."
+  },
+  "repository": {
+    "total_commits": 7,
+    "total_files": 28,
+    "total_lines": 12792,
+    "total_source_lines": 9590,
+    "total_authors": 1,
+    "first_commit": "2026-06-14T12:34:02",
+    "last_commit": "2026-06-16T11:49:58",
+    "active_days": 3,
+    "lines_added": 14441,
+    "lines_removed": 1649
+  },
+  "activity": {
+    "by_hour_of_day": {
+      "11": 2,
+      "10": 2,
+      "9": 1,
+      "22": 1,
+      "12": 1
+    },
+    "by_day_of_week": {
+      "Tuesday": 5,
+      "Monday": 1,
+      "Sunday": 1
+    },
+    "by_month": {},
+    "last_30_days": {
+      "commits": 7,
+      "lines_added": 14441,
+      "lines_removed": 1649
+    },
+    "pace_of_changes": {
+      "by_month": {
+        "2026-06": 16090
+      }
+    }
+  },
+  "authors": {
+    "authors": {
+      "lechibang-1512": {
+        "commits": 7,
+        "lines_added": 14441,
+        "lines_removed": 1649,
+        "first_commit": "2026-06-14",
+        "last_commit": "2026-06-16",
+        "contribution_percentage": 100.0
+      }
+    },
+    "team_performance": {
+      "lechibang-1512": {
+        "activity_score": 40.0,
+        "consistency": 62.035083100213924,
+        "collaboration_score": 70.0,
+        "overall_score": 55.61052493006417
+      }
+    },
+    "bus_factor": 1
+  },
+  "files": {
+    "by_extension": {
+      "py": {
+        "source": 9590,
+        "comments": 0,
+        "blank": 1930,
+        "total": 11520
+      }
+    },
+    "largest_files": [
+      {
+        "path": "src/gitstats_datacollector.py",
+        "size_bytes": 81755
+      },
+      {
+        "path": "src/gitstats_gitdatacollector.py",
+        "size_bytes": 65384
+      },
+      {
+        "path": "src/gitstats_cli.py",
+        "size_bytes": 34793
+      },
+      {
+        "path": "src/gitstats_oopmetrics.py",
+        "size_bytes": 33498
+      },
+      {
+        "path": "src/gitstats_tree_sitter_parser.py",
+        "size_bytes": 30482
+      },
+      {
+        "path": "src/gitstats_mcp.py",
+        "size_bytes": 26600
+      },
+      {
+        "path": "src/gitstats_export.py",
+        "size_bytes": 15280
+      },
+      {
+        "path": "src/gitstats_hotspot.py",
+        "size_bytes": 11577
+      },
+      {
+        "path": "src/gitstats_repository.py",
+        "size_bytes": 11308
+      },
+      {
+        "path": "src/gitstats_maintainability.py",
+        "size_bytes": 10256
+      }
+    ],
+    "most_revised": [
+      {
+        "path": "src/gitstats_mcp.py",
+        "revisions": 6
+      },
+      {
+        "path": "tests/test_mcp_unified.py",
+        "revisions": 4
+      },
+      {
+        "path": "src/gitstats_index.py",
+        "revisions": 2
+      },
+      {
+        "path": "refactor_oop.py",
+        "revisions": 2
+      },
+      {
+        "path": "src/gitstats_cli.py",
+        "revisions": 2
+      },
+      {
+        "path": "test_client.py",
+        "revisions": 2
+      },
+      {
+        "path": "test_client2.py",
+        "revisions": 2
+      },
+      {
+        "path": "test_debug.py",
+        "revisions": 2
+      },
+      {
+        "path": "test_search.py",
+        "revisions": 2
+      },
+      {
+        "path": "test_ts_new.py",
+        "revisions": 2
+      }
+    ]
+  },
+  "code_quality": {
+    "maintainability_summary": {
+      "good_files": 2,
+      "moderate_files": 3,
+      "difficult_files": 12,
+      "critical_files": 11,
+      "files_analyzed": 28,
+      "file_details": {
+        "good": [
+          {
+            "filepath": "src/gitstats_analyzers.py",
+            "mi_score": 99.06683308243956,
+            "mi_raw": 99.06683308243956,
+            "extension": ".py",
+            "loc": 102,
+            "complexity": 16
+          },
+          {
+            "filepath": "src/tsgm.py",
+            "mi_score": 85.88223981084026,
+            "mi_raw": 85.88223981084026,
+            "extension": ".py",
+            "loc": 67,
+            "complexity": 5
+          }
+        ],
+        "moderate": [
+          {
+            "filepath": "src/gitstats_ast.py",
+            "mi_score": 84.39278057884887,
+            "mi_raw": 84.39278057884887,
+            "extension": ".py",
+            "loc": 167,
+            "complexity": 11
+          },
+          {
+            "filepath": "src/gitstats_constants.py",
+            "mi_score": 73.78626887001113,
+            "mi_raw": 73.78626887001113,
+            "extension": ".py",
+            "loc": 345,
+            "complexity": 1
+          },
+          {
+            "filepath": "src/gitstats_index.py",
+            "mi_score": 70.68311904277695,
+            "mi_raw": 70.68311904277695,
+            "extension": ".py",
+            "loc": 154,
+            "complexity": 15
+          }
+        ],
+        "difficult": [
+          {
+            "filepath": "gitstats.py",
+            "mi_score": 48.788253447373584,
+            "mi_raw": 48.788253447373584,
+            "extension": ".py",
+            "loc": 73,
+            "complexity": 7
+          },
+          {
+            "filepath": "src/__init__.py",
+            "mi_score": 8.923511114088726,
+            "mi_raw": 8.923511114088726,
+            "extension": ".py",
+            "loc": 187,
+            "complexity": 1
+          },
+          {
+            "filepath": "src/gitstats_config.py",
+            "mi_score": 4.197230392944725,
+            "mi_raw": 4.197230392944725,
+            "extension": ".py",
+            "loc": 135,
+            "complexity": 3
+          },
+          {
+            "filepath": "src/gitstats_core.py",
+            "mi_score": 18.249784262892888,
+            "mi_raw": 18.249784262892888,
+            "extension": ".py",
+            "loc": 57,
+            "complexity": 7
+          },
+          {
+            "filepath": "src/gitstats_export.py",
+            "mi_score": 35.134319243495696,
+            "mi_raw": 35.134319243495696,
+            "extension": ".py",
+            "loc": 423,
+            "complexity": 56
+          },
+          {
+            "filepath": "src/gitstats_helpers.py",
+            "mi_score": 23.42942152597431,
+            "mi_raw": 23.42942152597431,
+            "extension": ".py",
+            "loc": 175,
+            "complexity": 13
+          },
+          {
+            "filepath": "src/gitstats_mcp.py",
+            "mi_score": 37.01605692132335,
+            "mi_raw": 37.01605692132335,
+            "extension": ".py",
+            "loc": 617,
+            "complexity": 98
+          },
+          {
+            "filepath": "src/gitstats_strings.py",
+            "mi_score": 59.73415626326419,
+            "mi_raw": 59.73415626326419,
+            "extension": ".py",
+            "loc": 40,
+            "complexity": 5
+          },
+          {
+            "filepath": "src/scripts/run_tree_sitter.py",
+            "mi_score": 2.9542233132141007,
+            "mi_raw": 2.9542233132141007,
+            "extension": ".py",
+            "loc": 125,
+            "complexity": 18
+          },
+          {
+            "filepath": "tests/test_sqlite_indexer.py",
+            "mi_score": 22.773474090209078,
+            "mi_raw": 22.773474090209078,
+            "extension": ".py",
+            "loc": 45,
+            "complexity": 1
+          },
+          {
+            "filepath": "tests/test_tree_sitter_integration.py",
+            "mi_score": 10.724575350099709,
+            "mi_raw": 10.724575350099709,
+            "extension": ".py",
+            "loc": 167,
+            "complexity": 14
+          },
+          {
+            "filepath": "tests/test_tsgm.py",
+            "mi_score": 56.984431878769485,
+            "mi_raw": 56.984431878769485,
+            "extension": ".py",
+            "loc": 29,
+            "complexity": 1
+          }
+        ],
+        "critical": [
+          {
+            "filepath": "src/gitstats_cli.py",
+            "mi_score": 0,
+            "mi_raw": -56.13780125489414,
+            "extension": ".py",
+            "loc": 1012,
+            "complexity": 81
+          },
+          {
+            "filepath": "src/gitstats_datacollector.py",
+            "mi_score": 0,
+            "mi_raw": -71.85217886118912,
+            "extension": ".py",
+            "loc": 2523,
+            "complexity": 58
+          },
+          {
+            "filepath": "src/gitstats_gitcommands.py",
+            "mi_score": 0,
+            "mi_raw": -0.9274336171670221,
+            "extension": ".py",
+            "loc": 319,
+            "complexity": 44
+          },
+          {
+            "filepath": "src/gitstats_gitdatacollector.py",
+            "mi_score": 0,
+            "mi_raw": -128.86627831635286,
+            "extension": ".py",
+            "loc": 1726,
+            "complexity": 305
+          },
+          {
+            "filepath": "src/gitstats_hotspot.py",
+            "mi_score": 0,
+            "mi_raw": -23.327173356362238,
+            "extension": ".py",
+            "loc": 281,
+            "complexity": 45
+          },
+          {
+            "filepath": "src/gitstats_maintainability.py",
+            "mi_score": 0,
+            "mi_raw": -19.395158112197684,
+            "extension": ".py",
+            "loc": 328,
+            "complexity": 23
+          },
+          {
+            "filepath": "src/gitstats_oopmetrics.py",
+            "mi_score": 0,
+            "mi_raw": -65.18367784987667,
+            "extension": ".py",
+            "loc": 1020,
+            "complexity": 86
+          },
+          {
+            "filepath": "src/gitstats_repository.py",
+            "mi_score": 0,
+            "mi_raw": -40.31195508979059,
+            "extension": ".py",
+            "loc": 375,
+            "complexity": 76
+          },
+          {
+            "filepath": "src/gitstats_tree_sitter_parser.py",
+            "mi_score": 0,
+            "mi_raw": -12.557460985284596,
+            "extension": ".py",
+            "loc": 723,
+            "complexity": 126
+          },
+          {
+            "filepath": "src/scripts/get_repo_stats.py",
+            "mi_score": 0,
+            "mi_raw": -11.103854932076246,
+            "extension": ".py",
+            "loc": 150,
+            "complexity": 27
+          },
+          {
+            "filepath": "tests/test_mcp_unified.py",
+            "mi_score": 0,
+            "mi_raw": -2.897796589759487,
+            "extension": ".py",
+            "loc": 186,
+            "complexity": 9
+          }
+        ]
+      }
+    },
+    "complexity_summary": {},
+    "oop_metrics": {
+      "total_classes": 20,
+      "abstract_classes": 0,
+      "abstractness": 0.0,
+      "instability": 1.0,
+      "distance_from_main_sequence": 0.0
+    },
+    "total_complexity": 1152,
+    "average_mi": 26.525738542448806
+  },
+  "hotspots": {
+    "hotspots": [
+      {
+        "filepath": "src/gitstats_mcp.py",
+        "risk_score": 112.01,
+        "risk_level": "critical",
+        "churn_score": 100.0,
+        "complexity_score": 87.01,
+        "revisions": 6,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "tests/test_mcp_unified.py",
+        "risk_score": 69.8,
+        "risk_level": "critical",
+        "churn_score": 66.67,
+        "complexity_score": 67.2,
+        "revisions": 4,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_cli.py",
+        "risk_score": 58.33,
+        "risk_level": "high",
+        "churn_score": 33.33,
+        "complexity_score": 100.0,
+        "revisions": 2,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_repository.py",
+        "risk_score": 41.67,
+        "risk_level": "high",
+        "churn_score": 16.67,
+        "complexity_score": 100.0,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_gitdatacollector.py",
+        "risk_score": 41.67,
+        "risk_level": "high",
+        "churn_score": 16.67,
+        "complexity_score": 100.0,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_datacollector.py",
+        "risk_score": 41.67,
+        "risk_level": "high",
+        "churn_score": 16.67,
+        "complexity_score": 100.0,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_oopmetrics.py",
+        "risk_score": 41.67,
+        "risk_level": "high",
+        "churn_score": 16.67,
+        "complexity_score": 100.0,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_tree_sitter_parser.py",
+        "risk_score": 41.67,
+        "risk_level": "high",
+        "churn_score": 16.67,
+        "complexity_score": 100.0,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_hotspot.py",
+        "risk_score": 41.0,
+        "risk_level": "high",
+        "churn_score": 16.67,
+        "complexity_score": 96.0,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_gitcommands.py",
+        "risk_score": 40.87,
+        "risk_level": "high",
+        "churn_score": 16.67,
+        "complexity_score": 95.2,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_index.py",
+        "risk_score": 40.73,
+        "risk_level": "high",
+        "churn_score": 33.33,
+        "complexity_score": 47.2,
+        "revisions": 2,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_export.py",
+        "risk_score": 39.61,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 87.67,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/scripts/get_repo_stats.py",
+        "risk_score": 38.6,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 81.6,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_maintainability.py",
+        "risk_score": 38.07,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 78.4,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/scripts/run_tree_sitter.py",
+        "risk_score": 37.23,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 73.36,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "tests/test_tree_sitter_integration.py",
+        "risk_score": 36.24,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 67.44,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_helpers.py",
+        "risk_score": 35.36,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 62.18,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_config.py",
+        "risk_score": 35.15,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 60.93,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/gitstats_core.py",
+        "risk_score": 34.87,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 59.2,
+        "revisions": 1,
+        "coupling_count": 5
+      },
+      {
+        "filepath": "src/__init__.py",
+        "risk_score": 34.61,
+        "risk_level": "medium",
+        "churn_score": 16.67,
+        "complexity_score": 57.67,
+        "revisions": 1,
+        "coupling_count": 5
+      }
+    ],
+    "summary": {
+      "total_files_analyzed": 34,
+      "critical_hotspots": 2,
+      "high_risk_hotspots": 9,
+      "medium_risk_hotspots": 23,
+      "low_risk_hotspots": 0,
+      "top_hotspots": [
+        {
+          "filepath": "src/gitstats_mcp.py",
+          "risk_score": 112.01,
+          "risk_level": "critical",
+          "churn_score": 100.0,
+          "complexity_score": 87.01,
+          "revisions": 6,
+          "maintainability_index": 37.01605692132335,
+          "cyclomatic_complexity": 0,
+          "coupled_files": [
+            [
+              "python-sdk",
+              1.0
+            ],
+            [
+              "modules/python-sdk",
+              1.0
+            ],
+            [
+              "modules/tree-sitter",
+              1.0
+            ],
+            [
+              "src/gitstats_index.py",
+              1.0
+            ],
+            [
+              "tests/test_mcp_unified.py",
+              1.0
+            ]
+          ],
+          "coupling_count": 5
+        },
+        {
+          "filepath": "tests/test_mcp_unified.py",
+          "risk_score": 69.8,
+          "risk_level": "critical",
+          "churn_score": 66.67,
+          "complexity_score": 67.2,
+          "revisions": 4,
+          "maintainability_index": 0,
+          "cyclomatic_complexity": 0,
+          "coupled_files": [
+            [
+              "src/gitstats_mcp.py",
+              1.0
+            ],
+            [
+              "python-sdk",
+              1.0
+            ],
+            [
+              "modules/python-sdk",
+              1.0
+            ],
+            [
+              "modules/tree-sitter",
+              1.0
+            ],
+            [
+              "src/gitstats_index.py",
+              1.0
+            ]
+          ],
+          "coupling_count": 5
+        },
+        {
+          "filepath": "src/gitstats_cli.py",
+          "risk_score": 58.33,
+          "risk_level": "high",
+          "churn_score": 33.33,
+          "complexity_score": 100.0,
+          "revisions": 2,
+          "maintainability_index": 0,
+          "cyclomatic_complexity": 0,
+          "coupled_files": [
+            [
+              "test_search.py",
+              1.0
+            ],
+            [
+              "test_client.py",
+              1.0
+            ],
+            [
+              "src/gitstats_mcp.py",
+              1.0
+            ],
+            [
+              "refactor_oop.py",
+              1.0
+            ],
+            [
+              "pyproject.toml",
+              1.0
+            ]
+          ],
+          "coupling_count": 5
+        },
+        {
+          "filepath": "src/gitstats_repository.py",
+          "risk_score": 41.67,
+          "risk_level": "high",
+          "churn_score": 16.67,
+          "complexity_score": 100.0,
+          "revisions": 1,
+          "maintainability_index": 0,
+          "cyclomatic_complexity": 0,
+          "coupled_files": [
+            [
+              "src/gitstats_core.py",
+              1.0
+            ],
+            [
+              "src/gitstats_export.py",
+              1.0
+            ],
+            [
+              "python-sdk",
+              1.0
+            ],
+            [
+              "gitstats.py",
+              1.0
+            ],
+            [
+              "src/scripts/get_repo_stats.py",
+              1.0
+            ]
+          ],
+          "coupling_count": 5
+        },
+        {
+          "filepath": "src/gitstats_gitdatacollector.py",
+          "risk_score": 41.67,
+          "risk_level": "high",
+          "churn_score": 16.67,
+          "complexity_score": 100.0,
+          "revisions": 1,
+          "maintainability_index": 0,
+          "cyclomatic_complexity": 0,
+          "coupled_files": [
+            [
+              "src/gitstats_core.py",
+              1.0
+            ],
+            [
+              "src/gitstats_export.py",
+              1.0
+            ],
+            [
+              "python-sdk",
+              1.0
+            ],
+            [
+              "gitstats.py",
+              1.0
+            ],
+            [
+              "src/scripts/get_repo_stats.py",
+              1.0
+            ]
+          ],
+          "coupling_count": 5
+        }
+      ],
+      "files_with_coupling": 34
+    }
+  },
+  "branches": {
+    "total_branches": 1,
+    "unmerged_count": 0,
+    "main_branch": "master",
+    "branches": {
+      "master": {
+        "commits": 7,
+        "lines_added": 0,
+        "lines_removed": 0
+      }
+    }
+  }
+}

@@ -1,188 +1,126 @@
-# gitstats3
+# Gitstats3 MCP Server
 
-A compact, single-file Git history statistics generator with an integrated
-OOP-metrics analyzer.
+A Model Context Protocol (MCP) server for deep Git history statistics, repository health tracking, and Object-Oriented Design (OOD) metrics analysis. 
 
-This repository contains:
+Gitstats3 allows Large Language Models (LLMs) and dev tools (such as Claude Desktop or Cursor) to inspect codebases, analyze code structures, compute complexity/maintainability indexes, and detect risk hotspots.
 
-- `gitstats.py` — the main analysis script. It collects Git history and
-  generates HTML reports (tables) and data files. The script now focuses on
-  table-based output for accessibility and portability.
-- `oop_metrics.py` — an analyzer that computes object-oriented design metrics
-  (abstractness, instability, and Distance-from-Main-Sequence) for supported
-  languages.
-- `gitstats.css` — default stylesheet used by generated HTML reports.
-- `scripts/get_repo_stats.py` — a small helper script to quickly report total
-  commits and contributor counts for a repository or a tree of repositories.
-- `requirements.txt` — Python package requirements used by parts of the
-  project (see below).
+---
 
-## Quick summary
+## ✨ Features
 
-- Language: Python 3 (3.6+ runtime guarded in `gitstats.py`)
-- Purpose: Produce repository statistics and design metrics from Git history
-  and produce human-readable HTML tables with per-file and per-project metrics.
-- Scope: Single-repo analysis and optional multi-repo scanning.
+- 🔌 **Model Context Protocol (MCP)**: Exposes 4 unified tools (`browse`, `metrics`, `report`, `update_index`) to your AI assistant.
+- 📊 **Git History Analytics**: Commits, LOC growth, author contributions, activity patterns, and team performance tracking.
+- 📐 **Object-Oriented Design Metrics**: Afferent/efferent coupling (Ca/Ce), instability (I), abstractness (A), and Distance-from-Main-Sequence (D) analysis.
+- 🚨 **Risk Hotspot Detection**: Combines code churn (revision frequency) and complexity to pinpoint high-risk source files.
+- 🗄️ **Fast SQLite-backed AST Indexing**: Leverages tree-sitter to index class definitions, functions, and imports for rapid codebase navigation and search.
+- 💻 **Flexible CLI & HTTP SSE**: Run as a standard CLI tool, start a local stdio MCP server, or deploy as a network-accessible SSE server.
 
-## Requirements
+---
 
-- Python 3.6 or newer (the code checks for 3.6+ at runtime).
-- `git` available on PATH (used heavily by `gitstats.py` and `scripts/get_repo_stats.py`).
+## 🚀 Quick Start
 
-Minimal Python packages referenced in the repository are listed in
-`requirements.txt`. At the time of writing it contains:
-
-- `psutil==7.0.0`
-
-Note: The main `gitstats.py` implementation uses command-line `git` and produces
-HTML tables. It no longer depends on heavy plotting libraries by default.
-
-If you want to install the Python requirements into a virtual environment:
+### 1. Installation
+Clone the repository recursively (to fetch the MCP SDK submodule) and set up the environment:
 
 ```bash
+# Clone recursively
+git clone --recursive https://github.com/lechibang-1512/gitstats3.git
+cd gitstats3
+
+# Create and activate virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
+
+# Install dependencies and package in editable mode
 pip install -r requirements.txt
+pip install -e .
 ```
 
-## Usage - Basic
+### 2. Configure Claude Desktop
+Add Gitstats3 to your `claude_desktop_config.json`:
 
-Analyze a single repository and write the report to an output folder:
+* **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+* **Linux:** `~/.config/Claude/claude_desktop_config.json`
+* **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "gitstats3": {
+      "command": "/path/to/gitstats3/.venv/bin/gitstats3-mcp",
+      "args": ["--transport", "stdio"],
+      "env": {
+        "PYTHONPATH": "/path/to/gitstats3"
+      }
+    }
+  }
+}
+```
+*(Replace `/path/to/gitstats3` with your actual absolute path).*
+
+---
+
+## 🛠️ Exposed MCP Tools
+
+Once connected, your AI assistant can use the following tools:
+
+### 1. `/browse`
+Inspects directories, files, or performs a semantic FTS search on the indexed codebase.
+- **Parameters**:
+  - `target` *(string, required)*: Absolute path to the file or directory.
+  - `view` *(string, optional)*: `"summary"` (default), `"classes"`, `"functions"`, `"deps"` (imports), `"tree"` (directory tree), or `"search"` (semantic search).
+  - `query` *(string, optional)*: The search term (required if `view` is `"search"`).
+
+### 2. `/metrics`
+Computes design metrics, cyclomatic complexity, Halstead metrics, or risk hotspots.
+- **Parameters**:
+  - `target` *(string, required)*: Absolute path to the file or folder.
+  - `what` *(array of strings, optional)*: Metrics to run (`"oop"`, `"complexity"`, `"hotspots"`, or `"all"`).
+
+### 3. `/report`
+Runs a full repository scan and exports a structured JSON report directly to `<repo_name>_report/gitstats_metrics.json` inside your specified output directory.
+- **Parameters**:
+  - `repo_path` *(string, required)*: Absolute path to the Git repository.
+  - `output_path` *(string, required)*: Absolute path to the output directory.
+
+### 4. `/update_index`
+Performs tree-sitter AST analysis and populates the SQLite codebase index for fast semantic searching.
+- **Parameters**:
+  - `target` *(string, required)*: Absolute path to the file or folder to index.
+
+---
+
+## 📂 Repository Layout
+
+- `src/gitstats_mcp.py` — The core MCP server implementation.
+- `src/gitstats_cli.py` — Command-line interface and orchestrator.
+- `src/gitstats_oopmetrics.py` — Object-oriented design metrics analyzer.
+- `src/gitstats_datacollector.py` — Base metrics collector.
+- `src/gitstats_gitdatacollector.py` — Git history log parser.
+- `src/gitstats_index.py` — SQLite Full-Text Search (FTS5) codebase index.
+- `tests/` — Automated test suites.
+
+---
+
+## 🖥️ Command Line Interface (CLI)
+
+You can also run Gitstats3 directly via the terminal:
 
 ```bash
-python gitstats.py /path/to/git/repo /path/to/output
+# Start the stdio MCP server manually
+gitstats3-mcp --transport stdio
+
+# Start the SSE MCP server (requires Starlette & Uvicorn: pip install -e .[sse])
+gitstats3-mcp --transport sse --host 127.0.0.1 --port 8000
+
+# Run a CLI analysis and save the report inside a directory
+python gitstats.py /path/to/repo /path/to/output_dir
 ```
 
-This performs repository history collection and writes an `index.html` plus
-supporting files under the specified output folder. The output is table-based
-HTML using `gitstats.css` for styling.
+For comprehensive CLI flags, transport details, and configuration options, see the [Local Server Deployment Guide](docs/local_server_deployment.md).
 
-Common options (see `gitstats.py` for the complete CLI):
+---
 
-- `--verbose` — show progress and executed commands
-- `--debug` — show debug traces (implies `--verbose`)
-- `-c key=value` — override a configuration value from the internal `conf` dict
-- `--multi-repo` — scan a directory tree for git repositories and produce
-  per-repository reports (configurable via `-c` options)
+## 📄 License & Contributing
 
-Example (increase worker concurrency):
-
-```bash
-python gitstats.py -c processes=4 /path/to/repo /path/to/output
-```
-
-## Usage - Quick multi-repo scan
-
-Scan a folder for Git repositories (creates separate reports under the output
-folder):
-
-```bash
-python gitstats.py --multi-repo /path/to/repos /path/to/output
-```
-
-Tunable `conf` options (pass with `-c key=value`):
-
-- `multi_repo_max_depth` — maximum directory depth to scan
-- `multi_repo_include_patterns` — glob patterns to include
-- `multi_repo_exclude_patterns` — glob patterns to exclude
-- `multi_repo_parallel` — enable experimental parallel processing
-- `multi_repo_max_workers` — number of worker processes if parallel is enabled
-
-## Helper script: `scripts/get_repo_stats.py`
-
-This small script quickly reports total commits and contributor counts.
-It is useful for summaries and automation. Example:
-
-```bash
-python scripts/get_repo_stats.py --path /path/to/repo
-python scripts/get_repo_stats.py --path /path/to/repos --recursive --json
-```
-
-The script uses `git rev-list --all --count` and `git shortlog -sne` for fast
-counts and includes a safe fallback to counting unique author emails when
-`shortlog` is not available.
-
-## OOP metrics (in `oop_metrics.py`)
-
-`oop_metrics.py` implements a language-aware analyzer that computes:
-
-- Classes defined, abstract classes, interfaces
-- Efferent coupling (Ce) and afferent coupling (Ca)
-- Instability I = Ce / (Ce + Ca)
-- Abstractness A = abstract classes / total classes
-- Distance from Main Sequence D = |A + I - 1|
-
-Supported/heuristic languages include: Python, Java, Scala, Kotlin, C/C++,
-JavaScript/TypeScript, Swift, Go, Rust. The analyzer also attempts to build a
-dependency graph (based on imports/includes) to estimate afferent coupling.
-
-When `gitstats.py` runs, it integrates `OOPMetricsAnalyzer` and includes per-file
-OOP metrics and package-level summaries in the final report. See
-`format_oop_report()` in `oop_metrics.py` for the human-readable text format
-used for console-style reporting.
-
-Interpreting D (Distance):
-
-- D < 0.2 — near the Main Sequence (balanced)
-- 0.2 <= D <= 0.4 — moderate; refactoring may help
-- D > 0.4 — poor; design issues likely (zone of pain or zone of uselessness)
-
-## Configuration
-
-`gitstats.py` contains an internal `conf` dictionary with sensible defaults.
-You can override single settings from the command line with `-c key=value`.
-Examples of configurable values: `processes`, `filter_by_extensions`,
-`allowed_extensions`, `start_date`, `scan_default_branch_only`, and many
-`multi_repo_*` settings.
-
-## Development
-
-- The code is intentionally kept in a compact layout for easy distribution and
-  experimentation.
-- The OOP metrics logic is located in `oop_metrics.py` and can be exercised
-  independently (see `format_oop_report` and `OOPMetricsAnalyzer.analyze_file`).
-- The main script uses `git` subprocess calls heavily; you can run it on any
-  local repository where `git` is available.
-
-Quick local development workflow:
-
-```bash
-# optional: create and activate a venv
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# run the tool locally (replace paths)
-python gitstats.py /path/to/your/repo /tmp/gitstats-output
-```
-
-If you change `oop_metrics.py` and want to run a quick console report for a
-single file, you can run a tiny snippet (Python REPL or script) that imports
-`OOPMetricsAnalyzer`, calls `analyze_file()`, and prints `format_oop_report()`.
-
-## Troubleshooting & notes
-
-- Ensure `git` is installed and reachable in PATH.
-- The project reads the Git history using shelling out to the `git` binary.
-  If commands fail due to repository state or permissions, run with
-  `--verbose`/`--debug` to see the invoked commands.
-- The script filters files by extension by default; set `-c filter_by_extensions=false`
-  to include all files in counts.
-- For very large repositories or multi-repo scanning, tune `processes` and
-  `multi_repo_max_workers` to a value appropriate for your machine.
-
-## License
-
-This repository does not contain an explicit license file. If you plan to use
-or redistribute this code, add a suitable license (e.g. MIT, Apache-2.0) and
-update this README accordingly.
-
-## Contact / Contributing
-
-Contributions, bug reports, and improvements are welcome. Open an issue or
-submit a pull request with small, focused changes. For large refactors,
-please open an issue first to discuss the design.
-
-
--- End of README
-
+This project is licensed under the GPL-2.0 License. Contributions, bug reports, and improvements are welcome! Open an issue or submit a pull request with small, focused changes.

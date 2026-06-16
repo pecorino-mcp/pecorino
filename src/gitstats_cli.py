@@ -55,8 +55,8 @@ class GitStats:
 	def run(self, args_orig):
 		self.original_stdout = sys.stdout
 		if "--mcp" in args_orig:
-			from src.gitstats_mcp import mcp
-			mcp.run("stdio")
+			from src.gitstats_mcp import main as mcp_main
+			mcp_main()
 			return
 
 		# Suppress all standard prints completely

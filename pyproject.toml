@@ -43,6 +43,8 @@ dependencies = [
     "tree-sitter-rust",
     "tree-sitter-ruby",
     "tree-sitter-swift",
+    "PyJWT",
+    "prometheus_client",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +52,10 @@ dev = [
     "pytest>=7.0.0",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
+]
+sse = [
+    "starlette>=0.30.0",
+    "uvicorn>=0.20.0",
 ]
 
 [project.urls]

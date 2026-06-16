@@ -64,6 +64,18 @@ class CodeSearchIndex:
             ''', (name, node_type, filepath, body_text, json.dumps(metrics), start_line, end_line))
             conn.commit()
 
+    def index_nodes(self, nodes: List[Dict[str, Any]]):
+        """Index a batch of AST nodes."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany('''
+                INSERT INTO code_nodes_fts (name, node_type, filepath, body_text, metrics_json, start_line, end_line)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', [
+                (n['name'], n['node_type'], n['filepath'], n['body_text'], json.dumps(n.get('metrics', {})), n['start_line'], n['end_line'])
+                for n in nodes
+            ])
+            conn.commit()
+
     def clear_file(self, filepath: str):
         """Remove all nodes for a given file before re-indexing it."""
         with sqlite3.connect(self.db_path) as conn:
@@ -80,6 +92,52 @@ class CodeSearchIndex:
                 ORDER BY rank
                 LIMIT ?
             ''', (query, limit))
+            
+            results = []
+            for row in cursor:
+                results.append({
+                    'name': row[0],
+                    'node_type': row[1],
+                    'filepath': row[2],
+                    'body_text': row[3],
+                    'metrics': json.loads(row[4]) if row[4] else {},
+                    'start_line': row[5],
+                    'end_line': row[6]
+                })
+            return results
+
+    def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
+        """Get all nodes for a specific file."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('''
+                SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
+                FROM code_nodes_fts
+                WHERE filepath = ?
+            ''', (filepath,))
+            
+            results = []
+            for row in cursor:
+                results.append({
+                    'name': row[0],
+                    'node_type': row[1],
+                    'filepath': row[2],
+                    'body_text': row[3],
+                    'metrics': json.loads(row[4]) if row[4] else {},
+                    'start_line': row[5],
+                    'end_line': row[6]
+                })
+            return results
+
+    def get_dir_nodes(self, dirpath: str) -> List[Dict[str, Any]]:
+        """Get all nodes for files within a specific directory."""
+        # Ensure trailing slash for directory matching
+        prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('''
+                SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
+                FROM code_nodes_fts
+                WHERE filepath LIKE ?
+            ''', (f"{prefix}%",))
             
             results = []
             for row in cursor:

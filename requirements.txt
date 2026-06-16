@@ -10,8 +10,9 @@ tree-sitter-go
 tree-sitter-rust
 tree-sitter-ruby
 tree-sitter-swift
+pydantic
 
--e ./python-sdk
+-e ./modules/python-sdk
 
 pytest>=7.0.0
 pytest-asyncio
