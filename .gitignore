@@ -1,0 +1,79 @@
+# database
+code_search.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+/.venv/
+venv/
+env/
+ENV/
+.env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+wheelhouse/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+
+# Type checkers / caches
+.mypy_cache/
+.pyre/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-*
+*.code-workspace
+
+# Jupyter
+.ipynb_checkpoints
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs and local data
+*.log
+*.sqlite3
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+secrets.json
+
+# Compiled extensions
+*.so
+*.dylib
+
+# Misc
+*.egg
+
+# Build artifacts from src/
+*.egg-info/
+
+# GitStats3 output data and cache
+/gitstats_output/
+/gitstats_output_multi/
+/gitstats_export_oop_metrics.json
+*.cache
+
+grammars/
+bin/

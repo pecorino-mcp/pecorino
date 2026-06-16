@@ -1,0 +1,55 @@
+FATAL: --multi-repo requires exactly two arguments: <scan-folder> <outputpath>
+
+Usage: gitstats [options] <gitpath..> <outputpath>
+       gitstats [options] --multi-repo <scan-folder> <outputpath>
+
+Options:
+-c key=value     Override configuration value
+--debug          Enable debug output
+--verbose        Enable verbose output
+--multi-repo     Scan folder recursively for multiple repositories and generate reports for each
+-h, --help       Show this help message
+
+Note: GitStats generates HTML reports with charts and detailed statistics.
+
+Examples:
+  gitstats repo output                    # Generates HTML report
+  gitstats --verbose repo output          # With verbose output
+  gitstats --multi-repo /path/to/repos output  # Generate reports for all repos found recursively
+  gitstats --debug -c max_authors=50 repo output
+  
+  # Multi-repo with configuration options:
+  gitstats -c multi_repo_max_depth=5 --multi-repo /path/to/repos output
+  gitstats -c multi_repo_include_patterns=proj*,app* --multi-repo /path/to/repos output
+
+With --multi-repo mode:
+- Recursively scans the specified folder and all subdirectories for git repositories
+- Creates a report for each repository in a subfolder named <reponame>_report
+- Only processes directories that are valid git repositories
+- Generates a summary report with links to all individual reports
+- Default maximum scan depth is 3 levels (configurable)
+
+Multi-repo configuration options (use with -c key=value):
+  multi_repo_max_depth=N               # Maximum depth for recursive scanning (default: 10)
+  multi_repo_include_patterns=pat1,pat2 # Comma-separated glob patterns for directories to include
+  multi_repo_exclude_patterns=pat1,pat2 # Comma-separated glob patterns for directories to exclude
+  multi_repo_timeout=N                 # Timeout in seconds per repository (default: 3600)
+  multi_repo_cleanup_on_error=True/False # Clean up partial output on error (default: True)
+  multi_repo_parallel=True/False       # Enable parallel processing (default: True)
+  multi_repo_max_workers=N             # Maximum parallel workers (default: 4)
+  multi_repo_fast_scan=True/False      # Enable concurrent repository discovery (default: True)
+  multi_repo_batch_size=N              # Process repositories in batches (default: 10)
+  multi_repo_progress_interval=N       # Progress update interval in seconds (default: 5)
+
+File extension filtering options (use with -c key=value):
+  filter_by_extensions=True/False      # Enable/disable file extension filtering (default: True)
+  allowed_extensions=.py,.js,.java    # Comma-separated list of allowed extensions (default: see below)
+
+Default config values:
+{'max_domains': 10, 'max_ext_length': 10, 'style': 'gitstats.css', 'max_authors': 20, 'authors_top': 5, 'commit_begin': '', 'commit_end': 'HEAD', 'linear_linestats': 1, 'project_name': '', 'processes': 4, 'start_date': '', 'debug': False, 'verbose': False, 'scan_default_branch_only': True, 'multi_repo_max_depth': 10, 'multi_repo_include_patterns': None, 'multi_repo_exclude_patterns': None, 'multi_repo_parallel': False, 'multi_repo_max_workers': 2, 'multi_repo_timeout': 3600, 'multi_repo_cleanup_on_error': True, 'multi_repo_fast_scan': True, 'multi_repo_batch_size': 10, 'multi_repo_progress_interval': 5, 'allowed_extensions': {'.pxd', '.r', '.d.ts', '.js', '.proto', '.cuh', '.R', '.asm', '.jsx', '.hxx', '.cc', '.swift', '.m', '.tsx', '.c', '.scala', '.pyx', '.ts', '.java', '.thrift', '.S', '.go', '.mm', '.py', '.cxx', '.s', '.hpp', '.cjs', '.hh', '.lua', '.h', '.pyi', '.cl', '.kt', '.rs', '.mjs', '.cu', '.cpp'}, 'filter_by_extensions': True}
+
+Default multi-repo exclude patterns:
+  .* (hidden dirs), node_modules, venv, __pycache__, build, dist, target, bin, obj
+
+Please see the manual page for more details.
+
