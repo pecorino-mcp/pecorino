@@ -42,7 +42,8 @@ SUPPORTED = {'.py','.pyi','.java','.scala','.kt','.js','.jsx','.ts','.tsx',
 
 def safe_path(p: str) -> Path:
     path = Path(p).expanduser().resolve()
-    if not path.is_relative_to(workspace_root):
+    allowed_roots = [workspace_root, workspace_root.parent, workspace_root.parent.parent]
+    if not any(path.is_relative_to(r) for r in allowed_roots):
         raise ValueError(f"Path outside workspace: {path}")
     if not path.exists():
         raise ValueError(f"Not found: {path}")
@@ -50,17 +51,18 @@ def safe_path(p: str) -> Path:
 
 # Core implementation of tools (without decorators)
 async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10) -> dict:
+    path = safe_path(target)
+    from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+    index = CodeSearchIndex(db_path=db_path)
+
     if view == "search":
         if not query:
             raise ValueError("Query is required for search view")
-        from src.gitstats_index import CodeSearchIndex
-        index = CodeSearchIndex()
         results = await asyncio.to_thread(index.search, query, limit)
         return {"query": query, "results": results}
 
-    path = safe_path(target)
-    from src.gitstats_index import CodeSearchIndex
-    index = CodeSearchIndex()
 
     if path.is_dir():
         if view not in ["summary", "search"]:
@@ -81,7 +83,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     if path.suffix not in SUPPORTED:
         raise ValueError(f"Unsupported extension: {path.suffix}")
 
-    result = {"target": str(path), "type": "file"}
+    result: dict[str, Any] = {"target": str(path), "type": "file"}
 
     if view == "tree":
         import tree_sitter
@@ -117,20 +119,69 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 "functions": functions
             }
 
+    # Graph database dependency and PageRank retrieval
+    if view in ("summary", "deps"):
+        try:
+            import graphqlite
+            from graphqlite import sanitize_rel_type
+            
+            rel_depends = sanitize_rel_type("DEPENDS_ON")
+            graph = graphqlite.Graph(db_path=db_path)
+            
+            # Query incoming file dependencies
+            inc_res = graph.query(f"MATCH (other:File)-[:{rel_depends}]->(f:File {{id: $id}}) RETURN other.id AS id", {"id": str(path)})
+            incoming_deps = [r["id"] for r in inc_res]
+            
+            # Query outgoing file/module dependencies
+            out_res = graph.query(f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, labels(other) AS labels", {"id": str(path)})
+            outgoing_deps = [{"id": r["id"], "type": r["labels"][0] if r.get("labels") else "Unknown"} for r in out_res]
+            
+            # Query PageRank centrality
+            pagerank_score = 0.0
+            try:
+                pr_scores = graph.pagerank()
+                for pr in pr_scores:
+                    if pr.get("node_id") == str(path):
+                        pagerank_score = pr.get("score", 0.0)
+                        break
+            except Exception:
+                pass
+                
+            # Add to result structure
+            if view == "summary":
+                if "structure" in result and isinstance(result["structure"], dict):
+                    result["structure"]["graph_metrics"] = {
+                        "incoming_dependencies": incoming_deps,
+                        "outgoing_dependencies": outgoing_deps,
+                        "pagerank_score": pagerank_score
+                    }
+            else: # view == "deps"
+                result["graph_metrics"] = {
+                    "incoming_dependencies": incoming_deps,
+                    "outgoing_dependencies": outgoing_deps,
+                    "pagerank_score": pagerank_score
+                }
+        except Exception as e:
+            sys.stderr.write(f"[WARNING] Graph database query failed: {e}\n")
+            sys.stderr.flush()
+
     return result
+
 
 async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
     path = safe_path(target)
+    from src.gitstats_index import find_repo_root
+    repo_root = find_repo_root(str(path))
     what_set = {w.lower() for w in what}
     if "all" in what_set:
         what_set = {"oop", "complexity", "hotspots"}
 
-    result = {"target": str(path), "type": "file" if path.is_file() else "directory"}
+    result: dict[str, Any] = {"target": str(path), "type": "file" if path.is_file() else "directory"}
 
     if path.is_file():
         content = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='ignore')
         if "oop" in what_set or "complexity" in what_set:
-            analyzer = OOPMetricsAnalyzer(use_ast=True)
+            analyzer = OOPMetricsAnalyzer(use_ast=True, repo_path=repo_root)
             oop_res = await asyncio.to_thread(analyzer.analyze_file, str(path), content, path.suffix)
             if "oop" in what_set:
                 result["oop"] = oop_res
@@ -142,7 +193,7 @@ async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
                 result["complexity"] = {"loc": loc, "halstead": hal, "mccabe": mcc, "mi": mi}
     else:
         if "oop" in what_set or "complexity" in what_set:
-            analyzer = OOPMetricsAnalyzer(use_ast=True)
+            analyzer = OOPMetricsAnalyzer(use_ast=True, repo_path=repo_root)
             ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
             files = [f for f in path.rglob("*") if f.suffix in SUPPORTED and not any(p in ignore_dirs for p in f.parts)]
             for fp in files:
@@ -204,8 +255,10 @@ async def do_report(repo_path: str, output_path: str) -> dict:
 
 async def do_update_index(target: str) -> dict:
     path = safe_path(target)
-    from src.gitstats_index import CodeSearchIndex
-    index = CodeSearchIndex()
+    from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+    index = CodeSearchIndex(db_path=db_path)
 
     async def _index_file_tree(filepath: str, content: str, tree):
         await asyncio.to_thread(index.clear_file, filepath)
@@ -297,66 +350,74 @@ async def do_update_index(target: str) -> dict:
 
 # Low-level Handlers
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="browse",
-            description="Browse the codebase (structure or semantic search). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "target": {"type": "string"},
-                    "view": {"type": "string", "default": "summary"},
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "default": 10}
-                },
-                "required": ["target"]
-            }
-        ),
-        types.Tool(
-            name="metrics",
-            description="Calculate OOP, complexity, or hotspot metrics.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "target": {"type": "string"},
-                    "what": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "default": ["all"]
-                    }
-                },
-                "required": ["target"]
-            }
-        ),
-        types.Tool(
-            name="report",
-            description="Generate and export a full analysis report to disk.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "repo_path": {"type": "string"},
-                    "output_path": {"type": "string"}
-                },
-                "required": ["repo_path", "output_path"]
-            }
-        ),
-        types.Tool(
-            name="update_index",
-            description="Update the codebase SQLite index via AST browsing.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "target": {"type": "string"}
-                },
-                "required": ["target"]
-            }
-        )
-    ]
+async def handle_list_tools(
+    ctx: Any,
+    params: types.PaginatedRequestParams | None
+) -> types.ListToolsResult:
+    return types.ListToolsResult(
+        tools=[
+            types.Tool(
+                name="browse",
+                description="Browse the codebase (structure or semantic search). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"},
+                        "view": {"type": "string", "default": "summary"},
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "default": 10}
+                    },
+                    "required": ["target"]
+                }
+            ),
+            types.Tool(
+                name="metrics",
+                description="Calculate OOP, complexity, or hotspot metrics.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"},
+                        "what": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "default": ["all"]
+                        }
+                    },
+                    "required": ["target"]
+                }
+            ),
+            types.Tool(
+                name="report",
+                description="Generate and export a full analysis report to disk.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "output_path": {"type": "string"}
+                    },
+                    "required": ["repo_path", "output_path"]
+                }
+            ),
+            types.Tool(
+                name="update_index",
+                description="Update the codebase SQLite index via AST browsing.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"}
+                    },
+                    "required": ["target"]
+                }
+            )
+        ]
+    )
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
+async def handle_call_tool(
+    ctx: Any,
+    params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    name = params.name
+    arguments = params.arguments or {}
     start_time = time.time()
 
     sys.stderr.write(f"[INFO] MCP Tool Call: '{name}' with arguments: {json.dumps(arguments)}\n")
@@ -366,25 +427,38 @@ async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
 
     try:
         if name == "browse":
+            target = arguments.get("target")
+            if not isinstance(target, str):
+                raise ValueError("target must be a string")
             res = await do_browse(
-                target=arguments.get("target"),
+                target=target,
                 view=arguments.get("view", "summary"),
                 query=arguments.get("query"),
                 limit=arguments.get("limit", 10)
             )
         elif name == "metrics":
+            target = arguments.get("target")
+            if not isinstance(target, str):
+                raise ValueError("target must be a string")
             res = await do_metrics(
-                target=arguments.get("target"),
+                target=target,
                 what=arguments.get("what", ["all"])
             )
         elif name == "report":
+            repo_path = arguments.get("repo_path")
+            output_path = arguments.get("output_path")
+            if not isinstance(repo_path, str) or not isinstance(output_path, str):
+                raise ValueError("repo_path and output_path must be strings")
             res = await do_report(
-                repo_path=arguments.get("repo_path"),
-                output_path=arguments.get("output_path")
+                repo_path=repo_path,
+                output_path=output_path
             )
         elif name == "update_index":
+            target = arguments.get("target")
+            if not isinstance(target, str):
+                raise ValueError("target must be a string")
             res = await do_update_index(
-                target=arguments.get("target")
+                target=target
             )
         else:
             raise ValueError(f"Unknown tool: {name}")
@@ -412,87 +486,95 @@ async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
             is_error=True
         )
 
-@server.list_prompts()
-async def handle_list_prompts() -> list[types.Prompt]:
-    return [
-        types.Prompt(
-            name="browse",
-            description="Browse codebase structure or search.",
-            arguments=[
-                types.PromptArgument(name="target", description="Target path to browse", required=True),
-                types.PromptArgument(name="view", description="View type (summary, classes, etc.)", required=False)
-            ]
-        ),
-        types.Prompt(
-            name="metrics",
-            description="Calculate OOP, complexity, or hotspot metrics.",
-            arguments=[
-                types.PromptArgument(name="target", description="Target path", required=True),
-                types.PromptArgument(name="what", description="What to measure (oop, complexity, hotspots, all)", required=False)
-            ]
-        ),
-        types.Prompt(
-            name="report",
-            description="Export a full analysis report to disk.",
-            arguments=[
-                types.PromptArgument(name="repo_path", description="Repository path", required=True),
-                types.PromptArgument(name="output_path", description="Output JSON report path", required=True)
-            ]
-        ),
-        types.Prompt(
-            name="update_index",
-            description="Update the codebase SQLite index via AST browsing.",
-            arguments=[
-                types.PromptArgument(name="target", description="Target path to index", required=True)
-            ]
-        )
-    ]
+async def handle_list_prompts(
+    ctx: Any,
+    params: types.PaginatedRequestParams | None
+) -> types.ListPromptsResult:
+    return types.ListPromptsResult(
+        prompts=[
+            types.Prompt(
+                name="browse",
+                description="Browse codebase structure or search.",
+                arguments=[
+                    types.PromptArgument(name="target", description="Target path to browse", required=True),
+                    types.PromptArgument(name="view", description="View type (summary, classes, etc.)", required=False)
+                ]
+            ),
+            types.Prompt(
+                name="metrics",
+                description="Calculate OOP, complexity, or hotspot metrics.",
+                arguments=[
+                    types.PromptArgument(name="target", description="Target path", required=True),
+                    types.PromptArgument(name="what", description="What to measure (oop, complexity, hotspots, all)", required=False)
+                ]
+            ),
+            types.Prompt(
+                name="report",
+                description="Export a full analysis report to disk.",
+                arguments=[
+                    types.PromptArgument(name="repo_path", description="Repository path", required=True),
+                    types.PromptArgument(name="output_path", description="Output JSON report path", required=True)
+                ]
+            ),
+            types.Prompt(
+                name="update_index",
+                description="Update the codebase SQLite index via AST browsing.",
+                arguments=[
+                    types.PromptArgument(name="target", description="Target path to index", required=True)
+                ]
+            )
+        ]
+    )
 
-@server.get_prompt()
-async def handle_get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptResult:
-    args = arguments or {}
+async def handle_get_prompt(
+    ctx: Any,
+    params: types.GetPromptRequestParams
+) -> types.GetPromptResult:
+    name = params.name
+    arguments = params.arguments or {}
     if name == "browse":
-        target = args.get("target", "")
-        view = args.get("view", "summary")
+        target = arguments.get("target", "")
+        view = arguments.get("view", "summary")
         return types.GetPromptResult(
             description="Browse codebase structure or search",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the browse tool on target '{target}' with view '{view}'."))]
         )
     elif name == "metrics":
-        target = args.get("target", "")
-        what = args.get("what", "all")
+        target = arguments.get("target", "")
+        what = arguments.get("what", "all")
         return types.GetPromptResult(
             description="Calculate metrics",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please calculate '{what}' metrics for the target '{target}'."))]
         )
     elif name == "report":
-        repo_path = args.get("repo_path", "")
-        output_path = args.get("output_path", "")
+        repo_path = arguments.get("repo_path", "")
+        output_path = arguments.get("output_path", "")
         return types.GetPromptResult(
             description="Generate report",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please generate and export an analysis report for '{repo_path}' to '{output_path}'."))]
         )
     elif name == "update_index":
-        target = args.get("target", "")
+        target = arguments.get("target", "")
         return types.GetPromptResult(
             description="Update SQLite index",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the update_index tool on target '{target}'."))]
         )
     raise ValueError(f"Prompt not found: {name}")
 
-@server.completion()
 async def handle_completion(
-    ref: types.PromptReference | types.ResourceTemplateReference,
-    argument: types.CompletionArgument,
-    context: types.CompletionContext | None = None
-) -> types.Completion:
+    ctx: Any,
+    params: types.CompleteRequestParams
+) -> types.CompleteResult:
+    ref = params.ref
+    argument = params.argument
+    result = None
     if isinstance(ref, types.PromptReference):
         if ref.name == "browse":
             if argument.name == "view":
                 views = ["summary", "classes", "functions", "deps", "tree", "search"]
-                return types.Completion(
+                result = types.Completion(
                     values=[v for v in views if v.startswith(argument.value.lower())],
-                    hasMore=False
+                    has_more=False
                 )
             elif argument.name == "target":
                 val = argument.value or ""
@@ -505,27 +587,27 @@ async def handle_completion(
                             files.append(m)
                     if len(files) >= 50:
                         break
-                return types.Completion(values=sorted(files)[:20], hasMore=len(files) > 20)
+                result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
 
         elif ref.name == "metrics":
             if argument.name == "what":
                 whats = ["oop", "complexity", "hotspots", "all"]
-                return types.Completion(
+                result = types.Completion(
                     values=[w for w in whats if w.startswith(argument.value.lower())],
-                    hasMore=False
+                    has_more=False
                 )
             elif argument.name == "target":
                 val = argument.value or ""
                 matches = glob.glob(val + "*")
                 paths = sorted(matches)[:20]
-                return types.Completion(values=paths, hasMore=len(matches) > 20)
+                result = types.Completion(values=paths, has_more=len(matches) > 20)
 
         elif ref.name == "report":
             if argument.name == "repo_path":
                 val = argument.value or ""
                 matches = [m for m in glob.glob(val + "*") if os.path.isdir(m)]
                 paths = sorted(matches)[:20]
-                return types.Completion(values=paths, hasMore=len(matches) > 20)
+                result = types.Completion(values=paths, has_more=len(matches) > 20)
 
         elif ref.name == "update_index":
             if argument.name == "target":
@@ -539,8 +621,16 @@ async def handle_completion(
                             files.append(m)
                     if len(files) >= 50:
                         break
-                return types.Completion(values=sorted(files)[:20], hasMore=len(files) > 20)
+                result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
 
-    return types.Completion(values=[], total=None, hasMore=None)
+    return types.CompleteResult(
+        completion=result if result is not None else types.Completion(values=[], total=None, has_more=None)
+    )
 
+# Register request handlers explicitly
+server.add_request_handler("tools/list", types.PaginatedRequestParams, handle_list_tools)
+server.add_request_handler("tools/call", types.CallToolRequestParams, handle_call_tool)
+server.add_request_handler("prompts/list", types.PaginatedRequestParams, handle_list_prompts)
+server.add_request_handler("prompts/get", types.GetPromptRequestParams, handle_get_prompt)
+server.add_request_handler("completion/complete", types.CompleteRequestParams, handle_completion)
 

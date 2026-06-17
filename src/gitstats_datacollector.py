@@ -664,6 +664,8 @@ class DataCollector:
 	# This should be the main function to extract data from the repository.
 	def collect(self, dir):
 		self.dir = dir
+		# Re-initialize OOP Metrics Analyzer with the correct repository path
+		self.oop_analyzer = OOPMetricsAnalyzer(repo_path=dir)
 		if len(conf['project_name']) == 0:
 			self.projectname = os.path.basename(os.path.abspath(dir))
 		else:

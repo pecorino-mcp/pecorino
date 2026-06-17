@@ -48,9 +48,16 @@ class OOPMetricsAnalyzer:
 		self.dependencies = defaultdict(set)  # file_path -> set of dependencies
 		self.dependents = defaultdict(set)    # file_path -> set of dependents
 		self.use_ast = use_ast  # AST always available
-		from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo
-		db_path = get_db_path_for_repo(repo_path) if repo_path else None
+		from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+		import os
+		import graphqlite
+		
+		# Resolve database path based on repository path or current directory
+		self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
+		db_path = get_db_path_for_repo(self.repo_path)
+		
 		self.search_index = CodeSearchIndex(db_path)
+		self.graph = graphqlite.Graph(db_path=db_path)
 
 	def analyze_file(self, filepath: str, content: str, file_extension: str) -> Dict:
 		"""
@@ -144,6 +151,13 @@ class OOPMetricsAnalyzer:
 			tree = parse(content, file_extension)
 			content_lines = content.splitlines()
 			self.search_index.clear_file(filepath)
+			# Clear previous graph database nodes for this file
+			try:
+				self.graph.query("MATCH (f:File {id: $id})-[r1:REL_CONTAINS]->(c:Class)-[r2:REL_CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
+				self.graph.query("MATCH (f:File {id: $id})-[r:REL_CONTAINS]->(child) DETACH DELETE child", {"id": filepath})
+				self.graph.query("MATCH (f:File {id: $id}) DETACH DELETE f", {"id": filepath})
+			except Exception:
+				pass
 
 			metrics = {
 				'classes_defined': 0,
@@ -184,6 +198,7 @@ class OOPMetricsAnalyzer:
 					all_class_names.add(node.name)
 
 			# Second pass: calculate metrics
+			nodes_to_index = []
 			for node in walk(tree):
 				if isinstance(node, ClassDef):
 					metrics['classes_defined'] += 1
@@ -202,15 +217,15 @@ class OOPMetricsAnalyzer:
 
 					# Index class
 					body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
-					self.search_index.index_node(
-						name=node.name,
-						node_type='class',
-						filepath=filepath,
-						body_text=body,
-						start_line=node.lineno,
-						end_line=node.end_lineno,
-						metrics={'wmc': node.wmc, 'cbo': node.cbo, 'rfc': node.rfc, 'lcom': node.lcom}
-					)
+					nodes_to_index.append({
+						'name': node.name,
+						'node_type': 'class',
+						'filepath': filepath,
+						'body_text': body,
+						'start_line': node.lineno,
+						'end_line': node.end_lineno,
+						'metrics': {'wmc': node.wmc, 'cbo': node.cbo, 'rfc': node.rfc, 'lcom': node.lcom}
+					})
 
 					# Store per-class details for drill-down
 					class_info = {
@@ -245,15 +260,15 @@ class OOPMetricsAnalyzer:
 
 					for m in node.methods:
 						m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
-						self.search_index.index_node(
-							name=f"{node.name}.{m.name}",
-							node_type='method',
-							filepath=filepath,
-							body_text=m_body,
-							start_line=m.lineno,
-							end_line=m.end_lineno,
-							metrics={'cyclomatic_complexity': m.cyclomatic_complexity}
-						)
+						nodes_to_index.append({
+							'name': f"{node.name}.{m.name}",
+							'node_type': 'method',
+							'filepath': filepath,
+							'body_text': m_body,
+							'start_line': m.lineno,
+							'end_line': m.end_lineno,
+							'metrics': {'cyclomatic_complexity': m.cyclomatic_complexity}
+						})
 
 				elif isinstance(node, InterfaceDef):
 					metrics['interfaces_defined'] += 1
@@ -285,15 +300,71 @@ class OOPMetricsAnalyzer:
 				})
 
 				f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
-				self.search_index.index_node(
-					name=func.name,
-					node_type='function',
-					filepath=filepath,
-					body_text=f_body,
-					start_line=func.lineno,
-					end_line=func.end_lineno,
-					metrics={'cyclomatic_complexity': func.cyclomatic_complexity}
-				)
+				nodes_to_index.append({
+					'name': func.name,
+					'node_type': 'function',
+					'filepath': filepath,
+					'body_text': f_body,
+					'start_line': func.lineno,
+					'end_line': func.end_lineno,
+					'metrics': {'cyclomatic_complexity': func.cyclomatic_complexity}
+				})
+
+			if nodes_to_index:
+				self.search_index.index_nodes(nodes_to_index)
+
+			# Populate graph database nodes and edges for this file
+			import os
+			graph_nodes = []
+			graph_edges = []
+			
+			file_id = filepath
+			graph_nodes.append((file_id, {"name": os.path.basename(filepath), "path": filepath, "extension": file_extension}, "File"))
+			
+			for node in walk(tree):
+				if isinstance(node, ClassDef):
+					class_id = f"{filepath}::{node.name}"
+					graph_nodes.append((class_id, {"name": node.name}, "Class"))
+					graph_edges.append((file_id, class_id, {}, "CONTAINS"))
+					
+					for m in node.methods:
+						method_id = f"{class_id}::{m.name}"
+						graph_nodes.append((method_id, {"name": m.name, "complexity": m.cyclomatic_complexity}, "Method"))
+						graph_edges.append((class_id, method_id, {}, "CONTAINS"))
+						
+			for func in tree.functions:
+				func_id = f"{filepath}::{func.name}"
+				graph_nodes.append((func_id, {"name": func.name, "complexity": func.cyclomatic_complexity}, "Function"))
+				graph_edges.append((file_id, func_id, {}, "CONTAINS"))
+				
+			for dep in metrics['dependencies']:
+				# Best-effort dependency file resolution
+				resolved_dep_path = None
+				parts = dep.split('.')
+				dep_suffix = "/".join(parts)
+				for ext in ['.py', '.java', '.js', '.ts', '.go', '.rs', '.swift']:
+					test_rel_path = dep_suffix + ext
+					test_abs_path = os.path.join(self.repo_path, test_rel_path)
+					if os.path.exists(test_abs_path):
+						resolved_dep_path = os.path.abspath(test_abs_path)
+						break
+				
+				if resolved_dep_path:
+					dep_id = resolved_dep_path
+					graph_nodes.append((dep_id, {"name": os.path.basename(resolved_dep_path), "path": resolved_dep_path}, "File"))
+				else:
+					dep_id = dep
+					graph_nodes.append((dep_id, {"name": dep}, "Module"))
+					
+				graph_edges.append((file_id, dep_id, {}, "DEPENDS_ON"))
+				
+			if graph_nodes:
+				try:
+					id_map = self.graph.insert_nodes_bulk(graph_nodes)
+					if graph_edges:
+						self.graph.insert_edges_bulk(graph_edges, id_map)
+				except Exception as e:
+					print(f"Warning: Failed to insert graph nodes/edges for {filepath}: {e}")
 
 			# Calculate function-level metrics for all files (OOP and non-OOP)
 			metrics['function_count'] = len(tree.functions)
