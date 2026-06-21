@@ -7,9 +7,9 @@ in the main module but caused circular dependencies when used by collectors.
 
 import re
 
-from .gitstats_config import conf
-from .gitstats_gitcommands import getpipeoutput
-from .gitstats_helpers import should_include_file
+from src.core.config import conf
+from src.git.commands import getpipeoutput
+from src.utils.helpers import should_include_file
 
 
 def getnumoffilesfromrev(time_rev):

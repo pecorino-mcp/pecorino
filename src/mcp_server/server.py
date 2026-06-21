@@ -4,16 +4,13 @@ import argparse
 from pathlib import Path
 
 # Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
-workspace_root = Path(__file__).resolve().parent.parent
+workspace_root = Path(__file__).resolve().parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-sdk_path = workspace_root / "modules" / "python-sdk" / "src"
-if str(sdk_path) not in sys.path:
-    sys.path.insert(0, str(sdk_path))
 
-from src.mcp_core.config import settings
-from src.mcp_core.server import server as mcp_server
+from src.mcp_server.config import settings
+from src.mcp_server.core import server as mcp_server
 
 def main():
     parser = argparse.ArgumentParser(description="Run OOP Metrics Analyzer Server")
@@ -21,7 +18,7 @@ def main():
     parser.add_argument("--host", help="Host address for network transports (overrides HOST env var)")
     parser.add_argument("--port", type=int, help="Port number for network transports (overrides PORT env var)")
 
-    args, unknown = parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
     # CLI args override environment variables if provided
     if args.transport:
@@ -31,13 +28,17 @@ def main():
     if args.port:
         settings.port = args.port
 
+    # Run global safe startup migration
+    from src.mcp_server.index import migrate_all
+    migrate_all()
+
     if settings.transport == "stdio":
         from src.transports.stdio_adapter import run_stdio
         asyncio.run(run_stdio(mcp_server))
     elif settings.transport == "sse":
         try:
-            import uvicorn
-            import fastapi
+            import uvicorn  # noqa: F401
+            import fastapi  # noqa: F401
         except ImportError:
             print("Error: fastapi and uvicorn must be installed to use SSE transport.", file=sys.stderr)
             sys.exit(1)
@@ -45,8 +46,8 @@ def main():
         asyncio.run(run_sse(mcp_server))
     elif settings.transport == "streamable-http":
         try:
-            import uvicorn
-            import fastapi
+            import uvicorn  # noqa: F401
+            import fastapi  # noqa: F401
         except ImportError:
             print("Error: fastapi and uvicorn must be installed to use streamable-http transport.", file=sys.stderr)
             sys.exit(1)

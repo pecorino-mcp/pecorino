@@ -2,7 +2,7 @@ import sys
 import jwt
 from fastapi import Request
 from fastapi.exceptions import HTTPException
-from src.mcp_core.config import settings
+from src.mcp_server.config import settings
 
 def verify_oauth_token(request: Request) -> dict:
     if not settings.oauth_required:

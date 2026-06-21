@@ -9,7 +9,7 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-from .gitstats_config import conf
+from src.core.config import conf
 
 
 class DateTimeEncoder(json.JSONEncoder):

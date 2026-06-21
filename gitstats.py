@@ -45,12 +45,12 @@ from src import (
 )
 
 # Re-export for backward compatibility
-from src.gitstats_helpers import (
+from src.utils.helpers import (
     get_output_format,
     exectime_internal,
     time_start,
 )
-from src.gitstats_analyzers import (
+from src.metrics.analyzers import (
     getnumoffilesfromrev,
     getnumoflinesinblob,
     analyzesloc,

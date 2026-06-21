@@ -3,46 +3,56 @@ import glob
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, List, Optional
 
-# Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
-workspace_root = Path(__file__).resolve().parent.parent
-if str(workspace_root) not in sys.path:
-    sys.path.insert(0, str(workspace_root))
-
-sdk_path = workspace_root / "modules" / "python-sdk" / "src"
-if str(sdk_path) not in sys.path:
-    sys.path.insert(0, str(sdk_path))
-
-import time
-
-import jwt
-from src.mcp_core.metrics import TOOL_CALLS, TOOL_ERRORS, TOOL_DURATION
 import mcp.types as types
-from mcp.server.lowlevel import Server, NotificationOptions
-from mcp.server.models import InitializationOptions
+from mcp.server.lowlevel import Server
 
-from src.gitstats_ast import ClassDef, InterfaceDef, walk
-from src.gitstats_export import MetricsExporter
-from src.gitstats_gitdatacollector import GitDataCollector
-from src.gitstats_hotspot import HotspotDetector
-from src.gitstats_maintainability import (
+from src.core.gitdatacollector import GitDataCollector
+from src.mcp_server.metrics import TOOL_CALLS, TOOL_DURATION, TOOL_ERRORS
+from src.metrics.hotspot import HotspotDetector
+from src.metrics.maintainability import (
     calculate_halstead_metrics,
     calculate_loc_metrics,
     calculate_maintainability_index,
     calculate_mccabe_complexity,
 )
-from src.gitstats_oopmetrics import OOPMetricsAnalyzer, parse
+from src.metrics.oopmetrics import OOPMetricsAnalyzer, parse
+from src.utils.export import MetricsExporter
 
 server = Server("OOP Metrics Analyzer Server 🚀")
 
 SUPPORTED = {'.py','.pyi','.java','.scala','.kt','.js','.jsx','.ts','.tsx',
              '.cpp','.cc','.cxx','.c','.h','.hpp','.hxx','.go','.rs','.swift'}
 
+# Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
+workspace_root = Path(__file__).resolve().parent.parent.parent
+if str(workspace_root) not in sys.path:
+    sys.path.insert(0, str(workspace_root))
+
 def safe_path(p: str) -> Path:
+    if not p:
+        p = "."
     path = Path(p).expanduser().resolve()
-    allowed_roots = [workspace_root, workspace_root.parent, workspace_root.parent.parent]
+
+    allowed_roots = [
+        workspace_root,
+        workspace_root.parent,
+        workspace_root.parent.parent
+    ]
+
+    # Safely allow the current working directory, avoiding high-risk roots
+    cwd = Path.cwd()
+    restricted_roots = {Path("/"), Path.home()}
+
+    if cwd not in restricted_roots:
+        allowed_roots.append(cwd)
+        # Also allow cwd.parent if it's not a restricted root
+        if cwd.parent not in restricted_roots:
+            allowed_roots.append(cwd.parent)
+
     if not any(path.is_relative_to(r) for r in allowed_roots):
         raise ValueError(f"Path outside workspace: {path}")
     if not path.exists():
@@ -50,12 +60,34 @@ def safe_path(p: str) -> Path:
     return path
 
 # Core implementation of tools (without decorators)
-async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10) -> dict:
+async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, max_depth: int = 3) -> dict:
     path = safe_path(target)
-    from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+    from src.mcp_server.index import CodeSearchIndex, find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
     index = CodeSearchIndex(db_path=db_path)
+
+    # Initialize GraphAPI if view is a graph-related view
+    api = None
+    if view in ("callers", "callees", "impact", "summary", "deps"):
+        from src.mcp_server.graph_api import GraphAPI
+        api = GraphAPI(repo_path=repo_root)
+
+    if view == "callers":
+        if not query:
+            raise ValueError("Query (function/method name) is required for callers view")
+        callers = await asyncio.to_thread(api.find_callers, query)
+        return {"status": "success", "target": query, "callers": callers}
+
+    if view == "callees":
+        if not query:
+            raise ValueError("Query (function/method name) is required for callees view")
+        callees = await asyncio.to_thread(api.find_callees, query)
+        return {"status": "success", "target": query, "callees": callees}
+
+    if view == "impact":
+        deps = await asyncio.to_thread(api.impact_analysis, path.as_posix(), max_depth)
+        return {"status": "success", "target": path.as_posix(), "dependent_files": deps}
 
     if view == "search":
         if not query:
@@ -65,14 +97,15 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
 
     if path.is_dir():
-        if view not in ["summary", "search"]:
+        if view not in ["summary", "search", "callers", "callees"]:
             raise ValueError(f"View '{view}' is only supported for specific files, not directories.")
 
         nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
         indexed_files = len(set(n['filepath'] for n in nodes))
 
+
         return {
-            "target": str(path),
+            "target": path.as_posix(),
             "type": "directory",
             "structure": {
                 "indexed_files": indexed_files,
@@ -83,13 +116,13 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     if path.suffix not in SUPPORTED:
         raise ValueError(f"Unsupported extension: {path.suffix}")
 
-    result: dict[str, Any] = {"target": str(path), "type": "file"}
+    result: dict[str, Any] = {"target": path.as_posix(), "type": "file"}
 
     if view == "tree":
         import tree_sitter
 
-        from src.gitstats_tree_sitter_parser import get_language_from_extension
-        from src.tsgm import TreeSitterGrammarManager
+        from src.parsers.tree_sitter_parser import get_language_from_extension
+        from src.parsers.tsgm import TreeSitterGrammarManager
         content = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='ignore')
         lang = TreeSitterGrammarManager().get_language(get_language_from_extension(path.suffix))
         parser = tree_sitter.Parser(lang)
@@ -122,45 +155,12 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     # Graph database dependency and PageRank retrieval
     if view in ("summary", "deps"):
         try:
-            import graphqlite
-            from graphqlite import sanitize_rel_type
-            
-            rel_depends = sanitize_rel_type("DEPENDS_ON")
-            graph = graphqlite.Graph(db_path=db_path)
-            
-            # Query incoming file dependencies
-            inc_res = graph.query(f"MATCH (other:File)-[:{rel_depends}]->(f:File {{id: $id}}) RETURN other.id AS id", {"id": str(path)})
-            incoming_deps = [r["id"] for r in inc_res]
-            
-            # Query outgoing file/module dependencies
-            out_res = graph.query(f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, labels(other) AS labels", {"id": str(path)})
-            outgoing_deps = [{"id": r["id"], "type": r["labels"][0] if r.get("labels") else "Unknown"} for r in out_res]
-            
-            # Query PageRank centrality
-            pagerank_score = 0.0
-            try:
-                pr_scores = graph.pagerank()
-                for pr in pr_scores:
-                    if pr.get("node_id") == str(path):
-                        pagerank_score = pr.get("score", 0.0)
-                        break
-            except Exception:
-                pass
-                
-            # Add to result structure
+            graph_metrics = await asyncio.to_thread(api.get_file_dependencies, path.as_posix())
             if view == "summary":
                 if "structure" in result and isinstance(result["structure"], dict):
-                    result["structure"]["graph_metrics"] = {
-                        "incoming_dependencies": incoming_deps,
-                        "outgoing_dependencies": outgoing_deps,
-                        "pagerank_score": pagerank_score
-                    }
+                    result["structure"]["graph_metrics"] = graph_metrics
             else: # view == "deps"
-                result["graph_metrics"] = {
-                    "incoming_dependencies": incoming_deps,
-                    "outgoing_dependencies": outgoing_deps,
-                    "pagerank_score": pagerank_score
-                }
+                result["graph_metrics"] = graph_metrics
         except Exception as e:
             sys.stderr.write(f"[WARNING] Graph database query failed: {e}\n")
             sys.stderr.flush()
@@ -170,13 +170,13 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
 async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
     path = safe_path(target)
-    from src.gitstats_index import find_repo_root
+    from src.mcp_server.index import find_repo_root
     repo_root = find_repo_root(str(path))
     what_set = {w.lower() for w in what}
     if "all" in what_set:
         what_set = {"oop", "complexity", "hotspots"}
 
-    result: dict[str, Any] = {"target": str(path), "type": "file" if path.is_file() else "directory"}
+    result: dict[str, Any] = {"target": path.as_posix(), "type": "file" if path.is_file() else "directory"}
 
     if path.is_file():
         content = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='ignore')
@@ -195,7 +195,13 @@ async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
         if "oop" in what_set or "complexity" in what_set:
             analyzer = OOPMetricsAnalyzer(use_ast=True, repo_path=repo_root)
             ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
-            files = [f for f in path.rglob("*") if f.suffix in SUPPORTED and not any(p in ignore_dirs for p in f.parts)]
+            files = []
+            for r, d, fnames in os.walk(str(path)):
+                d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
+                for fname in fnames:
+                    fp = Path(r) / fname
+                    if fp.suffix in SUPPORTED:
+                        files.append(fp)
             for fp in files:
                 try:
                     txt = await asyncio.to_thread(fp.read_text, encoding='utf-8', errors='ignore')
@@ -230,7 +236,7 @@ async def do_report(repo_path: str, output_path: str) -> dict:
     out_dir = Path(output_path).expanduser().resolve() / f"{safe_repo_name}_report"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    from src.gitstats_config import conf
+    from src.core.config import conf
     conf['calculate_mi_per_repository'] = True
 
     data = GitDataCollector()
@@ -255,117 +261,134 @@ async def do_report(repo_path: str, output_path: str) -> dict:
 
 async def do_update_index(target: str) -> dict:
     path = safe_path(target)
-    from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+    from src.mcp_server.index import find_repo_root
+    from src.mcp_server.indexer import CodebaseIndexer
+    from mcp.server.lowlevel.server import request_ctx
+
     repo_root = find_repo_root(str(path))
-    db_path = get_db_path_for_repo(repo_root)
-    index = CodeSearchIndex(db_path=db_path)
-
-    async def _index_file_tree(filepath: str, content: str, tree):
-        await asyncio.to_thread(index.clear_file, filepath)
-        content_lines = content.splitlines()
-        nodes_to_index = []
-
-        for node in walk(tree):
-            if isinstance(node, ClassDef):
-                body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
-                nodes_to_index.append({
-                    'name': node.name,
-                    'node_type': 'class',
-                    'filepath': filepath,
-                    'body_text': body,
-                    'start_line': node.lineno,
-                    'end_line': node.end_lineno,
-                    'metrics': {'wmc': getattr(node, 'wmc', 0), 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
-                })
-                for m in node.methods:
-                    m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
-                    nodes_to_index.append({
-                        'name': f"{node.name}.{m.name}",
-                        'node_type': 'method',
-                        'filepath': filepath,
-                        'body_text': m_body,
-                        'start_line': m.lineno,
-                        'end_line': m.end_lineno,
-                        'metrics': {'cyclomatic_complexity': getattr(m, 'cyclomatic_complexity', 1)}
-                    })
-            elif isinstance(node, InterfaceDef):
-                body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
-                nodes_to_index.append({
-                    'name': node.name,
-                    'node_type': 'interface',
-                    'filepath': filepath,
-                    'body_text': body,
-                    'start_line': node.lineno,
-                    'end_line': node.end_lineno,
-                    'metrics': {}
-                })
-                for m in node.methods:
-                    m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
-                    nodes_to_index.append({
-                        'name': f"{node.name}.{m.name}",
-                        'node_type': 'method',
-                        'filepath': filepath,
-                        'body_text': m_body,
-                        'start_line': m.lineno,
-                        'end_line': m.end_lineno,
-                        'metrics': {'cyclomatic_complexity': getattr(m, 'cyclomatic_complexity', 1)}
-                    })
-
-        for func in tree.functions:
-            f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
-            nodes_to_index.append({
-                'name': func.name,
-                'node_type': 'function',
-                'filepath': filepath,
-                'body_text': f_body,
-                'start_line': func.lineno,
-                'end_line': func.end_lineno,
-                'metrics': {'cyclomatic_complexity': getattr(func, 'cyclomatic_complexity', 1)}
-            })
-
-        if nodes_to_index:
-            await asyncio.to_thread(index.index_nodes, nodes_to_index)
 
     if path.is_dir():
-        ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
-        files = [f for f in path.rglob("*") if f.suffix in SUPPORTED and not any(p in ignore_dirs for p in f.parts)]
-        indexed_count = 0
-        for fp in files:
-            try:
-                content = await asyncio.to_thread(fp.read_text, encoding='utf-8', errors='ignore')
-                tree = await asyncio.to_thread(parse, content, fp.suffix)
-                await _index_file_tree(str(fp), content, tree)
-                indexed_count += 1
-            except Exception:
-                pass
-        return {"status": "success", "indexed_files": indexed_count, "total_files_found": len(files)}
+        # Get request context to retrieve progress token and session
+        try:
+            ctx = request_ctx.get()
+        except LookupError:
+            ctx = None
+
+        progress_token = None
+        if ctx and ctx.meta:
+            sys.stderr.write(f"[DEBUG] ctx.meta type: {type(ctx.meta)}, value: {ctx.meta}\n")
+            sys.stderr.flush()
+            if isinstance(ctx.meta, dict):
+                progress_token = ctx.meta.get("progressToken") or ctx.meta.get("progress_token")
+            else:
+                progress_token = getattr(ctx.meta, "progressToken", getattr(ctx.meta, "progress_token", None))
+
+
+        # Spawn index_worker.py in a subprocess using same python executable
+        python_bin = sys.executable or "python"
+        
+        proc = await asyncio.create_subprocess_exec(
+            python_bin, "-m", "src.mcp_server.index_worker", repo_root, str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(workspace_root)
+        )
+
+        final_res = {}
+        
+        async def read_stdout():
+            nonlocal final_res
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                line_str = line.decode('utf-8', errors='ignore').strip()
+                if not line_str:
+                    continue
+                try:
+                    data = json.loads(line_str)
+                    if "result" in data:
+                        final_res = data["result"]
+                    elif "current" in data and "total" in data:
+                        current = data["current"]
+                        total = data["total"]
+                        filename = os.path.basename(data.get("file", ""))
+                        msg = f"Indexing {filename} ({current}/{total})"
+                        sys.stderr.write(f"[INFO] {msg}\n")
+                        sys.stderr.flush()
+                        
+                        if ctx and progress_token is not None:
+                            try:
+                                req_id = str(ctx.request_id) if ctx.request_id is not None else None
+                                await ctx.session.send_progress_notification(
+                                    progress_token=progress_token,
+                                    progress=current,
+                                    total=total,
+                                    message=msg,
+                                    related_request_id=req_id
+                                )
+                            except Exception as e:
+                                sys.stderr.write(f"[WARNING] Failed to send progress notification: {e}\n")
+                                sys.stderr.flush()
+                except Exception as e:
+                    sys.stderr.write(f"[WARNING] Subprocess parse error: {e} for line: {line_str}\n")
+                    sys.stderr.flush()
+
+        async def read_stderr():
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                line_str = line.decode('utf-8', errors='ignore').strip()
+                if line_str:
+                    sys.stderr.write(f"[INDEX WORKER LOG] {line_str}\n")
+                    sys.stderr.flush()
+
+        await asyncio.gather(read_stdout(), read_stderr(), proc.wait())
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"Index subprocess failed with exit code {proc.returncode}")
+
+        final_res["target"] = path.as_posix()
+        return final_res
 
     if path.suffix not in SUPPORTED:
         raise ValueError(f"Unsupported extension: {path.suffix}")
 
     content = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='ignore')
-    tree = await asyncio.to_thread(parse, content, path.suffix)
-    await _index_file_tree(str(path), content, tree)
-    return {"status": "success", "indexed_files": 1, "total_files_found": 1}
+
+    def _index_file():
+        indexer = CodebaseIndexer(repo_path=repo_root)
+        indexer.index_file(str(path), content, path.suffix)
+
+    await asyncio.to_thread(_index_file)
+    return {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
+
 
 # Low-level Handlers
 
-async def handle_list_tools(
-    ctx: Any,
-    params: types.PaginatedRequestParams | None
-) -> types.ListToolsResult:
+@server.list_tools()
+async def handle_list_tools() -> types.ListToolsResult:
     return types.ListToolsResult(
         tools=[
             types.Tool(
                 name="browse",
-                description="Browse the codebase (structure or semantic search). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree.",
-                input_schema={
+                description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact.",
+                inputSchema={
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string"},
+                        "target": {
+                            "type": "string",
+                            "description": "Absolute path to the target directory or file. Cannot be empty. If working on an external directory, provide its full absolute path."
+                        },
                         "view": {"type": "string", "default": "summary"},
                         "query": {"type": "string"},
-                        "limit": {"type": "integer", "default": 10}
+                        "limit": {"type": "integer", "default": 10},
+                        "max_depth": {
+                            "type": "integer",
+                            "default": 3,
+                            "description": "Max depth for impact analysis (only applicable if view is 'impact')."
+                        }
                     },
                     "required": ["target"]
                 }
@@ -373,10 +396,13 @@ async def handle_list_tools(
             types.Tool(
                 name="metrics",
                 description="Calculate OOP, complexity, or hotspot metrics.",
-                input_schema={
+                inputSchema={
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string"},
+                        "target": {
+                            "type": "string",
+                            "description": "Absolute path to the target directory or file. Cannot be empty. If working on an external directory, provide its full absolute path."
+                        },
                         "what": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -389,10 +415,13 @@ async def handle_list_tools(
             types.Tool(
                 name="report",
                 description="Generate and export a full analysis report to disk.",
-                input_schema={
+                inputSchema={
                     "type": "object",
                     "properties": {
-                        "repo_path": {"type": "string"},
+                        "repo_path": {
+                            "type": "string",
+                            "description": "Absolute path to the target repository. Cannot be empty."
+                        },
                         "output_path": {"type": "string"}
                     },
                     "required": ["repo_path", "output_path"]
@@ -401,10 +430,13 @@ async def handle_list_tools(
             types.Tool(
                 name="update_index",
                 description="Update the codebase SQLite index via AST browsing.",
-                input_schema={
+                inputSchema={
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string"}
+                        "target": {
+                            "type": "string",
+                            "description": "Absolute path to the target directory or file. Cannot be empty. If working on an external directory, provide its full absolute path."
+                        }
                     },
                     "required": ["target"]
                 }
@@ -412,12 +444,8 @@ async def handle_list_tools(
         ]
     )
 
-async def handle_call_tool(
-    ctx: Any,
-    params: types.CallToolRequestParams
-) -> types.CallToolResult:
-    name = params.name
-    arguments = params.arguments or {}
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
     start_time = time.time()
 
     sys.stderr.write(f"[INFO] MCP Tool Call: '{name}' with arguments: {json.dumps(arguments)}\n")
@@ -426,18 +454,32 @@ async def handle_call_tool(
     TOOL_CALLS.labels(tool=name).inc()
 
     try:
+        def _normalize_target(t: Any) -> Any:
+            if isinstance(t, dict) and "target" in t:
+                t = t["target"]
+            elif isinstance(t, str) and t.strip().startswith("{") and t.strip().endswith("}"):
+                try:
+                    import json
+                    parsed = json.loads(t)
+                    if isinstance(parsed, dict) and "target" in parsed:
+                        t = parsed["target"]
+                except Exception:
+                    pass
+            return t
+
         if name == "browse":
-            target = arguments.get("target")
+            target = _normalize_target(arguments.get("target"))
             if not isinstance(target, str):
                 raise ValueError("target must be a string")
             res = await do_browse(
                 target=target,
                 view=arguments.get("view", "summary"),
                 query=arguments.get("query"),
-                limit=arguments.get("limit", 10)
+                limit=arguments.get("limit", 10),
+                max_depth=arguments.get("max_depth", 3)
             )
         elif name == "metrics":
-            target = arguments.get("target")
+            target = _normalize_target(arguments.get("target"))
             if not isinstance(target, str):
                 raise ValueError("target must be a string")
             res = await do_metrics(
@@ -454,7 +496,7 @@ async def handle_call_tool(
                 output_path=output_path
             )
         elif name == "update_index":
-            target = arguments.get("target")
+            target = _normalize_target(arguments.get("target"))
             if not isinstance(target, str):
                 raise ValueError("target must be a string")
             res = await do_update_index(
@@ -483,13 +525,11 @@ async def handle_call_tool(
 
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=f"Error: {e}")],
-            is_error=True
+            isError=True
         )
 
-async def handle_list_prompts(
-    ctx: Any,
-    params: types.PaginatedRequestParams | None
-) -> types.ListPromptsResult:
+@server.list_prompts()
+async def handle_list_prompts() -> types.ListPromptsResult:
     return types.ListPromptsResult(
         prompts=[
             types.Prompt(
@@ -526,12 +566,9 @@ async def handle_list_prompts(
         ]
     )
 
-async def handle_get_prompt(
-    ctx: Any,
-    params: types.GetPromptRequestParams
-) -> types.GetPromptResult:
-    name = params.name
-    arguments = params.arguments or {}
+@server.get_prompt()
+async def handle_get_prompt(name: str, arguments: dict | None) -> types.GetPromptResult:
+    arguments = arguments or {}
     if name == "browse":
         target = arguments.get("target", "")
         view = arguments.get("view", "summary")
@@ -561,12 +598,12 @@ async def handle_get_prompt(
         )
     raise ValueError(f"Prompt not found: {name}")
 
+@server.completion()
 async def handle_completion(
-    ctx: Any,
-    params: types.CompleteRequestParams
+    ref: types.PromptReference | types.ResourceTemplateReference,
+    argument: types.CompletionArgument,
+    context: types.CompletionContext | None
 ) -> types.CompleteResult:
-    ref = params.ref
-    argument = params.argument
     result = None
     if isinstance(ref, types.PromptReference):
         if ref.name == "browse":
@@ -574,7 +611,7 @@ async def handle_completion(
                 views = ["summary", "classes", "functions", "deps", "tree", "search"]
                 result = types.Completion(
                     values=[v for v in views if v.startswith(argument.value.lower())],
-                    has_more=False
+                    hasMore=False
                 )
             elif argument.name == "target":
                 val = argument.value or ""
@@ -585,29 +622,31 @@ async def handle_completion(
                         ext = os.path.splitext(m)[1].lower()
                         if ext in SUPPORTED:
                             files.append(m)
+                    elif os.path.isdir(m):
+                        files.append(m)
                     if len(files) >= 50:
                         break
-                result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
+                result = types.Completion(values=sorted(files)[:20], hasMore=len(files) > 20)
 
         elif ref.name == "metrics":
             if argument.name == "what":
                 whats = ["oop", "complexity", "hotspots", "all"]
                 result = types.Completion(
                     values=[w for w in whats if w.startswith(argument.value.lower())],
-                    has_more=False
+                    hasMore=False
                 )
             elif argument.name == "target":
                 val = argument.value or ""
                 matches = glob.glob(val + "*")
                 paths = sorted(matches)[:20]
-                result = types.Completion(values=paths, has_more=len(matches) > 20)
+                result = types.Completion(values=paths, hasMore=len(matches) > 20)
 
         elif ref.name == "report":
             if argument.name == "repo_path":
                 val = argument.value or ""
                 matches = [m for m in glob.glob(val + "*") if os.path.isdir(m)]
                 paths = sorted(matches)[:20]
-                result = types.Completion(values=paths, has_more=len(matches) > 20)
+                result = types.Completion(values=paths, hasMore=len(matches) > 20)
 
         elif ref.name == "update_index":
             if argument.name == "target":
@@ -619,18 +658,14 @@ async def handle_completion(
                         ext = os.path.splitext(m)[1].lower()
                         if ext in SUPPORTED:
                             files.append(m)
+                    elif os.path.isdir(m):
+                        files.append(m)
                     if len(files) >= 50:
                         break
-                result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
+                result = types.Completion(values=sorted(files)[:20], hasMore=len(files) > 20)
 
     return types.CompleteResult(
-        completion=result if result is not None else types.Completion(values=[], total=None, has_more=None)
+        completion=result if result is not None else types.Completion(values=[], total=None, hasMore=None)
     )
 
-# Register request handlers explicitly
-server.add_request_handler("tools/list", types.PaginatedRequestParams, handle_list_tools)
-server.add_request_handler("tools/call", types.CallToolRequestParams, handle_call_tool)
-server.add_request_handler("prompts/list", types.PaginatedRequestParams, handle_list_prompts)
-server.add_request_handler("prompts/get", types.GetPromptRequestParams, handle_get_prompt)
-server.add_request_handler("completion/complete", types.CompleteRequestParams, handle_completion)
 
