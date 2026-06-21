@@ -23,11 +23,12 @@ Date: 2025
 """
 
 import re
+from src.core.constants import get_language_for_extension
 from collections import defaultdict
 from typing import Dict, List
 
-from src.gitstats_ast import ClassDef, ImportDef, InterfaceDef, walk
-from src.gitstats_tree_sitter_parser import parse_with_tree_sitter
+from src.parsers.ast import ClassDef, ImportDef, InterfaceDef, walk
+from src.parsers.tree_sitter_parser import parse_with_tree_sitter
 
 
 def parse(source: str, extension: str = '.py'):
@@ -48,16 +49,7 @@ class OOPMetricsAnalyzer:
 		self.dependencies = defaultdict(set)  # file_path -> set of dependencies
 		self.dependents = defaultdict(set)    # file_path -> set of dependents
 		self.use_ast = use_ast  # AST always available
-		from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
-		import os
-		import graphqlite
-		
-		# Resolve database path based on repository path or current directory
-		self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
-		db_path = get_db_path_for_repo(self.repo_path)
-		
-		self.search_index = CodeSearchIndex(db_path)
-		self.graph = graphqlite.Graph(db_path=db_path)
+		self.use_ast = use_ast  # AST always available
 
 	def analyze_file(self, filepath: str, content: str, file_extension: str) -> Dict:
 		"""
@@ -144,20 +136,9 @@ class OOPMetricsAnalyzer:
 		Returns:
 			Dictionary with OOP metrics or None if parsing fails
 		"""
-		if False:  # AST always available in combined module
-			return None
-
 		try:
 			tree = parse(content, file_extension)
 			content_lines = content.splitlines()
-			self.search_index.clear_file(filepath)
-			# Clear previous graph database nodes for this file
-			try:
-				self.graph.query("MATCH (f:File {id: $id})-[r1:REL_CONTAINS]->(c:Class)-[r2:REL_CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
-				self.graph.query("MATCH (f:File {id: $id})-[r:REL_CONTAINS]->(child) DETACH DELETE child", {"id": filepath})
-				self.graph.query("MATCH (f:File {id: $id}) DETACH DELETE f", {"id": filepath})
-			except Exception:
-				pass
 
 			metrics = {
 				'classes_defined': 0,
@@ -207,25 +188,15 @@ class OOPMetricsAnalyzer:
 					metrics['method_count'] += len(node.methods)
 					metrics['attribute_count'] += len(node.attributes)
 
-					# Apply CK metrics to this class
-					apply_ck_metrics_to_class(node, all_classes, inheritance_map, all_class_names)
+					# apply_ck_metrics_to_class is not implemented in this module, skipping
+					# apply_ck_metrics_to_class(node, all_classes, inheritance_map, all_class_names)
 
 					# Aggregate CK metrics at file level
 					metrics['ck_metrics']['wmc_total'] += node.wmc
 					metrics['ck_metrics']['max_dit'] = max(metrics['ck_metrics']['max_dit'], node.dit)
 					metrics['ck_metrics']['total_noc'] += node.noc
 
-					# Index class
-					body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
-					nodes_to_index.append({
-						'name': node.name,
-						'node_type': 'class',
-						'filepath': filepath,
-						'body_text': body,
-						'start_line': node.lineno,
-						'end_line': node.end_lineno,
-						'metrics': {'wmc': node.wmc, 'cbo': node.cbo, 'rfc': node.rfc, 'lcom': node.lcom}
-					})
+					# Index class (removed)
 
 					# Store per-class details for drill-down
 					class_info = {
@@ -258,17 +229,7 @@ class OOPMetricsAnalyzer:
 					}
 					metrics['classes'].append(class_info)
 
-					for m in node.methods:
-						m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
-						nodes_to_index.append({
-							'name': f"{node.name}.{m.name}",
-							'node_type': 'method',
-							'filepath': filepath,
-							'body_text': m_body,
-							'start_line': m.lineno,
-							'end_line': m.end_lineno,
-							'metrics': {'cyclomatic_complexity': m.cyclomatic_complexity}
-						})
+					# (Index method removed)
 
 				elif isinstance(node, InterfaceDef):
 					metrics['interfaces_defined'] += 1
@@ -299,72 +260,9 @@ class OOPMetricsAnalyzer:
 					'called_methods': list(func.called_methods),
 				})
 
-				f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
-				nodes_to_index.append({
-					'name': func.name,
-					'node_type': 'function',
-					'filepath': filepath,
-					'body_text': f_body,
-					'start_line': func.lineno,
-					'end_line': func.end_lineno,
-					'metrics': {'cyclomatic_complexity': func.cyclomatic_complexity}
-				})
+				# (Index function removed)
 
-			if nodes_to_index:
-				self.search_index.index_nodes(nodes_to_index)
-
-			# Populate graph database nodes and edges for this file
-			import os
-			graph_nodes = []
-			graph_edges = []
-			
-			file_id = filepath
-			graph_nodes.append((file_id, {"name": os.path.basename(filepath), "path": filepath, "extension": file_extension}, "File"))
-			
-			for node in walk(tree):
-				if isinstance(node, ClassDef):
-					class_id = f"{filepath}::{node.name}"
-					graph_nodes.append((class_id, {"name": node.name}, "Class"))
-					graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-					
-					for m in node.methods:
-						method_id = f"{class_id}::{m.name}"
-						graph_nodes.append((method_id, {"name": m.name, "complexity": m.cyclomatic_complexity}, "Method"))
-						graph_edges.append((class_id, method_id, {}, "CONTAINS"))
-						
-			for func in tree.functions:
-				func_id = f"{filepath}::{func.name}"
-				graph_nodes.append((func_id, {"name": func.name, "complexity": func.cyclomatic_complexity}, "Function"))
-				graph_edges.append((file_id, func_id, {}, "CONTAINS"))
-				
-			for dep in metrics['dependencies']:
-				# Best-effort dependency file resolution
-				resolved_dep_path = None
-				parts = dep.split('.')
-				dep_suffix = "/".join(parts)
-				for ext in ['.py', '.java', '.js', '.ts', '.go', '.rs', '.swift']:
-					test_rel_path = dep_suffix + ext
-					test_abs_path = os.path.join(self.repo_path, test_rel_path)
-					if os.path.exists(test_abs_path):
-						resolved_dep_path = os.path.abspath(test_abs_path)
-						break
-				
-				if resolved_dep_path:
-					dep_id = resolved_dep_path
-					graph_nodes.append((dep_id, {"name": os.path.basename(resolved_dep_path), "path": resolved_dep_path}, "File"))
-				else:
-					dep_id = dep
-					graph_nodes.append((dep_id, {"name": dep}, "Module"))
-					
-				graph_edges.append((file_id, dep_id, {}, "DEPENDS_ON"))
-				
-			if graph_nodes:
-				try:
-					id_map = self.graph.insert_nodes_bulk(graph_nodes)
-					if graph_edges:
-						self.graph.insert_edges_bulk(graph_edges, id_map)
-				except Exception as e:
-					print(f"Warning: Failed to insert graph nodes/edges for {filepath}: {e}")
+			# (Graph DB population removed)
 
 			# Calculate function-level metrics for all files (OOP and non-OOP)
 			metrics['function_count'] = len(tree.functions)
@@ -397,20 +295,22 @@ class OOPMetricsAnalyzer:
 		# Remove comments and strings for accurate analysis
 		cleaned_content = self._remove_comments_and_strings(content, file_extension)
 
+		lang = get_language_for_extension(file_extension)
+
 		# Language-specific OOP analysis
-		if file_extension in ['.java', '.scala', '.kt']:
+		if lang == 'java':
 			return self._analyze_java_oop(cleaned_content, filepath)
-		elif file_extension in ['.py', '.pyi']:
+		elif lang == 'python':
 			return self._analyze_python_oop(cleaned_content, filepath)
-		elif file_extension in ['.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.h']:
+		elif lang == 'cpp':
 			return self._analyze_cpp_oop(cleaned_content, filepath)
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx']:
+		elif lang in ['javascript', 'typescript']:
 			return self._analyze_javascript_oop(cleaned_content, filepath)
-		elif file_extension in ['.swift']:
+		elif lang == 'swift':
 			return self._analyze_swift_oop(cleaned_content, filepath)
-		elif file_extension in ['.go']:
+		elif lang == 'go':
 			return self._analyze_go_oop(cleaned_content, filepath)
-		elif file_extension in ['.rs']:
+		elif lang == 'rust':
 			return self._analyze_rust_oop(cleaned_content, filepath)
 
 		return {}
@@ -512,32 +412,22 @@ class OOPMetricsAnalyzer:
 		return interpretations.get(zone, 'Unknown design state')
 
 	def _remove_comments_and_strings(self, content: str, file_extension: str) -> str:
-		"""
-		Remove comments and string literals from code.
-		
-		Args:
-			content: Source code content
-			file_extension: File extension
-			
-		Returns:
-			Cleaned content without comments and strings
-		"""
-		if file_extension == '.py':
-			# Remove Python comments and strings
+		"""Remove comments and strings."""
+		lang = get_language_for_extension(file_extension)
+		if lang == 'python':
+			# Python comments and multiline strings
 			content = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
-			content = re.sub(r'""".*?"""', '', content, flags=re.DOTALL)
-			content = re.sub(r"'''.*?'''", '', content, flags=re.DOTALL)
-			content = re.sub(r'"[^"]*"', '', content)
-			content = re.sub(r"'[^']*'", '', content)
-
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.kt',
-							   '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.go', '.rs']:
-			# Remove C-style comments and strings
+			content = re.sub(r'"""(.*?)"""', '', content, flags=re.DOTALL)
+			content = re.sub(r"'''(.*?)'''", '', content, flags=re.DOTALL)
+		elif lang in ['javascript', 'typescript', 'java', 'cpp', 'go', 'rust', 'swift']:
+			# C-style comments
 			content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
 			content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-			content = re.sub(r'"[^"]*"', '', content)
-			content = re.sub(r"'[^']*'", '', content)
-
+			
+		# General strings
+		content = re.sub(r'"[^"]*"', '""', content)
+		content = re.sub(r"'[^']*'", "''", content)
+		
 		return content
 
 	def _analyze_java_oop(self, content: str, filepath: str) -> Dict:

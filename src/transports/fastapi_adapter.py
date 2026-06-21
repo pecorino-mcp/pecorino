@@ -5,8 +5,8 @@ from fastapi.exceptions import HTTPException
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from src.mcp_core.config import settings
-from src.mcp_core.metrics import ACTIVE_SESSIONS
+from src.mcp_server.config import settings
+from src.mcp_server.metrics import ACTIVE_SESSIONS
 from src.transports.auth import verify_oauth_token
 
 async def oauth_middleware(request: Request, call_next):
@@ -46,14 +46,7 @@ async def run_sse(mcp_server):
                 await mcp_server.run(
                     read_stream,
                     write_stream,
-                    InitializationOptions(
-                        server_name="gitstats3",
-                        server_version="3.0.0",
-                        capabilities=mcp_server.get_capabilities(
-                            notification_options=NotificationOptions(),
-                            experimental_capabilities={},
-                        ),
-                    )
+                    mcp_server.create_initialization_options()
                 )
         finally:
             ACTIVE_SESSIONS.dec()

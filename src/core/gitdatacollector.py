@@ -11,17 +11,17 @@ import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from .gitstats_analyzers import analyzesloc, getnumoffilesfromrev, getnumoflinesinblob
-from .gitstats_config import conf
-from .gitstats_datacollector import DataCollector
-from .gitstats_gitcommands import (
+from src.metrics.analyzers import analyzesloc, getnumoffilesfromrev, getnumoflinesinblob
+from src.core.config import conf
+from src.core.datacollector import DataCollector
+from src.git.commands import (
 	get_default_branch,
 	get_first_parent_flag,
 	getcommitrange,
 	getlogrange,
 	getpipeoutput,
 )
-from .gitstats_helpers import (
+from src.utils.helpers import (
 	getkeyssortedbyvaluekey,
 	getstatsummarycounts,
 	should_include_file,

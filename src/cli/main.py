@@ -14,17 +14,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict
 
-from .gitstats_config import conf
-from .gitstats_export import DateTimeEncoder, MetricsExporter, export_to_json
-from .gitstats_gitcommands import (
+from src.core.config import conf
+from src.utils.export import DateTimeEncoder, MetricsExporter, export_to_json
+from src.git.commands import (
 	get_exectime_external,
 	getpipeoutput,
 	is_git_repository,
 )
-from .gitstats_gitdatacollector import GitDataCollector
-from .gitstats_helpers import time_start
-from .gitstats_hotspot import HotspotDetector
-from .gitstats_repository import discover_repositories
+from src.core.gitdatacollector import GitDataCollector
+from src.utils.helpers import time_start
+from src.metrics.hotspot import HotspotDetector
+from src.core.repository import discover_repositories
 
 
 def usage():
@@ -55,7 +55,7 @@ class GitStats:
 	def run(self, args_orig):
 		self.original_stdout = sys.stdout
 		if "--mcp" in args_orig:
-			from src.gitstats_mcp import main as mcp_main
+			from src.mcp_server.server import main as mcp_main
 			mcp_main()
 			return
 

@@ -10,7 +10,7 @@ import re
 import time
 from typing import Any, Dict, List
 
-from .gitstats_config import get_config
+from src.core.config import get_config
 
 # Platform detection
 ON_LINUX = platform.system() == 'Linux'

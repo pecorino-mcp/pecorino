@@ -17,7 +17,7 @@ import tree_sitter
 
 # Lazy imports from gitstats_oopmetrics to avoid circular imports
 def get_ast_classes():
-    from src.gitstats_ast import (
+    from src.parsers.ast import (
         AttributeDef,
         ClassDef,
         FunctionDef,
@@ -341,7 +341,7 @@ class TreeSitterExtractor:
         called = set()
 
         def visit(n):
-            if n.type in ('call_expression', 'method_invocation'):
+            if n.type in ('call_expression', 'method_invocation', 'call'):
                 func_node = n.child_by_field_name('function') or n.child_by_field_name('name')
                 if not func_node and n.children:
                     func_node = n.children[0]
@@ -695,7 +695,7 @@ def parse_with_tree_sitter(source: str, extension: str) -> Optional[Any]:
     ts_lang_name = language
 
     # Try to load parser using TreeSitterGrammarManager
-    from src.tsgm import TreeSitterGrammarManager
+    from src.parsers.tsgm import TreeSitterGrammarManager
     manager = TreeSitterGrammarManager()
 
     try:
