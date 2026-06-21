@@ -40,7 +40,7 @@ def migrate_codebase(db_path: Path):
         conn.execute("PRAGMA journal_mode=WAL") # central server = concurrent readers
         # PRAGMA wal_autocheckpoint limits WAL file size
         conn.execute("PRAGMA wal_autocheckpoint=1000")
-        conn.execute("PRAGMA journal_size_limit=67108864") # cap WAL at 64 MB
+        conn.execute("PRAGMA journal_size_limit=402653184") # cap WAL at 384 MB
         
         ver = conn.execute("PRAGMA user_version").fetchone()[0]
 
@@ -204,14 +204,6 @@ class CodeSearchIndex:
                 
             conn.commit()
 
-    def index_node(self, name: str, node_type: str, filepath: str, body_text: str, start_line: int, end_line: int, metrics: Dict[str, Any]):
-        """Index a single AST node (function, class, etc.)."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                INSERT INTO code_nodes (name, node_type, filepath, body_text, metrics_json, start_line, end_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (name, node_type, filepath, body_text, json.dumps(metrics), start_line, end_line))
-            conn.commit()
 
     def index_nodes(self, nodes: List[Dict[str, Any]]):
         """Index a batch of AST nodes."""
@@ -329,9 +321,3 @@ class CodeSearchIndex:
                 })
             return results
 
-    def optimize(self):
-        """Run incremental FTS5 optimization merge."""
-        with sqlite3.connect(self.db_path) as conn:
-            # Incremental merge, does not block the entire database
-            conn.execute("INSERT INTO code_nodes_fts(code_nodes_fts, rank) VALUES('merge', 1000)")
-            conn.commit()

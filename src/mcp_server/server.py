@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--host", help="Host address for network transports (overrides HOST env var)")
     parser.add_argument("--port", type=int, help="Port number for network transports (overrides PORT env var)")
 
-    args, unknown = parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
     # CLI args override environment variables if provided
     if args.transport:
@@ -37,8 +37,8 @@ def main():
         asyncio.run(run_stdio(mcp_server))
     elif settings.transport == "sse":
         try:
-            import uvicorn
-            import fastapi
+            import uvicorn  # noqa: F401
+            import fastapi  # noqa: F401
         except ImportError:
             print("Error: fastapi and uvicorn must be installed to use SSE transport.", file=sys.stderr)
             sys.exit(1)
@@ -46,8 +46,8 @@ def main():
         asyncio.run(run_sse(mcp_server))
     elif settings.transport == "streamable-http":
         try:
-            import uvicorn
-            import fastapi
+            import uvicorn  # noqa: F401
+            import fastapi  # noqa: F401
         except ImportError:
             print("Error: fastapi and uvicorn must be installed to use streamable-http transport.", file=sys.stderr)
             sys.exit(1)

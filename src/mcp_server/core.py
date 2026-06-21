@@ -3,18 +3,15 @@ import glob
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, List, Optional
-import time
-import jwt
-from src.mcp_server.metrics import TOOL_CALLS, TOOL_ERRORS, TOOL_DURATION
-import mcp.types as types
-from mcp.server.lowlevel import Server, NotificationOptions
-from mcp.server.models import InitializationOptions
 
-from src.parsers.ast import ClassDef, InterfaceDef, walk
-from src.utils.export import MetricsExporter
+import mcp.types as types
+from mcp.server.lowlevel import Server
+
 from src.core.gitdatacollector import GitDataCollector
+from src.mcp_server.metrics import TOOL_CALLS, TOOL_DURATION, TOOL_ERRORS
 from src.metrics.hotspot import HotspotDetector
 from src.metrics.maintainability import (
     calculate_halstead_metrics,
@@ -23,6 +20,7 @@ from src.metrics.maintainability import (
     calculate_mccabe_complexity,
 )
 from src.metrics.oopmetrics import OOPMetricsAnalyzer, parse
+from src.utils.export import MetricsExporter
 
 server = Server("OOP Metrics Analyzer Server 🚀")
 
@@ -36,19 +34,19 @@ if str(workspace_root) not in sys.path:
 
 def safe_path(p: str) -> Path:
     if not p:
-        raise ValueError("Target path cannot be empty. Please provide an explicit absolute path.")
+        p = "."
     path = Path(p).expanduser().resolve()
-    
+
     allowed_roots = [
-        workspace_root, 
-        workspace_root.parent, 
+        workspace_root,
+        workspace_root.parent,
         workspace_root.parent.parent
     ]
-    
+
     # Safely allow the current working directory, avoiding high-risk roots
     cwd = Path.cwd()
     restricted_roots = {Path("/"), Path.home()}
-    
+
     if cwd not in restricted_roots:
         allowed_roots.append(cwd)
         # Also allow cwd.parent if it's not a restricted root
@@ -62,12 +60,34 @@ def safe_path(p: str) -> Path:
     return path
 
 # Core implementation of tools (without decorators)
-async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10) -> dict:
+async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, max_depth: int = 3) -> dict:
     path = safe_path(target)
-    from src.mcp_server.index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+    from src.mcp_server.index import CodeSearchIndex, find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
     index = CodeSearchIndex(db_path=db_path)
+
+    # Initialize GraphAPI if view is a graph-related view
+    api = None
+    if view in ("callers", "callees", "impact", "summary", "deps"):
+        from src.mcp_server.graph_api import GraphAPI
+        api = GraphAPI(repo_path=repo_root)
+
+    if view == "callers":
+        if not query:
+            raise ValueError("Query (function/method name) is required for callers view")
+        callers = await asyncio.to_thread(api.find_callers, query)
+        return {"status": "success", "target": query, "callers": callers}
+
+    if view == "callees":
+        if not query:
+            raise ValueError("Query (function/method name) is required for callees view")
+        callees = await asyncio.to_thread(api.find_callees, query)
+        return {"status": "success", "target": query, "callees": callees}
+
+    if view == "impact":
+        deps = await asyncio.to_thread(api.impact_analysis, path.as_posix(), max_depth)
+        return {"status": "success", "target": path.as_posix(), "dependent_files": deps}
 
     if view == "search":
         if not query:
@@ -77,11 +97,12 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
 
     if path.is_dir():
-        if view not in ["summary", "search"]:
+        if view not in ["summary", "search", "callers", "callees"]:
             raise ValueError(f"View '{view}' is only supported for specific files, not directories.")
 
         nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
         indexed_files = len(set(n['filepath'] for n in nodes))
+
 
         return {
             "target": path.as_posix(),
@@ -134,44 +155,12 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     # Graph database dependency and PageRank retrieval
     if view in ("summary", "deps"):
         try:
-            from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
-            
-            rel_depends = "DEPENDS_ON"
-            graph = GorgonzolaGraph(db_path=db_path)
-            
-            # Query incoming file dependencies
-            inc_res = graph.query(f"MATCH (other:File)-[:{rel_depends}]->(f:File {{id: $id}}) RETURN other.id AS id", {"id": str(path)})
-            incoming_deps = [r["id"] for r in inc_res]
-            
-            # Query outgoing file/module dependencies
-            out_res = graph.query(f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, label(other) AS label", {"id": str(path)})
-            outgoing_deps = [{"id": r["id"], "type": r["label"] if r.get("label") else "Unknown"} for r in out_res]
-            
-            # Query PageRank centrality
-            pagerank_score = 0.0
-            try:
-                pr_scores = graph.pagerank()
-                for pr in pr_scores:
-                    if pr.get("node_id") == str(path):
-                        pagerank_score = pr.get("score", 0.0)
-                        break
-            except Exception:
-                pass
-                
-            # Add to result structure
+            graph_metrics = await asyncio.to_thread(api.get_file_dependencies, path.as_posix())
             if view == "summary":
                 if "structure" in result and isinstance(result["structure"], dict):
-                    result["structure"]["graph_metrics"] = {
-                        "incoming_dependencies": incoming_deps,
-                        "outgoing_dependencies": outgoing_deps,
-                        "pagerank_score": pagerank_score
-                    }
+                    result["structure"]["graph_metrics"] = graph_metrics
             else: # view == "deps"
-                result["graph_metrics"] = {
-                    "incoming_dependencies": incoming_deps,
-                    "outgoing_dependencies": outgoing_deps,
-                    "pagerank_score": pagerank_score
-                }
+                result["graph_metrics"] = graph_metrics
         except Exception as e:
             sys.stderr.write(f"[WARNING] Graph database query failed: {e}\n")
             sys.stderr.flush()
@@ -272,19 +261,96 @@ async def do_report(repo_path: str, output_path: str) -> dict:
 
 async def do_update_index(target: str) -> dict:
     path = safe_path(target)
-    from src.mcp_server.indexer import CodebaseIndexer
     from src.mcp_server.index import find_repo_root
-    
+    from src.mcp_server.indexer import CodebaseIndexer
+    from mcp.server.lowlevel.server import request_ctx
+
     repo_root = find_repo_root(str(path))
 
-    def _index_dir():
-        indexer = CodebaseIndexer(repo_path=repo_root)
-        return indexer.index_directory(str(path))
-
     if path.is_dir():
-        res = await asyncio.to_thread(_index_dir)
-        res["target"] = path.as_posix()
-        return res
+        # Get request context to retrieve progress token and session
+        try:
+            ctx = request_ctx.get()
+        except LookupError:
+            ctx = None
+
+        progress_token = None
+        if ctx and ctx.meta:
+            sys.stderr.write(f"[DEBUG] ctx.meta type: {type(ctx.meta)}, value: {ctx.meta}\n")
+            sys.stderr.flush()
+            if isinstance(ctx.meta, dict):
+                progress_token = ctx.meta.get("progressToken") or ctx.meta.get("progress_token")
+            else:
+                progress_token = getattr(ctx.meta, "progressToken", getattr(ctx.meta, "progress_token", None))
+
+
+        # Spawn index_worker.py in a subprocess using same python executable
+        python_bin = sys.executable or "python"
+        
+        proc = await asyncio.create_subprocess_exec(
+            python_bin, "-m", "src.mcp_server.index_worker", repo_root, str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(workspace_root)
+        )
+
+        final_res = {}
+        
+        async def read_stdout():
+            nonlocal final_res
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                line_str = line.decode('utf-8', errors='ignore').strip()
+                if not line_str:
+                    continue
+                try:
+                    data = json.loads(line_str)
+                    if "result" in data:
+                        final_res = data["result"]
+                    elif "current" in data and "total" in data:
+                        current = data["current"]
+                        total = data["total"]
+                        filename = os.path.basename(data.get("file", ""))
+                        msg = f"Indexing {filename} ({current}/{total})"
+                        sys.stderr.write(f"[INFO] {msg}\n")
+                        sys.stderr.flush()
+                        
+                        if ctx and progress_token is not None:
+                            try:
+                                req_id = str(ctx.request_id) if ctx.request_id is not None else None
+                                await ctx.session.send_progress_notification(
+                                    progress_token=progress_token,
+                                    progress=current,
+                                    total=total,
+                                    message=msg,
+                                    related_request_id=req_id
+                                )
+                            except Exception as e:
+                                sys.stderr.write(f"[WARNING] Failed to send progress notification: {e}\n")
+                                sys.stderr.flush()
+                except Exception as e:
+                    sys.stderr.write(f"[WARNING] Subprocess parse error: {e} for line: {line_str}\n")
+                    sys.stderr.flush()
+
+        async def read_stderr():
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                line_str = line.decode('utf-8', errors='ignore').strip()
+                if line_str:
+                    sys.stderr.write(f"[INDEX WORKER LOG] {line_str}\n")
+                    sys.stderr.flush()
+
+        await asyncio.gather(read_stdout(), read_stderr(), proc.wait())
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"Index subprocess failed with exit code {proc.returncode}")
+
+        final_res["target"] = path.as_posix()
+        return final_res
 
     if path.suffix not in SUPPORTED:
         raise ValueError(f"Unsupported extension: {path.suffix}")
@@ -298,24 +364,6 @@ async def do_update_index(target: str) -> dict:
     await asyncio.to_thread(_index_file)
     return {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
 
-async def do_find_callers(target: str) -> dict:
-    from src.mcp_server.graph_api import GraphAPI
-    api = GraphAPI()
-    callers = await asyncio.to_thread(api.find_callers, target)
-    return {"status": "success", "target": target, "callers": callers}
-
-async def do_find_callees(target: str) -> dict:
-    from src.mcp_server.graph_api import GraphAPI
-    api = GraphAPI()
-    callees = await asyncio.to_thread(api.find_callees, target)
-    return {"status": "success", "target": target, "callees": callees}
-
-async def do_impact_analysis(target: str, max_depth: int = 3) -> dict:
-    path = safe_path(target).as_posix()
-    from src.mcp_server.graph_api import GraphAPI
-    api = GraphAPI()
-    deps = await asyncio.to_thread(api.impact_analysis, path, max_depth)
-    return {"status": "success", "target": path, "dependent_files": deps}
 
 # Low-level Handlers
 
@@ -325,8 +373,8 @@ async def handle_list_tools() -> types.ListToolsResult:
         tools=[
             types.Tool(
                 name="browse",
-                description="Browse the codebase (structure or semantic search). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree.",
-                input_schema={
+                description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact.",
+                inputSchema={
                     "type": "object",
                     "properties": {
                         "target": {
@@ -335,7 +383,12 @@ async def handle_list_tools() -> types.ListToolsResult:
                         },
                         "view": {"type": "string", "default": "summary"},
                         "query": {"type": "string"},
-                        "limit": {"type": "integer", "default": 10}
+                        "limit": {"type": "integer", "default": 10},
+                        "max_depth": {
+                            "type": "integer",
+                            "default": 3,
+                            "description": "Max depth for impact analysis (only applicable if view is 'impact')."
+                        }
                     },
                     "required": ["target"]
                 }
@@ -343,7 +396,7 @@ async def handle_list_tools() -> types.ListToolsResult:
             types.Tool(
                 name="metrics",
                 description="Calculate OOP, complexity, or hotspot metrics.",
-                input_schema={
+                inputSchema={
                     "type": "object",
                     "properties": {
                         "target": {
@@ -362,7 +415,7 @@ async def handle_list_tools() -> types.ListToolsResult:
             types.Tool(
                 name="report",
                 description="Generate and export a full analysis report to disk.",
-                input_schema={
+                inputSchema={
                     "type": "object",
                     "properties": {
                         "repo_path": {
@@ -377,58 +430,12 @@ async def handle_list_tools() -> types.ListToolsResult:
             types.Tool(
                 name="update_index",
                 description="Update the codebase SQLite index via AST browsing.",
-                input_schema={
+                inputSchema={
                     "type": "object",
                     "properties": {
                         "target": {
                             "type": "string",
                             "description": "Absolute path to the target directory or file. Cannot be empty. If working on an external directory, provide its full absolute path."
-                        }
-                    },
-                    "required": ["target"]
-                }
-            ),
-            types.Tool(
-                name="find_callers",
-                description="Find all methods/functions that call the target function/method.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "target": {
-                            "type": "string",
-                            "description": "Name of the target function/method."
-                        }
-                    },
-                    "required": ["target"]
-                }
-            ),
-            types.Tool(
-                name="find_callees",
-                description="Find all functions/methods called by the given target function/method.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "target": {
-                            "type": "string",
-                            "description": "Name of the target function/method."
-                        }
-                    },
-                    "required": ["target"]
-                }
-            ),
-            types.Tool(
-                name="impact_analysis",
-                description="Find all files/modules that transitively depend on the given filepath.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "target": {
-                            "type": "string",
-                            "description": "Absolute path to the target file."
-                        },
-                        "max_depth": {
-                            "type": "integer",
-                            "default": 3
                         }
                     },
                     "required": ["target"]
@@ -468,7 +475,8 @@ async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 target=target,
                 view=arguments.get("view", "summary"),
                 query=arguments.get("query"),
-                limit=arguments.get("limit", 10)
+                limit=arguments.get("limit", 10),
+                max_depth=arguments.get("max_depth", 3)
             )
         elif name == "metrics":
             target = _normalize_target(arguments.get("target"))
@@ -494,22 +502,6 @@ async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
             res = await do_update_index(
                 target=target
             )
-        elif name == "find_callers":
-            target = arguments.get("target")
-            if not isinstance(target, str):
-                raise ValueError("target must be a string")
-            res = await do_find_callers(target=target)
-        elif name == "find_callees":
-            target = arguments.get("target")
-            if not isinstance(target, str):
-                raise ValueError("target must be a string")
-            res = await do_find_callees(target=target)
-        elif name == "impact_analysis":
-            target = _normalize_target(arguments.get("target"))
-            max_depth = arguments.get("max_depth", 3)
-            if not isinstance(target, str):
-                raise ValueError("target must be a string")
-            res = await do_impact_analysis(target=target, max_depth=max_depth)
         else:
             raise ValueError(f"Unknown tool: {name}")
 

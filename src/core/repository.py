@@ -35,8 +35,6 @@ def _is_bare_repository(path):
 	except (OSError, PermissionError):
 		return False
 
-	return True
-
 def discover_repositories(scan_path, recursive=False, max_depth=10, include_patterns=None, exclude_patterns=None):
 	"""Discover all git repositories in a directory with advanced options and concurrent scanning.
 	
@@ -81,7 +79,7 @@ def discover_repositories(scan_path, recursive=False, max_depth=10, include_patt
 
 	# Fallback to original sequential scanning
 
-	def _should_exclude_directory(dir_name, dir_path):
+	def _should_exclude_directory(dir_name):
 		"""Check if directory should be excluded based on patterns."""
 
 		# Check exclude patterns
@@ -176,7 +174,7 @@ def discover_repositories(scan_path, recursive=False, max_depth=10, include_patt
 							continue
 
 					# Check exclusion patterns
-					if _should_exclude_directory(item, item_path):
+					if _should_exclude_directory(item):
 						if conf['debug']:
 							print(f'  Excluding directory: {item_path}')
 						continue
@@ -221,7 +219,7 @@ def _discover_repositories_concurrent(scan_path, max_depth=10, include_patterns=
 			'build', 'dist', 'target', 'bin', 'obj'
 		]
 
-	def _should_exclude_directory(dir_name, dir_path):
+	def _should_exclude_directory(dir_name):
 		"""Check if directory should be excluded based on patterns."""
 
 		for pattern in exclude_patterns:
@@ -299,7 +297,7 @@ def _discover_repositories_concurrent(scan_path, max_depth=10, include_patterns=
 						continue
 
 				# Check exclusion patterns
-				if _should_exclude_directory(item, item_path):
+				if _should_exclude_directory(item):
 					if conf['debug']:
 						print(f'  Excluding: {item_path}')
 					continue

@@ -50,3 +50,16 @@ async def test_do_update_and_browse():
     assert "graph_metrics" in res_deps
     assert "outgoing_dependencies" in res_deps["graph_metrics"]
 
+
+@pytest.mark.asyncio
+async def test_do_update_index_directory():
+    workspace = Path(__file__).resolve().parent.parent
+    target_dir = str(workspace / "src" / "mcp_server")
+
+    # Update index for the directory (triggers subprocess)
+    res_update = await do_update_index(target_dir)
+    assert res_update["status"] == "success"
+    assert res_update["total_files_found"] > 0
+    assert "indexed_files" in res_update
+
+

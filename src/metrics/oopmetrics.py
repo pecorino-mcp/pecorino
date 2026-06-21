@@ -136,9 +136,6 @@ class OOPMetricsAnalyzer:
 		Returns:
 			Dictionary with OOP metrics or None if parsing fails
 		"""
-		if False:  # AST always available in combined module
-			return None
-
 		try:
 			tree = parse(content, file_extension)
 			content_lines = content.splitlines()

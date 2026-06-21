@@ -250,7 +250,7 @@ class CodebaseIndexer:
                 import sys
                 print(f"Warning: Failed to insert graph nodes/edges for {filepath}: {e}", file=sys.stderr)
 
-    def index_directory(self, dirpath: str) -> dict:
+    def index_directory(self, dirpath: str, progress_callback=None) -> dict:
         import pathlib
         import hashlib
         path = pathlib.Path(dirpath)
@@ -269,9 +269,11 @@ class CodebaseIndexer:
         skipped_count = 0
         current_files_set = set()
         
-        for fp in files:
+        for idx, fp in enumerate(files):
             file_str = str(fp)
             current_files_set.add(file_str)
+            if progress_callback:
+                progress_callback(idx, len(files), file_str)
             try:
                 content = fp.read_text(encoding='utf-8', errors='ignore')
                 content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
@@ -306,6 +308,9 @@ class CodebaseIndexer:
         # Note: Optimize is intentionally left out here to prevent 
         # blocking database queries with a full vacuum/merge during normal ingestion.
         
+        if progress_callback:
+            progress_callback(len(files), len(files), "Resolving symbols")
+
         # Resolve all unlinked AST symbols (CALLS, EXTENDS, IMPLEMENTS)
         from src.mcp_server.graph_api import GraphAPI
         graph_api = GraphAPI(dirpath)
@@ -318,3 +323,4 @@ class CodebaseIndexer:
             "stale_files_removed": stale_count,
             "total_files_found": len(files)
         }
+

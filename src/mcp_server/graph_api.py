@@ -9,6 +9,37 @@ class GraphAPI:
         self.db_path = get_db_path_for_repo(self.repo_path)
         self.graph = GorgonzolaGraph(db_path=self.db_path)
 
+    def get_file_dependencies(self, filepath: str) -> Dict[str, Any]:
+        """Query incoming and outgoing file dependencies and PageRank score."""
+        rel_depends = "DEPENDS_ON"
+        try:
+            inc_res = self.graph.query(f"MATCH (other:File)-[:{rel_depends}]->(f:File {{id: $id}}) RETURN other.id AS id", {"id": filepath})
+            incoming_deps = [r["id"] for r in inc_res]
+        except Exception:
+            incoming_deps = []
+
+        try:
+            out_res = self.graph.query(f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, label(other) AS label", {"id": filepath})
+            outgoing_deps = [{"id": r["id"], "type": r["label"] if r.get("label") else "Unknown"} for r in out_res]
+        except Exception:
+            outgoing_deps = []
+
+        pagerank_score = 0.0
+        try:
+            pr_scores = self.graph.pagerank()
+            for pr in pr_scores:
+                if pr.get("node_id") == filepath:
+                    pagerank_score = pr.get("score", 0.0)
+                    break
+        except Exception:
+            pass
+
+        return {
+            "incoming_dependencies": incoming_deps,
+            "outgoing_dependencies": outgoing_deps,
+            "pagerank_score": pagerank_score
+        }
+
     def find_callers(self, target_name: str) -> List[Dict[str, Any]]:
         """Find all methods/functions that call the target function/method."""
         query = '''
