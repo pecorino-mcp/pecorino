@@ -45,7 +45,7 @@ dependencies = [
     "tree-sitter-swift",
     "PyJWT",
     "prometheus_client",
-    "graphqlite",
+    "gorgonzola",
 ]
 
 [project.optional-dependencies]

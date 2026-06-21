@@ -5,18 +5,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, List, Optional
-
-# Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
-workspace_root = Path(__file__).resolve().parent.parent.parent
-if str(workspace_root) not in sys.path:
-    sys.path.insert(0, str(workspace_root))
-
-sdk_path = workspace_root / "modules" / "python-sdk" / "src"
-if str(sdk_path) not in sys.path:
-    sys.path.insert(0, str(sdk_path))
-
 import time
-
 import jwt
 from src.mcp_server.metrics import TOOL_CALLS, TOOL_ERRORS, TOOL_DURATION
 import mcp.types as types
@@ -40,9 +29,32 @@ server = Server("OOP Metrics Analyzer Server 🚀")
 SUPPORTED = {'.py','.pyi','.java','.scala','.kt','.js','.jsx','.ts','.tsx',
              '.cpp','.cc','.cxx','.c','.h','.hpp','.hxx','.go','.rs','.swift'}
 
+# Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
+workspace_root = Path(__file__).resolve().parent.parent.parent
+if str(workspace_root) not in sys.path:
+    sys.path.insert(0, str(workspace_root))
+
 def safe_path(p: str) -> Path:
+    if not p:
+        raise ValueError("Target path cannot be empty. Please provide an explicit absolute path.")
     path = Path(p).expanduser().resolve()
-    allowed_roots = [workspace_root, workspace_root.parent, workspace_root.parent.parent]
+    
+    allowed_roots = [
+        workspace_root, 
+        workspace_root.parent, 
+        workspace_root.parent.parent
+    ]
+    
+    # Safely allow the current working directory, avoiding high-risk roots
+    cwd = Path.cwd()
+    restricted_roots = {Path("/"), Path.home()}
+    
+    if cwd not in restricted_roots:
+        allowed_roots.append(cwd)
+        # Also allow cwd.parent if it's not a restricted root
+        if cwd.parent not in restricted_roots:
+            allowed_roots.append(cwd.parent)
+
     if not any(path.is_relative_to(r) for r in allowed_roots):
         raise ValueError(f"Path outside workspace: {path}")
     if not path.exists():
@@ -122,19 +134,18 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     # Graph database dependency and PageRank retrieval
     if view in ("summary", "deps"):
         try:
-            import graphqlite
-            from graphqlite import sanitize_rel_type
+            from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
             
-            rel_depends = sanitize_rel_type("DEPENDS_ON")
-            graph = graphqlite.Graph(db_path=db_path)
+            rel_depends = "DEPENDS_ON"
+            graph = GorgonzolaGraph(db_path=db_path)
             
             # Query incoming file dependencies
             inc_res = graph.query(f"MATCH (other:File)-[:{rel_depends}]->(f:File {{id: $id}}) RETURN other.id AS id", {"id": str(path)})
             incoming_deps = [r["id"] for r in inc_res]
             
             # Query outgoing file/module dependencies
-            out_res = graph.query(f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, labels(other) AS labels", {"id": str(path)})
-            outgoing_deps = [{"id": r["id"], "type": r["labels"][0] if r.get("labels") else "Unknown"} for r in out_res]
+            out_res = graph.query(f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, label(other) AS label", {"id": str(path)})
+            outgoing_deps = [{"id": r["id"], "type": r["label"] if r.get("label") else "Unknown"} for r in out_res]
             
             # Query PageRank centrality
             pagerank_score = 0.0
@@ -287,12 +298,29 @@ async def do_update_index(target: str) -> dict:
     await asyncio.to_thread(_index_file)
     return {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
 
+async def do_find_callers(target: str) -> dict:
+    from src.mcp_server.graph_api import GraphAPI
+    api = GraphAPI()
+    callers = await asyncio.to_thread(api.find_callers, target)
+    return {"status": "success", "target": target, "callers": callers}
+
+async def do_find_callees(target: str) -> dict:
+    from src.mcp_server.graph_api import GraphAPI
+    api = GraphAPI()
+    callees = await asyncio.to_thread(api.find_callees, target)
+    return {"status": "success", "target": target, "callees": callees}
+
+async def do_impact_analysis(target: str, max_depth: int = 3) -> dict:
+    path = safe_path(target).as_posix()
+    from src.mcp_server.graph_api import GraphAPI
+    api = GraphAPI()
+    deps = await asyncio.to_thread(api.impact_analysis, path, max_depth)
+    return {"status": "success", "target": path, "dependent_files": deps}
+
 # Low-level Handlers
 
-async def handle_list_tools(
-    ctx: Any,
-    params: types.PaginatedRequestParams | None
-) -> types.ListToolsResult:
+@server.list_tools()
+async def handle_list_tools() -> types.ListToolsResult:
     return types.ListToolsResult(
         tools=[
             types.Tool(
@@ -301,7 +329,10 @@ async def handle_list_tools(
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string"},
+                        "target": {
+                            "type": "string",
+                            "description": "Absolute path to the target directory or file. Cannot be empty. If working on an external directory, provide its full absolute path."
+                        },
                         "view": {"type": "string", "default": "summary"},
                         "query": {"type": "string"},
                         "limit": {"type": "integer", "default": 10}
@@ -315,7 +346,10 @@ async def handle_list_tools(
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string"},
+                        "target": {
+                            "type": "string",
+                            "description": "Absolute path to the target directory or file. Cannot be empty. If working on an external directory, provide its full absolute path."
+                        },
                         "what": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -331,7 +365,10 @@ async def handle_list_tools(
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "repo_path": {"type": "string"},
+                        "repo_path": {
+                            "type": "string",
+                            "description": "Absolute path to the target repository. Cannot be empty."
+                        },
                         "output_path": {"type": "string"}
                     },
                     "required": ["repo_path", "output_path"]
@@ -343,7 +380,56 @@ async def handle_list_tools(
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string"}
+                        "target": {
+                            "type": "string",
+                            "description": "Absolute path to the target directory or file. Cannot be empty. If working on an external directory, provide its full absolute path."
+                        }
+                    },
+                    "required": ["target"]
+                }
+            ),
+            types.Tool(
+                name="find_callers",
+                description="Find all methods/functions that call the target function/method.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "Name of the target function/method."
+                        }
+                    },
+                    "required": ["target"]
+                }
+            ),
+            types.Tool(
+                name="find_callees",
+                description="Find all functions/methods called by the given target function/method.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "Name of the target function/method."
+                        }
+                    },
+                    "required": ["target"]
+                }
+            ),
+            types.Tool(
+                name="impact_analysis",
+                description="Find all files/modules that transitively depend on the given filepath.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "Absolute path to the target file."
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "default": 3
+                        }
                     },
                     "required": ["target"]
                 }
@@ -351,12 +437,8 @@ async def handle_list_tools(
         ]
     )
 
-async def handle_call_tool(
-    ctx: Any,
-    params: types.CallToolRequestParams
-) -> types.CallToolResult:
-    name = params.name
-    arguments = params.arguments or {}
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
     start_time = time.time()
 
     sys.stderr.write(f"[INFO] MCP Tool Call: '{name}' with arguments: {json.dumps(arguments)}\n")
@@ -365,8 +447,21 @@ async def handle_call_tool(
     TOOL_CALLS.labels(tool=name).inc()
 
     try:
+        def _normalize_target(t: Any) -> Any:
+            if isinstance(t, dict) and "target" in t:
+                t = t["target"]
+            elif isinstance(t, str) and t.strip().startswith("{") and t.strip().endswith("}"):
+                try:
+                    import json
+                    parsed = json.loads(t)
+                    if isinstance(parsed, dict) and "target" in parsed:
+                        t = parsed["target"]
+                except Exception:
+                    pass
+            return t
+
         if name == "browse":
-            target = arguments.get("target")
+            target = _normalize_target(arguments.get("target"))
             if not isinstance(target, str):
                 raise ValueError("target must be a string")
             res = await do_browse(
@@ -376,7 +471,7 @@ async def handle_call_tool(
                 limit=arguments.get("limit", 10)
             )
         elif name == "metrics":
-            target = arguments.get("target")
+            target = _normalize_target(arguments.get("target"))
             if not isinstance(target, str):
                 raise ValueError("target must be a string")
             res = await do_metrics(
@@ -393,12 +488,28 @@ async def handle_call_tool(
                 output_path=output_path
             )
         elif name == "update_index":
-            target = arguments.get("target")
+            target = _normalize_target(arguments.get("target"))
             if not isinstance(target, str):
                 raise ValueError("target must be a string")
             res = await do_update_index(
                 target=target
             )
+        elif name == "find_callers":
+            target = arguments.get("target")
+            if not isinstance(target, str):
+                raise ValueError("target must be a string")
+            res = await do_find_callers(target=target)
+        elif name == "find_callees":
+            target = arguments.get("target")
+            if not isinstance(target, str):
+                raise ValueError("target must be a string")
+            res = await do_find_callees(target=target)
+        elif name == "impact_analysis":
+            target = _normalize_target(arguments.get("target"))
+            max_depth = arguments.get("max_depth", 3)
+            if not isinstance(target, str):
+                raise ValueError("target must be a string")
+            res = await do_impact_analysis(target=target, max_depth=max_depth)
         else:
             raise ValueError(f"Unknown tool: {name}")
 
@@ -422,13 +533,11 @@ async def handle_call_tool(
 
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=f"Error: {e}")],
-            is_error=True
+            isError=True
         )
 
-async def handle_list_prompts(
-    ctx: Any,
-    params: types.PaginatedRequestParams | None
-) -> types.ListPromptsResult:
+@server.list_prompts()
+async def handle_list_prompts() -> types.ListPromptsResult:
     return types.ListPromptsResult(
         prompts=[
             types.Prompt(
@@ -465,12 +574,9 @@ async def handle_list_prompts(
         ]
     )
 
-async def handle_get_prompt(
-    ctx: Any,
-    params: types.GetPromptRequestParams
-) -> types.GetPromptResult:
-    name = params.name
-    arguments = params.arguments or {}
+@server.get_prompt()
+async def handle_get_prompt(name: str, arguments: dict | None) -> types.GetPromptResult:
+    arguments = arguments or {}
     if name == "browse":
         target = arguments.get("target", "")
         view = arguments.get("view", "summary")
@@ -500,12 +606,12 @@ async def handle_get_prompt(
         )
     raise ValueError(f"Prompt not found: {name}")
 
+@server.completion()
 async def handle_completion(
-    ctx: Any,
-    params: types.CompleteRequestParams
+    ref: types.PromptReference | types.ResourceTemplateReference,
+    argument: types.CompletionArgument,
+    context: types.CompletionContext | None
 ) -> types.CompleteResult:
-    ref = params.ref
-    argument = params.argument
     result = None
     if isinstance(ref, types.PromptReference):
         if ref.name == "browse":
@@ -513,7 +619,7 @@ async def handle_completion(
                 views = ["summary", "classes", "functions", "deps", "tree", "search"]
                 result = types.Completion(
                     values=[v for v in views if v.startswith(argument.value.lower())],
-                    has_more=False
+                    hasMore=False
                 )
             elif argument.name == "target":
                 val = argument.value or ""
@@ -528,27 +634,27 @@ async def handle_completion(
                         files.append(m)
                     if len(files) >= 50:
                         break
-                result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
+                result = types.Completion(values=sorted(files)[:20], hasMore=len(files) > 20)
 
         elif ref.name == "metrics":
             if argument.name == "what":
                 whats = ["oop", "complexity", "hotspots", "all"]
                 result = types.Completion(
                     values=[w for w in whats if w.startswith(argument.value.lower())],
-                    has_more=False
+                    hasMore=False
                 )
             elif argument.name == "target":
                 val = argument.value or ""
                 matches = glob.glob(val + "*")
                 paths = sorted(matches)[:20]
-                result = types.Completion(values=paths, has_more=len(matches) > 20)
+                result = types.Completion(values=paths, hasMore=len(matches) > 20)
 
         elif ref.name == "report":
             if argument.name == "repo_path":
                 val = argument.value or ""
                 matches = [m for m in glob.glob(val + "*") if os.path.isdir(m)]
                 paths = sorted(matches)[:20]
-                result = types.Completion(values=paths, has_more=len(matches) > 20)
+                result = types.Completion(values=paths, hasMore=len(matches) > 20)
 
         elif ref.name == "update_index":
             if argument.name == "target":
@@ -564,16 +670,10 @@ async def handle_completion(
                         files.append(m)
                     if len(files) >= 50:
                         break
-                result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
+                result = types.Completion(values=sorted(files)[:20], hasMore=len(files) > 20)
 
     return types.CompleteResult(
-        completion=result if result is not None else types.Completion(values=[], total=None, has_more=None)
+        completion=result if result is not None else types.Completion(values=[], total=None, hasMore=None)
     )
 
-# Register request handlers explicitly
-server.add_request_handler("tools/list", types.PaginatedRequestParams, handle_list_tools)
-server.add_request_handler("tools/call", types.CallToolRequestParams, handle_call_tool)
-server.add_request_handler("prompts/list", types.PaginatedRequestParams, handle_list_prompts)
-server.add_request_handler("prompts/get", types.GetPromptRequestParams, handle_get_prompt)
-server.add_request_handler("completion/complete", types.CompleteRequestParams, handle_completion)
 

@@ -1,0 +1,113 @@
+import os
+from typing import List, Dict, Any
+from src.mcp_server.index import get_db_path_for_repo, find_repo_root
+from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
+
+class GraphAPI:
+    def __init__(self, repo_path: str = None):
+        self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
+        self.db_path = get_db_path_for_repo(self.repo_path)
+        self.graph = GorgonzolaGraph(db_path=self.db_path)
+
+    def find_callers(self, target_name: str) -> List[Dict[str, Any]]:
+        """Find all methods/functions that call the target function/method."""
+        query = '''
+            MATCH (caller)-[:CALLS]->(callee)
+            WHERE callee.name = $target
+            RETURN caller
+        '''
+        try:
+            results = self.graph.query(query, {"target": target_name})
+            seen = set()
+            unique_callers = []
+            for row in results:
+                props = row['caller']['properties']
+                if props.get('id') not in seen:
+                    seen.add(props.get('id'))
+                    unique_callers.append(props)
+            return unique_callers
+        except Exception as e:
+            return [{"error": repr(e)}]
+
+    def find_callees(self, target_name: str) -> List[Dict[str, Any]]:
+        """Find all functions/methods called by the given target function/method."""
+        query = '''
+            MATCH (caller)-[:CALLS]->(callee)
+            WHERE caller.name = $target
+            RETURN callee
+        '''
+        try:
+            results = self.graph.query(query, {"target": target_name})
+            seen = set()
+            unique_callees = []
+            for row in results:
+                props = row['callee']['properties']
+                if props.get('id') not in seen:
+                    seen.add(props.get('id'))
+                    unique_callees.append(props)
+            return unique_callees
+        except Exception as e:
+            return [{"error": repr(e)}]
+
+    def impact_analysis(self, filepath: str, max_depth: int = 3) -> List[Dict[str, Any]]:
+        """Find all files/modules that transitively depend on the given filepath."""
+        query = f'''
+            MATCH (dependent)-[:DEPENDS_ON*1..{max_depth}]->(f:File {{id: $path}})
+            RETURN dependent
+        '''
+        try:
+            results = self.graph.query(query, {"path": filepath})
+            seen = set()
+            unique_deps = []
+            for row in results:
+                dep_props = row['dependent']['properties']
+                dep_name = dep_props.get('name', '')
+                if dep_name not in seen:
+                    seen.add(dep_name)
+                    unique_deps.append(dep_props)
+            return unique_deps
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    def resolve_symbols(self):
+        """
+        Post-indexing step to resolve dangling 'Symbol' nodes into actual 'Method' or 'Function' nodes.
+        In a full implementation, this would handle import-qualified resolution.
+        For now, it does direct name matching.
+        """
+        queries = [
+            '''
+            MATCH (caller:Method)-[r:CALLS]->(s:Symbol), (target:Method {name: s.name})
+            MERGE (caller)-[:CALLS]->(target)
+            ''',
+            '''
+            MATCH (caller:Method)-[r:CALLS]->(s:Symbol), (target:Function {name: s.name})
+            MERGE (caller)-[:CALLS]->(target)
+            ''',
+            '''
+            MATCH (caller:Function)-[r:CALLS]->(s:Symbol), (target:Method {name: s.name})
+            MERGE (caller)-[:CALLS]->(target)
+            ''',
+            '''
+            MATCH (caller:Function)-[r:CALLS]->(s:Symbol), (target:Function {name: s.name})
+            MERGE (caller)-[:CALLS]->(target)
+            ''',
+            '''
+            MATCH (c:Class)-[r:EXTENDS]->(s:Symbol), (target:Class {name: s.name})
+            MERGE (c)-[:EXTENDS]->(target)
+            ''',
+            '''
+            MATCH (c:Class)-[r:IMPLEMENTS]->(s:Symbol), (target:Interface {name: s.name})
+            MERGE (c)-[:IMPLEMENTS]->(target)
+            ''',
+            '''
+            MATCH (s:Symbol)
+            DETACH DELETE s
+            '''
+        ]
+        
+        for q in queries:
+            try:
+                self.graph.query(q)
+            except Exception:
+                pass

@@ -23,6 +23,7 @@ Date: 2025
 """
 
 import re
+from src.core.constants import get_language_for_extension
 from collections import defaultdict
 from typing import Dict, List
 
@@ -297,20 +298,22 @@ class OOPMetricsAnalyzer:
 		# Remove comments and strings for accurate analysis
 		cleaned_content = self._remove_comments_and_strings(content, file_extension)
 
+		lang = get_language_for_extension(file_extension)
+
 		# Language-specific OOP analysis
-		if file_extension in ['.java', '.scala', '.kt']:
+		if lang == 'java':
 			return self._analyze_java_oop(cleaned_content, filepath)
-		elif file_extension in ['.py', '.pyi']:
+		elif lang == 'python':
 			return self._analyze_python_oop(cleaned_content, filepath)
-		elif file_extension in ['.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.h']:
+		elif lang == 'cpp':
 			return self._analyze_cpp_oop(cleaned_content, filepath)
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx']:
+		elif lang in ['javascript', 'typescript']:
 			return self._analyze_javascript_oop(cleaned_content, filepath)
-		elif file_extension in ['.swift']:
+		elif lang == 'swift':
 			return self._analyze_swift_oop(cleaned_content, filepath)
-		elif file_extension in ['.go']:
+		elif lang == 'go':
 			return self._analyze_go_oop(cleaned_content, filepath)
-		elif file_extension in ['.rs']:
+		elif lang == 'rust':
 			return self._analyze_rust_oop(cleaned_content, filepath)
 
 		return {}
@@ -412,32 +415,22 @@ class OOPMetricsAnalyzer:
 		return interpretations.get(zone, 'Unknown design state')
 
 	def _remove_comments_and_strings(self, content: str, file_extension: str) -> str:
-		"""
-		Remove comments and string literals from code.
-		
-		Args:
-			content: Source code content
-			file_extension: File extension
-			
-		Returns:
-			Cleaned content without comments and strings
-		"""
-		if file_extension == '.py':
-			# Remove Python comments and strings
+		"""Remove comments and strings."""
+		lang = get_language_for_extension(file_extension)
+		if lang == 'python':
+			# Python comments and multiline strings
 			content = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
-			content = re.sub(r'""".*?"""', '', content, flags=re.DOTALL)
-			content = re.sub(r"'''.*?'''", '', content, flags=re.DOTALL)
-			content = re.sub(r'"[^"]*"', '', content)
-			content = re.sub(r"'[^']*'", '', content)
-
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.kt',
-							   '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.go', '.rs']:
-			# Remove C-style comments and strings
+			content = re.sub(r'"""(.*?)"""', '', content, flags=re.DOTALL)
+			content = re.sub(r"'''(.*?)'''", '', content, flags=re.DOTALL)
+		elif lang in ['javascript', 'typescript', 'java', 'cpp', 'go', 'rust', 'swift']:
+			# C-style comments
 			content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
 			content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-			content = re.sub(r'"[^"]*"', '', content)
-			content = re.sub(r"'[^']*'", '', content)
-
+			
+		# General strings
+		content = re.sub(r'"[^"]*"', '""', content)
+		content = re.sub(r"'[^']*'", "''", content)
+		
 		return content
 
 	def _analyze_java_oop(self, content: str, filepath: str) -> Dict:

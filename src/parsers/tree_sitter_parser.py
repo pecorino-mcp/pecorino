@@ -341,7 +341,7 @@ class TreeSitterExtractor:
         called = set()
 
         def visit(n):
-            if n.type in ('call_expression', 'method_invocation'):
+            if n.type in ('call_expression', 'method_invocation', 'call'):
                 func_node = n.child_by_field_name('function') or n.child_by_field_name('name')
                 if not func_node and n.children:
                     func_node = n.children[0]

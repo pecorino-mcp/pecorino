@@ -8,9 +8,6 @@ workspace_root = Path(__file__).resolve().parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-sdk_path = workspace_root / "modules" / "python-sdk" / "src"
-if str(sdk_path) not in sys.path:
-    sys.path.insert(0, str(sdk_path))
 
 from src.mcp_server.config import settings
 from src.mcp_server.core import server as mcp_server

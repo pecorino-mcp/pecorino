@@ -144,6 +144,16 @@ class CodeSearchIndex:
                 )
             ''')
             
+            # Files tracking table for incremental indexing
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS files (
+                    filepath TEXT PRIMARY KEY,
+                    content_hash TEXT,
+                    mtime REAL,
+                    lang TEXT
+                )
+            ''')
+            
             # FTS5 external content table
             conn.execute('''
                 CREATE VIRTUAL TABLE IF NOT EXISTS code_nodes_fts USING fts5(
@@ -219,7 +229,34 @@ class CodeSearchIndex:
         """Remove all nodes for a given file before re-indexing it."""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('DELETE FROM code_nodes WHERE filepath = ?', (filepath,))
+            conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
             conn.commit()
+
+    def upsert_file_hash(self, filepath: str, content_hash: str, mtime: float, lang: str):
+        """Upsert a file's hash and metadata for incremental indexing."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                INSERT INTO files (filepath, content_hash, mtime, lang)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(filepath) DO UPDATE SET
+                    content_hash=excluded.content_hash,
+                    mtime=excluded.mtime,
+                    lang=excluded.lang
+            ''', (filepath, content_hash, mtime, lang))
+            conn.commit()
+
+    def get_file_hash(self, filepath: str) -> str:
+        """Retrieve the stored hash for a given file, or None if not found."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT content_hash FROM files WHERE filepath = ?', (filepath,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+            
+    def get_all_tracked_files(self) -> list:
+        """Retrieve a list of all filepaths currently tracked in the index."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT filepath FROM files')
+            return [row[0] for row in cursor]
 
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search the FTS5 index for a match."""

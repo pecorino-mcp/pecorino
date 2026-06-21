@@ -4,7 +4,7 @@ import asyncio
 from typing import Dict, Any, List
 
 from src.mcp_server.index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
-import graphqlite
+from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
 from src.parsers.ast import ClassDef, InterfaceDef, walk
 from src.parsers.tree_sitter_parser import parse_with_tree_sitter
@@ -15,7 +15,7 @@ class CodebaseIndexer:
         db_path = get_db_path_for_repo(self.repo_path)
         
         self.search_index = CodeSearchIndex(db_path)
-        self.graph = graphqlite.Graph(db_path=db_path)
+        self.graph = GorgonzolaGraph(db_path=db_path)
 
     def _resolve_dependency(self, dep_string: str, source_filepath: str, file_extension: str) -> str:
         """Enhanced language-specific dependency file resolution."""
@@ -108,8 +108,9 @@ class CodebaseIndexer:
         
         # Clear graph database nodes for this file
         try:
-            self.graph.query("MATCH (f:File {id: $id})-[r1:REL_CONTAINS]->(c:Class)-[r2:REL_CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
-            self.graph.query("MATCH (f:File {id: $id})-[r:REL_CONTAINS]->(child) DETACH DELETE child", {"id": filepath})
+            self.graph.query("MATCH (f:File {id: $id})-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
+            self.graph.query("MATCH (f:File {id: $id})-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
+            self.graph.query("MATCH (f:File {id: $id})-[r:CONTAINS]->(child) DETACH DELETE child", {"id": filepath})
             self.graph.query("MATCH (f:File {id: $id}) DETACH DELETE f", {"id": filepath})
         except Exception:
             pass
@@ -117,11 +118,11 @@ class CodebaseIndexer:
         content_lines = content.splitlines()
         nodes_to_index = []
         
-        graph_nodes = []
+        graph_nodes_dict = {}
         graph_edges = []
         
         file_id = filepath
-        graph_nodes.append((file_id, {"name": os.path.basename(filepath), "path": filepath, "extension": file_extension}, "File"))
+        graph_nodes_dict[file_id] = (file_id, {"name": os.path.basename(filepath), "path": filepath, "extension": file_extension}, "File")
 
         dependencies = set()
 
@@ -141,9 +142,18 @@ class CodebaseIndexer:
                 })
                 
                 class_id = f"{filepath}::{node.name}"
-                graph_nodes.append((class_id, {"name": node.name}, "Class"))
+                graph_nodes_dict[class_id] = (class_id, {"name": node.name}, "Class")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                 
+                for base in getattr(node, 'bases', []):
+                    symbol_id = f"Symbol::{base}"
+                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": base}, "Symbol")
+                    graph_edges.append((class_id, symbol_id, {}, "EXTENDS"))
+
+                for interface in getattr(node, 'interfaces', []):
+                    symbol_id = f"Symbol::{interface}"
+                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": interface}, "Symbol")
+                    graph_edges.append((class_id, symbol_id, {}, "IMPLEMENTS"))
                 for m in node.methods:
                     m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
                     m_cc = getattr(m, 'cyclomatic_complexity', 1)
@@ -157,9 +167,13 @@ class CodebaseIndexer:
                         'metrics': {'cyclomatic_complexity': m_cc}
                     })
                     method_id = f"{class_id}::{m.name}"
-                    graph_nodes.append((method_id, {"name": m.name, "complexity": m_cc}, "Method"))
+                    graph_nodes_dict[method_id] = (method_id, {"name": m.name, "complexity": m_cc}, "Method")
                     graph_edges.append((class_id, method_id, {}, "CONTAINS"))
-
+                    
+                    for call in getattr(m, 'called_methods', set()):
+                        symbol_id = f"Symbol::{call}"
+                        graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
+                        graph_edges.append((method_id, symbol_id, {}, "CALLS"))
             elif isinstance(node, InterfaceDef):
                 body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
                 nodes_to_index.append({
@@ -172,9 +186,8 @@ class CodebaseIndexer:
                     'metrics': {}
                 })
                 class_id = f"{filepath}::{node.name}"
-                graph_nodes.append((class_id, {"name": node.name}, "Interface"))
+                graph_nodes_dict[class_id] = (class_id, {"name": node.name}, "Interface")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-                
                 for m in node.methods:
                     m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
                     m_cc = getattr(m, 'cyclomatic_complexity', 1)
@@ -188,9 +201,8 @@ class CodebaseIndexer:
                         'metrics': {'cyclomatic_complexity': m_cc}
                     })
                     method_id = f"{class_id}::{m.name}"
-                    graph_nodes.append((method_id, {"name": m.name, "complexity": m_cc}, "Method"))
+                    graph_nodes_dict[method_id] = (method_id, {"name": m.name, "complexity": m_cc}, "Method")
                     graph_edges.append((class_id, method_id, {}, "CONTAINS"))
-                    
             elif type(node).__name__ == 'ImportDef':
                 if node.module:
                     dependencies.add(node.module)
@@ -208,22 +220,27 @@ class CodebaseIndexer:
                 'metrics': {'cyclomatic_complexity': f_cc}
             })
             func_id = f"{filepath}::{func.name}"
-            graph_nodes.append((func_id, {"name": func.name, "complexity": f_cc}, "Function"))
+            graph_nodes_dict[func_id] = (func_id, {"name": func.name, "complexity": f_cc}, "Function")
             graph_edges.append((file_id, func_id, {}, "CONTAINS"))
-
+            
+            for call in getattr(func, 'called_methods', set()):
+                symbol_id = f"Symbol::{call}"
+                graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
+                graph_edges.append((func_id, symbol_id, {}, "CALLS"))
         # Add dependencies to graph
         for dep in dependencies:
             resolved_dep = self._resolve_dependency(dep, filepath, file_extension)
             if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
-                graph_nodes.append((resolved_dep, {"name": os.path.basename(resolved_dep), "path": resolved_dep}, "File"))
+                graph_nodes_dict[resolved_dep] = (resolved_dep, {"name": os.path.basename(resolved_dep), "path": resolved_dep}, "File")
                 graph_edges.append((file_id, resolved_dep, {}, "DEPENDS_ON"))
             else:
-                graph_nodes.append((resolved_dep, {"name": resolved_dep}, "Module"))
+                graph_nodes_dict[resolved_dep] = (resolved_dep, {"name": resolved_dep}, "Module")
                 graph_edges.append((file_id, resolved_dep, {}, "DEPENDS_ON"))
 
         if nodes_to_index:
             self.search_index.index_nodes(nodes_to_index)
             
+        graph_nodes = list(graph_nodes_dict.values())
         if graph_nodes:
             try:
                 id_map = self.graph.insert_nodes_bulk(graph_nodes)
@@ -235,6 +252,7 @@ class CodebaseIndexer:
 
     def index_directory(self, dirpath: str) -> dict:
         import pathlib
+        import hashlib
         path = pathlib.Path(dirpath)
         SUPPORTED = {'.py','.pyi','.java','.scala','.kt','.js','.jsx','.ts','.tsx',
                      '.cpp','.cc','.cxx','.c','.h','.hpp','.hxx','.go','.rs','.swift'}
@@ -248,15 +266,55 @@ class CodebaseIndexer:
                     files.append(fp)
         
         indexed_count = 0
+        skipped_count = 0
+        current_files_set = set()
+        
         for fp in files:
+            file_str = str(fp)
+            current_files_set.add(file_str)
             try:
                 content = fp.read_text(encoding='utf-8', errors='ignore')
-                self.index_file(str(fp), content, fp.suffix)
+                content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                mtime = os.path.getmtime(file_str)
+                
+                # Check if file has changed
+                existing_hash = self.search_index.get_file_hash(file_str)
+                if existing_hash == content_hash:
+                    skipped_count += 1
+                    continue
+                    
+                self.index_file(file_str, content, fp.suffix)
+                
+                # Update hash in tracking table
+                from src.core.constants import get_language_for_extension
+                lang = get_language_for_extension(fp.suffix)
+                self.search_index.upsert_file_hash(file_str, content_hash, mtime, lang)
+                
                 indexed_count += 1
             except Exception as e:
-                pass
+                import sys
+                print(f"Warning: Failed to index {fp}: {e}", file=sys.stderr)
+                
+        # Clean up stale files that no longer exist on disk
+        tracked_files = self.search_index.get_all_tracked_files()
+        stale_count = 0
+        for tf in tracked_files:
+            if tf not in current_files_set:
+                self.search_index.clear_file(tf)
+                stale_count += 1
                 
         # Note: Optimize is intentionally left out here to prevent 
         # blocking database queries with a full vacuum/merge during normal ingestion.
         
-        return {"status": "success", "indexed_files": indexed_count, "total_files_found": len(files)}
+        # Resolve all unlinked AST symbols (CALLS, EXTENDS, IMPLEMENTS)
+        from src.mcp_server.graph_api import GraphAPI
+        graph_api = GraphAPI(dirpath)
+        graph_api.resolve_symbols()
+        
+        return {
+            "status": "success", 
+            "indexed_files": indexed_count, 
+            "skipped_files": skipped_count,
+            "stale_files_removed": stale_count,
+            "total_files_found": len(files)
+        }

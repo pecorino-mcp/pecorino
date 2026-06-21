@@ -16,6 +16,7 @@ from src.core.config import conf
 from src.git.commands import getpipeoutput
 from src.utils.helpers import should_include_file
 from src.metrics.oopmetrics import OOPMetricsAnalyzer
+from src.core.constants import get_language_for_extension
 
 
 class LRUCache(OrderedDict):
@@ -1148,13 +1149,15 @@ class DataCollector:
 
 		# Common operand patterns (identifiers, numbers, strings)
 		common_operand_patterns = [
-			r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b',  # identifiers
-			r'\b(\d+\.?\d*)\b',                # numbers
+			r'([a-zA-Z_][a-zA-Z0-9_]*)',  # identifiers
+			r'(\d+\.?\d*)',                # numbers
 			r'"([^"]*)"',                      # double-quoted strings
 			r"'([^']*)'",                      # single-quoted strings
 		]
+		
+		lang = get_language_for_extension(file_extension)
 
-		if file_extension == '.py':
+		if lang == 'python':
 			operators = common_operators + [
 				'and', 'or', 'not', 'in', 'is', 'lambda',
 				'if', 'elif', 'else', 'for', 'while', 'def', 'class',
@@ -1162,7 +1165,7 @@ class DataCollector:
 				'with', 'yield', 'return', 'pass', 'break', 'continue'
 			]
 
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx']:
+		elif lang in ['javascript', 'typescript']:
 			operators = common_operators + [
 				'function', 'var', 'let', 'const', 'if', 'else', 'for', 'while',
 				'do', 'switch', 'case', 'default', 'break', 'continue',
@@ -1170,7 +1173,7 @@ class DataCollector:
 				'typeof', 'instanceof', 'this', '=>'
 			]
 
-		elif file_extension in ['.java', '.scala', '.kt']:
+		elif lang == 'java':
 			operators = common_operators + [
 				'class', 'interface', 'extends', 'implements', 'public', 'private',
 				'protected', 'static', 'final', 'abstract', 'synchronized',
@@ -1179,7 +1182,7 @@ class DataCollector:
 				'throw', 'throws', 'new', 'instanceof'
 			]
 
-		elif file_extension in ['.cpp', '.c', '.cc', '.cxx', '.h', '.hpp']:
+		elif lang == 'cpp':
 			operators = common_operators + [
 				'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
 				'break', 'continue', 'return', 'goto', 'sizeof',
@@ -1187,7 +1190,7 @@ class DataCollector:
 				'const', 'volatile', 'auto', 'register'
 			]
 
-		elif file_extension == '.go':
+		elif lang == 'go':
 			operators = common_operators + [
 				'func', 'var', 'const', 'type', 'struct', 'interface',
 				'if', 'else', 'for', 'switch', 'case', 'default',
@@ -1195,7 +1198,7 @@ class DataCollector:
 				'package', 'import', 'defer'
 			]
 
-		elif file_extension == '.rs':
+		elif lang == 'rust':
 			operators = common_operators + [
 				'fn', 'let', 'mut', 'const', 'static', 'struct', 'enum', 'trait',
 				'impl', 'if', 'else', 'for', 'while', 'loop', 'match',
@@ -1209,16 +1212,17 @@ class DataCollector:
 
 	def _remove_comments_and_strings(self, content, file_extension):
 		"""Remove comments and string literals to avoid counting them in Halstead metrics."""
+		lang = get_language_for_extension(file_extension)
 
-		if file_extension == '.py':
+		if lang == 'python':
 			# Remove Python comments and strings
 			content = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
-			content = re.sub(r'""".*?"""', '', content, flags=re.DOTALL)
-			content = re.sub(r"'''.*?'''", '', content, flags=re.DOTALL)
+			content = re.sub(r'"""(.*?)"""', '', content, flags=re.DOTALL)
+			content = re.sub(r"'''(.*?)'''", '', content, flags=re.DOTALL)
 			content = re.sub(r'"[^"]*"', '', content)
 			content = re.sub(r"'[^']*'", '', content)
 
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.kt', '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.go', '.rs']:
+		elif lang in ['javascript', 'typescript', 'java', 'cpp', 'go', 'rust', 'swift']:
 			# Remove C-style comments and strings
 			content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
 			content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
@@ -1228,107 +1232,37 @@ class DataCollector:
 		return content
 
 	def _calculate_mccabe_complexity(self, content, file_extension):
-		"""Calculate McCabe Cyclomatic Complexity v(G).
-		
-		Formula: v(G) = #binaryDecision + 1
-		Also: v(G) = #IFs + #LOOPs + 1
-		"""
+		"""Calculate McCabe Cyclomatic Complexity using simple keyword matching."""
 
-		# Remove comments and strings to avoid false positives
+		# Default base complexity is 1 (for the function/file itself)
+		complexity = 1
+
+		# Remove comments and strings
 		cleaned_content = self._remove_comments_and_strings(content, file_extension)
 
-		# Language-specific binary decision patterns (IF statements and LOOPS)
-		if_patterns = []
-		loop_patterns = []
-
-		if file_extension in ['.py']:
-			# Python patterns
-			if_patterns = [r'\bif\b', r'\belif\b']
-			loop_patterns = [r'\bwhile\b', r'\bfor\b']
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx']:
-			# JavaScript/TypeScript patterns
-			if_patterns = [r'\bif\b', r'\belse\s+if\b']
-			loop_patterns = [r'\bwhile\b', r'\bfor\b', r'\bdo\b']
-		elif file_extension in ['.java', '.scala', '.kt']:
-			# Java/Scala/Kotlin patterns
-			if_patterns = [r'\bif\b', r'\belse\s+if\b']
-			loop_patterns = [r'\bwhile\b', r'\bfor\b', r'\bdo\b']
-		elif file_extension in ['.cpp', '.c', '.cc', '.cxx', '.h', '.hpp']:
-			# C/C++ patterns
-			if_patterns = [r'\bif\b', r'\belse\s+if\b']
-			loop_patterns = [r'\bwhile\b', r'\bfor\b', r'\bdo\b']
-		elif file_extension in ['.go']:
-			# Go patterns
-			if_patterns = [r'\bif\b', r'\belse\s+if\b']
-			loop_patterns = [r'\bfor\b']
-		elif file_extension in ['.rs']:
-			# Rust patterns
-			if_patterns = [r'\bif\b', r'\belse\s+if\b']
-			loop_patterns = [r'\bwhile\b', r'\bfor\b', r'\bloop\b']
+		# Language-specific keywords that add to complexity
+		lang = get_language_for_extension(file_extension)
+		if lang in ['javascript', 'typescript', 'java', 'cpp', 'go', 'rust', 'swift']:
+			complexity_keywords = ['if', 'for', 'while', 'case', 'catch', '?', '&&', '||']
+		elif lang == 'python':
+			complexity_keywords = ['if', 'elif', 'for', 'while', 'except', 'with', 'and', 'or']
 		else:
-			# Generic patterns for other languages
-			if_patterns = [r'\bif\b', r'\belse\s+if\b']
-			loop_patterns = [r'\bwhile\b', r'\bfor\b', r'\bdo\b']
+			# Generic fallback
+			complexity_keywords = ['if', 'for', 'while', 'case', 'catch', 'except']
 
-		# Count IF statements
-		if_count = 0
-		for pattern in if_patterns:
-			matches = re.findall(pattern, cleaned_content, re.IGNORECASE)
-			if_count += len(matches)
+		# Count keyword occurrences
+		for keyword in complexity_keywords:
+			# Use word boundaries for alphabetic keywords, direct match for symbols
+			if keyword.isalpha():
+				pattern = r'\b' + keyword + r'\b'
+			else:
+				pattern = re.escape(keyword)
 
-		# Count LOOP statements
-		loop_count = 0
-		for pattern in loop_patterns:
-			matches = re.findall(pattern, cleaned_content, re.IGNORECASE)
-			loop_count += len(matches)
-
-		# Additional binary decisions: switch/case, try/catch, ternary operators, logical operators
-		additional_decisions = 0
-
-		# Switch/case statements
-		if file_extension in ['.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.kt', '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp']:
-			case_matches = re.findall(r'\bcase\b', cleaned_content, re.IGNORECASE)
-			additional_decisions += len(case_matches)
-
-		# Ternary operators
-		ternary_matches = re.findall(r'\?.*:', cleaned_content)
-		additional_decisions += len(ternary_matches)
-
-		# Logical operators (each && or || creates a binary decision)
-		logical_matches = re.findall(r'&&|\|\|', cleaned_content)
-		additional_decisions += len(logical_matches)
-
-		# Exception handling
-		if file_extension in ['.py']:
-			except_matches = re.findall(r'\bexcept\b', cleaned_content, re.IGNORECASE)
-			additional_decisions += len(except_matches)
-		elif file_extension in ['.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.kt', '.c', '.cpp', '.cc', '.cxx']:
-			catch_matches = re.findall(r'\bcatch\b', cleaned_content, re.IGNORECASE)
-			additional_decisions += len(catch_matches)
-
-		# Total binary decisions = IFs + LOOPs + additional decisions
-		binary_decisions = if_count + loop_count + additional_decisions
-
-		# McCabe complexity v(G) = #binaryDecision + 1
-		complexity = binary_decisions + 1
-
-		# Interpret complexity level (recommendations: function ≲ 15; file ≲ 100)
-		if complexity <= 15:
-			interpretation = 'simple'
-		elif complexity <= 25:
-			interpretation = 'moderate'
-		elif complexity <= 50:
-			interpretation = 'complex'
-		else:
-			interpretation = 'very_complex'
+			matches = re.findall(pattern, cleaned_content)
+			complexity += len(matches)
 
 		return {
-			'cyclomatic_complexity': complexity,
-			'binary_decisions': binary_decisions,
-			'if_count': if_count,
-			'loop_count': loop_count,
-			'additional_decisions': additional_decisions,
-			'interpretation': interpretation
+			'cyclomatic_complexity': complexity
 		}
 
 	def _calculate_maintainability_index(self, loc_metrics, halstead_metrics, mccabe_metrics):
@@ -1398,416 +1332,47 @@ class DataCollector:
 			return 'critical'      # Critical/pathological case
 
 	def _calculate_oop_metrics(self, content, file_extension, filepath):
-		"""Calculate Object-Oriented Programming software metrics.
+		"""Calculate Object-Oriented Programming software metrics."""
 		
-		Calculates:
-		- Efferent Coupling (Ce): Number of classes this class depends on
-		- Afferent Coupling (Ca): Number of classes that depend on this class  
-		- Instability (I): Ce / (Ce + Ca)
-		- Abstractness (A): Abstract classes / Total classes
-		- Distance from Main Sequence (D): |A + I - 1|
-		"""
-
-		# Initialize OOP metrics
-		metrics = {
-			'classes_defined': 0,
-			'abstract_classes': 0,
-			'interfaces_defined': 0,
-			'efferent_coupling': 0,
-			'afferent_coupling': 0,
-			'instability': 0.0,
-			'abstractness': 0.0,
-			'distance_main_sequence': 0.0,
-			'inheritance_depth': 0,
-			'method_count': 0,
-			'attribute_count': 0
-		}
-
 		if not content.strip():
-			return metrics
-
+			return {
+				'classes_defined': 0,
+				'abstract_classes': 0,
+				'interfaces_defined': 0,
+				'efferent_coupling': 0,
+				'afferent_coupling': 0,
+				'instability': 0.0,
+				'abstractness': 0.0,
+				'distance_main_sequence': 0.0,
+				'inheritance_depth': 0,
+				'method_count': 0,
+				'attribute_count': 0,
+				'coupling': 0
+			}
+			
 		try:
-			# Remove comments and strings for accurate analysis
-			cleaned_content = self._remove_comments_and_strings(content, file_extension)
-
-			# Language-specific OOP analysis
-			if file_extension in ['.java', '.scala', '.kt']:
-				metrics.update(self._analyze_java_oop_metrics(cleaned_content))
-			elif file_extension in ['.py', '.pyi']:
-				metrics.update(self._analyze_python_oop_metrics(cleaned_content))
-			elif file_extension in ['.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.h']:
-				metrics.update(self._analyze_cpp_oop_metrics(cleaned_content))
-			elif file_extension in ['.js', '.ts', '.jsx', '.tsx']:
-				metrics.update(self._analyze_javascript_oop_metrics(cleaned_content))
-			elif file_extension in ['.swift']:
-				metrics.update(self._analyze_swift_oop_metrics(cleaned_content))
-			elif file_extension in ['.go']:
-				metrics.update(self._analyze_go_oop_metrics(cleaned_content))
-			elif file_extension in ['.rs']:
-				metrics.update(self._analyze_rust_oop_metrics(cleaned_content))
-
-			# Calculate derived metrics
-			if metrics['classes_defined'] > 0:
-				metrics['abstractness'] = metrics['abstract_classes'] / metrics['classes_defined']
-
-			ce = metrics['efferent_coupling']
-			ca = metrics['afferent_coupling']
-			if (ce + ca) > 0:
-				metrics['instability'] = ce / (ce + ca)
-
-			# Distance from Main Sequence: D = |A + I - 1|
-			metrics['distance_main_sequence'] = abs(metrics['abstractness'] + metrics['instability'] - 1.0)
-
-			# Add overall coupling metric (sum of efferent and afferent coupling)
-			metrics['coupling'] = metrics['efferent_coupling'] + metrics['afferent_coupling']
-
+			# Delegate completely to OOPMetricsAnalyzer
+			metrics = self.oop_analyzer.analyze_file(filepath, content, file_extension)
+			# Ensure 'coupling' key exists as it is expected by the CLI
+			metrics['coupling'] = metrics.get('efferent_coupling', 0) + metrics.get('afferent_coupling', 0)
+			return metrics
 		except Exception as e:
 			if conf['debug']:
 				print(f'Warning: OOP metrics calculation failed for {filepath}: {e}')
-
-		return metrics
-
-	def _analyze_java_oop_metrics(self, content):
-		"""Analyze OOP metrics for Java/Scala/Kotlin files."""
-
-		metrics = {
-			'classes_defined': 0,
-			'abstract_classes': 0,
-			'interfaces_defined': 0,
-			'efferent_coupling': 0,
-			'afferent_coupling': 0,
-			'method_count': 0,
-			'attribute_count': 0,
-			'inheritance_depth': 0
-		}
-
-		# Count classes (including inner classes)
-		class_patterns = [
-			r'\bclass\s+\w+',
-			r'\benum\s+\w+',
-			r'\b@interface\s+\w+'
-		]
-		for pattern in class_patterns:
-			matches = re.findall(pattern, content, re.MULTILINE)
-			metrics['classes_defined'] += len(matches)
-
-		# Count abstract classes
-		abstract_patterns = [
-			r'\babstract\s+class\s+\w+',
-			r'\babstract\s+.*\s+class\s+\w+'
-		]
-		for pattern in abstract_patterns:
-			matches = re.findall(pattern, content, re.MULTILINE)
-			metrics['abstract_classes'] += len(matches)
-
-		# Count interfaces
-		interface_patterns = [r'\binterface\s+\w+']
-		for pattern in interface_patterns:
-			matches = re.findall(pattern, content, re.MULTILINE)
-			metrics['interfaces_defined'] += len(matches)
-			metrics['abstract_classes'] += len(matches)  # Interfaces are abstract
-
-		# Count methods (public, private, protected)
-		method_patterns = [
-			r'\b(public|private|protected|static).*\s+\w+\s*\([^)]*\)\s*\{',
-			r'\b\w+\s*\([^)]*\)\s*\{'  # Basic method pattern
-		]
-		for pattern in method_patterns:
-			matches = re.findall(pattern, content, re.MULTILINE)
-			metrics['method_count'] += len(matches)
-
-		# Count attributes/fields
-		field_patterns = [
-			r'\b(public|private|protected|static)\s+[\w<>,\[\]]+\s+\w+\s*[=;]',
-			r'\bprivate\s+[\w<>,\[\]]+\s+\w+',
-			r'\bpublic\s+[\w<>,\[\]]+\s+\w+',
-			r'\bprotected\s+[\w<>,\[\]]+\s+\w+'
-		]
-		for pattern in field_patterns:
-			matches = re.findall(pattern, content, re.MULTILINE)
-			metrics['attribute_count'] += len(matches)
-
-		# Estimate coupling by counting imports and new object creations
-		import_matches = re.findall(r'\bimport\s+[\w.]+', content)
-		new_matches = re.findall(r'\bnew\s+\w+\s*\(', content)
-		metrics['efferent_coupling'] = len(set(import_matches)) + len(new_matches)
-
-		return metrics
-
-	def _analyze_python_oop_metrics(self, content):
-		"""Analyze OOP metrics for Python files."""
-
-		metrics = {
-			'classes_defined': 0,
-			'abstract_classes': 0,
-			'interfaces_defined': 0,
-			'efferent_coupling': 0,
-			'afferent_coupling': 0,
-			'method_count': 0,
-			'attribute_count': 0,
-			'inheritance_depth': 0
-		}
-
-		# Count classes
-		class_matches = re.findall(r'^class\s+\w+.*:', content, re.MULTILINE)
-		metrics['classes_defined'] = len(class_matches)
-
-		# Count abstract classes (ABC or abstractmethod)
-		abstract_patterns = [
-			r'from\s+abc\s+import',
-			r'@abstractmethod',
-			r'ABC\)',
-			r'class.*ABC.*:'
-		]
-		has_abc = any(re.search(pattern, content) for pattern in abstract_patterns)
-		if has_abc and metrics['classes_defined'] > 0:
-			metrics['abstract_classes'] = 1  # Conservative estimate
-
-		# Count methods (def within classes)
-		method_matches = re.findall(r'^\s+def\s+\w+\s*\(.*\):', content, re.MULTILINE)
-		metrics['method_count'] = len(method_matches)
-
-		# Count attributes (self.attribute assignments)
-		attribute_matches = re.findall(r'self\.\w+\s*=', content)
-		metrics['attribute_count'] = len(set(attribute_matches))
-
-		# Estimate coupling by counting imports
-		import_matches = re.findall(r'^(?:from\s+[\w.]+\s+)?import\s+[\w.,\s]+', content, re.MULTILINE)
-		metrics['efferent_coupling'] = len(import_matches)
-
-		return metrics
-
-	def _analyze_cpp_oop_metrics(self, content):
-		"""Analyze OOP metrics for C++ files."""
-
-		metrics = {
-			'classes_defined': 0,
-			'abstract_classes': 0,
-			'interfaces_defined': 0,
-			'efferent_coupling': 0,
-			'afferent_coupling': 0,
-			'method_count': 0,
-			'attribute_count': 0,
-			'inheritance_depth': 0
-		}
-
-		# Count classes and structs
-		class_patterns = [
-			r'\bclass\s+\w+',
-			r'\bstruct\s+\w+'
-		]
-		for pattern in class_patterns:
-			matches = re.findall(pattern, content)
-			metrics['classes_defined'] += len(matches)
-
-		# Count abstract classes (virtual methods)
-		virtual_matches = re.findall(r'virtual\s+.*\s*=\s*0\s*;', content)
-		if virtual_matches:
-			metrics['abstract_classes'] = 1  # Conservative estimate
-
-		# Count methods (function definitions in classes)
-		method_patterns = [
-			r'\b\w+\s*\([^)]*\)\s*\{',
-			r'\b(public|private|protected):\s*\n\s*\w+\s*\([^)]*\)'
-		]
-		for pattern in method_patterns:
-			matches = re.findall(pattern, content, re.MULTILINE)
-			metrics['method_count'] += len(matches)
-
-		# Count attributes (member variables)
-		member_patterns = [
-			r'\b(public|private|protected):\s*\n\s*[\w<>,\*&\[\]]+\s+\w+\s*;',
-			r'^\s*[\w<>,\*&\[\]]+\s+\w+\s*;',
-		]
-		for pattern in member_patterns:
-			matches = re.findall(pattern, content, re.MULTILINE)
-			metrics['attribute_count'] += len(matches)
-
-		# Estimate coupling by counting includes
-		include_matches = re.findall(r'#include\s*[<"][\w./]+[>"]', content)
-		metrics['efferent_coupling'] = len(include_matches)
-
-		return metrics
-
-	def _analyze_javascript_oop_metrics(self, content):
-		"""Analyze OOP metrics for JavaScript/TypeScript files."""
-
-		metrics = {
-			'classes_defined': 0,
-			'abstract_classes': 0,
-			'interfaces_defined': 0,
-			'efferent_coupling': 0,
-			'afferent_coupling': 0,
-			'method_count': 0,
-			'attribute_count': 0,
-			'inheritance_depth': 0
-		}
-
-		# Count classes
-		class_matches = re.findall(r'\bclass\s+\w+', content)
-		metrics['classes_defined'] = len(class_matches)
-
-		# Count interfaces (TypeScript)
-		interface_matches = re.findall(r'\binterface\s+\w+', content)
-		metrics['interfaces_defined'] = len(interface_matches)
-		metrics['abstract_classes'] += len(interface_matches)
-
-		# Count abstract classes (TypeScript)
-		abstract_matches = re.findall(r'\babstract\s+class\s+\w+', content)
-		metrics['abstract_classes'] += len(abstract_matches)
-
-		# Count methods
-		method_patterns = [
-			r'\b\w+\s*\([^)]*\)\s*\{',
-			r'\b\w+:\s*\([^)]*\)\s*=>'
-		]
-		for pattern in method_patterns:
-			matches = re.findall(pattern, content)
-			metrics['method_count'] += len(matches)
-
-		# Count properties/attributes
-		property_patterns = [
-			r'this\.\w+\s*=',
-			r'\b\w+:\s*[\w\[\]<>]+\s*[;,]'
-		]
-		for pattern in property_patterns:
-			matches = re.findall(pattern, content)
-			metrics['attribute_count'] += len(matches)
-
-		# Estimate coupling by counting imports/requires
-		import_patterns = [
-			r'import\s+.*\s+from\s+["\'][\w./]+["\']',
-			r'require\s*\(["\'][\w./]+["\']\)'
-		]
-		for pattern in import_patterns:
-			matches = re.findall(pattern, content)
-			metrics['efferent_coupling'] += len(matches)
-
-		return metrics
-
-	def _analyze_swift_oop_metrics(self, content):
-		"""Analyze OOP metrics for Swift files."""
-
-		metrics = {
-			'classes_defined': 0,
-			'abstract_classes': 0,
-			'interfaces_defined': 0,
-			'efferent_coupling': 0,
-			'afferent_coupling': 0,
-			'method_count': 0,
-			'attribute_count': 0,
-			'inheritance_depth': 0
-		}
-
-		# Count classes and structs
-		class_patterns = [
-			r'\bclass\s+\w+',
-			r'\bstruct\s+\w+'
-		]
-		for pattern in class_patterns:
-			matches = re.findall(pattern, content)
-			metrics['classes_defined'] += len(matches)
-
-		# Count protocols (Swift's interfaces)
-		protocol_matches = re.findall(r'\bprotocol\s+\w+', content)
-		metrics['interfaces_defined'] = len(protocol_matches)
-		metrics['abstract_classes'] += len(protocol_matches)
-
-		# Count methods/functions
-		method_matches = re.findall(r'\bfunc\s+\w+\s*\(', content)
-		metrics['method_count'] = len(method_matches)
-
-		# Count properties
-		property_patterns = [
-			r'\bvar\s+\w+\s*:',
-			r'\blet\s+\w+\s*:'
-		]
-		for pattern in property_patterns:
-			matches = re.findall(pattern, content)
-			metrics['attribute_count'] += len(matches)
-
-		# Estimate coupling by counting imports
-		import_matches = re.findall(r'\bimport\s+\w+', content)
-		metrics['efferent_coupling'] = len(import_matches)
-
-		return metrics
-
-	def _analyze_go_oop_metrics(self, content):
-		"""Analyze OOP-like metrics for Go files."""
-
-		metrics = {
-			'classes_defined': 0,
-			'abstract_classes': 0,
-			'interfaces_defined': 0,
-			'efferent_coupling': 0,
-			'afferent_coupling': 0,
-			'method_count': 0,
-			'attribute_count': 0,
-			'inheritance_depth': 0
-		}
-
-		# Count structs (Go's equivalent to classes)
-		struct_matches = re.findall(r'\btype\s+\w+\s+struct\s*\{', content)
-		metrics['classes_defined'] = len(struct_matches)
-
-		# Count interfaces
-		interface_matches = re.findall(r'\btype\s+\w+\s+interface\s*\{', content)
-		metrics['interfaces_defined'] = len(interface_matches)
-		metrics['abstract_classes'] = len(interface_matches)
-
-		# Count methods (functions with receivers)
-		method_matches = re.findall(r'\bfunc\s*\([^)]*\)\s*\w+\s*\(', content)
-		metrics['method_count'] = len(method_matches)
-
-		# Count struct fields
-		# This is a simple approximation - count field-like declarations in structs
-		field_matches = re.findall(r'^\s*\w+\s+[\w\[\]\*]+\s*$', content, re.MULTILINE)
-		metrics['attribute_count'] = len(field_matches)
-
-		# Estimate coupling by counting imports
-		import_matches = re.findall(r'\bimport\s+["\w/.-]+', content)
-		metrics['efferent_coupling'] = len(import_matches)
-
-		return metrics
-
-	def _analyze_rust_oop_metrics(self, content):
-		"""Analyze OOP-like metrics for Rust files."""
-
-		metrics = {
-			'classes_defined': 0,
-			'abstract_classes': 0,
-			'interfaces_defined': 0,
-			'efferent_coupling': 0,
-			'afferent_coupling': 0,
-			'method_count': 0,
-			'attribute_count': 0,
-			'inheritance_depth': 0
-		}
-
-		# Count structs and enums (Rust's data types)
-		struct_matches = re.findall(r'\bstruct\s+\w+', content)
-		enum_matches = re.findall(r'\benum\s+\w+', content)
-		metrics['classes_defined'] = len(struct_matches) + len(enum_matches)
-
-		# Count traits (Rust's interfaces)
-		trait_matches = re.findall(r'\btrait\s+\w+', content)
-		metrics['interfaces_defined'] = len(trait_matches)
-		metrics['abstract_classes'] = len(trait_matches)
-
-		# Count impl methods
-		method_matches = re.findall(r'\bfn\s+\w+\s*\(', content)
-		metrics['method_count'] = len(method_matches)
-
-		# Count struct fields (simplified)
-		field_matches = re.findall(r'^\s*\w+\s*:\s*[\w<>,\[\]]+\s*,?', content, re.MULTILINE)
-		metrics['attribute_count'] = len(field_matches)
-
-		# Estimate coupling by counting use statements
-		use_matches = re.findall(r'\buse\s+[\w:]+', content)
-		extern_matches = re.findall(r'\bextern\s+crate\s+\w+', content)
-		metrics['efferent_coupling'] = len(use_matches) + len(extern_matches)
-
-		return metrics
+			return {
+				'classes_defined': 0,
+				'abstract_classes': 0,
+				'interfaces_defined': 0,
+				'efferent_coupling': 0,
+				'afferent_coupling': 0,
+				'instability': 0.0,
+				'abstractness': 0.0,
+				'distance_main_sequence': 0.0,
+				'inheritance_depth': 0,
+				'method_count': 0,
+				'attribute_count': 0,
+				'coupling': 0
+			}
 
 	def get_repository_files_for_mi(self, repository_path=None):
 		"""Get all files from repository that match allowed extensions for MI calculation.
