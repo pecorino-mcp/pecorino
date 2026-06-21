@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 # Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
-workspace_root = Path(__file__).resolve().parent.parent
+workspace_root = Path(__file__).resolve().parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
@@ -12,8 +12,8 @@ sdk_path = workspace_root / "modules" / "python-sdk" / "src"
 if str(sdk_path) not in sys.path:
     sys.path.insert(0, str(sdk_path))
 
-from src.mcp_core.config import settings
-from src.mcp_core.server import server as mcp_server
+from src.mcp_server.config import settings
+from src.mcp_server.core import server as mcp_server
 
 def main():
     parser = argparse.ArgumentParser(description="Run OOP Metrics Analyzer Server")
@@ -30,6 +30,10 @@ def main():
         settings.host = args.host
     if args.port:
         settings.port = args.port
+
+    # Run global safe startup migration
+    from src.mcp_server.index import migrate_all
+    migrate_all()
 
     if settings.transport == "stdio":
         from src.transports.stdio_adapter import run_stdio

@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional, Set
 
-from .gitstats_constants import ALLOWED_EXTENSIONS
+from src.core.constants import ALLOWED_EXTENSIONS
 
 
 @dataclass

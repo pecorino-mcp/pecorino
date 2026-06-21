@@ -10,8 +10,8 @@ import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from .gitstats_config import conf
-from .gitstats_gitcommands import is_git_repository
+from src.core.config import conf
+from src.git.commands import is_git_repository
 
 
 def _is_bare_repository(path):

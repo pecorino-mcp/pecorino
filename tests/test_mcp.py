@@ -4,8 +4,8 @@ import sys
 from pathlib import Path
 import pytest
 
-from src.gitstats_index import find_repo_root, get_db_path_for_repo
-from src.mcp_core.server import do_browse, do_update_index
+from src.mcp_server.index import find_repo_root, get_db_path_for_repo
+from src.mcp_server.core import do_browse, do_update_index
 
 
 def test_repo_root_resolution():
@@ -20,7 +20,7 @@ def test_repo_root_resolution():
 @pytest.mark.asyncio
 async def test_do_update_and_browse():
     workspace = Path(__file__).resolve().parent.parent
-    target_file = str(workspace / "src" / "gitstats_mcp.py")
+    target_file = str(workspace / "src" / "mcp_server" / "server.py")
 
     # Update index for the file
     res_update = await do_update_index(target_file)

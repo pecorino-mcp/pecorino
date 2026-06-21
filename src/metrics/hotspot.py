@@ -11,8 +11,8 @@ Identifies high-risk code areas by combining:
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
-from .gitstats_config import conf
-from .gitstats_gitcommands import getpipeoutput
+from src.core.config import conf
+from src.git.commands import getpipeoutput
 
 
 class HotspotDetector:

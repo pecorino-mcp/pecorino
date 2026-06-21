@@ -12,10 +12,10 @@ import time
 import zlib
 from collections import OrderedDict, defaultdict
 
-from .gitstats_config import conf
-from .gitstats_gitcommands import getpipeoutput
-from .gitstats_helpers import should_include_file
-from .gitstats_oopmetrics import OOPMetricsAnalyzer
+from src.core.config import conf
+from src.git.commands import getpipeoutput
+from src.utils.helpers import should_include_file
+from src.metrics.oopmetrics import OOPMetricsAnalyzer
 
 
 class LRUCache(OrderedDict):

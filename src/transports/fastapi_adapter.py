@@ -5,8 +5,8 @@ from fastapi.exceptions import HTTPException
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from src.mcp_core.config import settings
-from src.mcp_core.metrics import ACTIVE_SESSIONS
+from src.mcp_server.config import settings
+from src.mcp_server.metrics import ACTIVE_SESSIONS
 from src.transports.auth import verify_oauth_token
 
 async def oauth_middleware(request: Request, call_next):

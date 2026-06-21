@@ -17,7 +17,7 @@ import tree_sitter
 
 # Lazy imports from gitstats_oopmetrics to avoid circular imports
 def get_ast_classes():
-    from src.gitstats_ast import (
+    from src.parsers.ast import (
         AttributeDef,
         ClassDef,
         FunctionDef,
@@ -695,7 +695,7 @@ def parse_with_tree_sitter(source: str, extension: str) -> Optional[Any]:
     ts_lang_name = language
 
     # Try to load parser using TreeSitterGrammarManager
-    from src.tsgm import TreeSitterGrammarManager
+    from src.parsers.tsgm import TreeSitterGrammarManager
     manager = TreeSitterGrammarManager()
 
     try:

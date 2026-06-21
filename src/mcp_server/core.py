@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 # Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
-workspace_root = Path(__file__).resolve().parent.parent
+workspace_root = Path(__file__).resolve().parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
@@ -18,22 +18,22 @@ if str(sdk_path) not in sys.path:
 import time
 
 import jwt
-from src.mcp_core.metrics import TOOL_CALLS, TOOL_ERRORS, TOOL_DURATION
+from src.mcp_server.metrics import TOOL_CALLS, TOOL_ERRORS, TOOL_DURATION
 import mcp.types as types
 from mcp.server.lowlevel import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 
-from src.gitstats_ast import ClassDef, InterfaceDef, walk
-from src.gitstats_export import MetricsExporter
-from src.gitstats_gitdatacollector import GitDataCollector
-from src.gitstats_hotspot import HotspotDetector
-from src.gitstats_maintainability import (
+from src.parsers.ast import ClassDef, InterfaceDef, walk
+from src.utils.export import MetricsExporter
+from src.core.gitdatacollector import GitDataCollector
+from src.metrics.hotspot import HotspotDetector
+from src.metrics.maintainability import (
     calculate_halstead_metrics,
     calculate_loc_metrics,
     calculate_maintainability_index,
     calculate_mccabe_complexity,
 )
-from src.gitstats_oopmetrics import OOPMetricsAnalyzer, parse
+from src.metrics.oopmetrics import OOPMetricsAnalyzer, parse
 
 server = Server("OOP Metrics Analyzer Server 🚀")
 
@@ -52,7 +52,7 @@ def safe_path(p: str) -> Path:
 # Core implementation of tools (without decorators)
 async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10) -> dict:
     path = safe_path(target)
-    from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+    from src.mcp_server.index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
     index = CodeSearchIndex(db_path=db_path)
@@ -72,7 +72,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         indexed_files = len(set(n['filepath'] for n in nodes))
 
         return {
-            "target": str(path),
+            "target": path.as_posix(),
             "type": "directory",
             "structure": {
                 "indexed_files": indexed_files,
@@ -83,13 +83,13 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     if path.suffix not in SUPPORTED:
         raise ValueError(f"Unsupported extension: {path.suffix}")
 
-    result: dict[str, Any] = {"target": str(path), "type": "file"}
+    result: dict[str, Any] = {"target": path.as_posix(), "type": "file"}
 
     if view == "tree":
         import tree_sitter
 
-        from src.gitstats_tree_sitter_parser import get_language_from_extension
-        from src.tsgm import TreeSitterGrammarManager
+        from src.parsers.tree_sitter_parser import get_language_from_extension
+        from src.parsers.tsgm import TreeSitterGrammarManager
         content = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='ignore')
         lang = TreeSitterGrammarManager().get_language(get_language_from_extension(path.suffix))
         parser = tree_sitter.Parser(lang)
@@ -170,13 +170,13 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
 async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
     path = safe_path(target)
-    from src.gitstats_index import find_repo_root
+    from src.mcp_server.index import find_repo_root
     repo_root = find_repo_root(str(path))
     what_set = {w.lower() for w in what}
     if "all" in what_set:
         what_set = {"oop", "complexity", "hotspots"}
 
-    result: dict[str, Any] = {"target": str(path), "type": "file" if path.is_file() else "directory"}
+    result: dict[str, Any] = {"target": path.as_posix(), "type": "file" if path.is_file() else "directory"}
 
     if path.is_file():
         content = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='ignore')
@@ -195,7 +195,13 @@ async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
         if "oop" in what_set or "complexity" in what_set:
             analyzer = OOPMetricsAnalyzer(use_ast=True, repo_path=repo_root)
             ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
-            files = [f for f in path.rglob("*") if f.suffix in SUPPORTED and not any(p in ignore_dirs for p in f.parts)]
+            files = []
+            for r, d, fnames in os.walk(str(path)):
+                d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
+                for fname in fnames:
+                    fp = Path(r) / fname
+                    if fp.suffix in SUPPORTED:
+                        files.append(fp)
             for fp in files:
                 try:
                     txt = await asyncio.to_thread(fp.read_text, encoding='utf-8', errors='ignore')
@@ -230,7 +236,7 @@ async def do_report(repo_path: str, output_path: str) -> dict:
     out_dir = Path(output_path).expanduser().resolve() / f"{safe_repo_name}_report"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    from src.gitstats_config import conf
+    from src.core.config import conf
     conf['calculate_mi_per_repository'] = True
 
     data = GitDataCollector()
@@ -255,98 +261,31 @@ async def do_report(repo_path: str, output_path: str) -> dict:
 
 async def do_update_index(target: str) -> dict:
     path = safe_path(target)
-    from src.gitstats_index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+    from src.mcp_server.indexer import CodebaseIndexer
+    from src.mcp_server.index import find_repo_root
+    
     repo_root = find_repo_root(str(path))
-    db_path = get_db_path_for_repo(repo_root)
-    index = CodeSearchIndex(db_path=db_path)
 
-    async def _index_file_tree(filepath: str, content: str, tree):
-        await asyncio.to_thread(index.clear_file, filepath)
-        content_lines = content.splitlines()
-        nodes_to_index = []
-
-        for node in walk(tree):
-            if isinstance(node, ClassDef):
-                body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
-                nodes_to_index.append({
-                    'name': node.name,
-                    'node_type': 'class',
-                    'filepath': filepath,
-                    'body_text': body,
-                    'start_line': node.lineno,
-                    'end_line': node.end_lineno,
-                    'metrics': {'wmc': getattr(node, 'wmc', 0), 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
-                })
-                for m in node.methods:
-                    m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
-                    nodes_to_index.append({
-                        'name': f"{node.name}.{m.name}",
-                        'node_type': 'method',
-                        'filepath': filepath,
-                        'body_text': m_body,
-                        'start_line': m.lineno,
-                        'end_line': m.end_lineno,
-                        'metrics': {'cyclomatic_complexity': getattr(m, 'cyclomatic_complexity', 1)}
-                    })
-            elif isinstance(node, InterfaceDef):
-                body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
-                nodes_to_index.append({
-                    'name': node.name,
-                    'node_type': 'interface',
-                    'filepath': filepath,
-                    'body_text': body,
-                    'start_line': node.lineno,
-                    'end_line': node.end_lineno,
-                    'metrics': {}
-                })
-                for m in node.methods:
-                    m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
-                    nodes_to_index.append({
-                        'name': f"{node.name}.{m.name}",
-                        'node_type': 'method',
-                        'filepath': filepath,
-                        'body_text': m_body,
-                        'start_line': m.lineno,
-                        'end_line': m.end_lineno,
-                        'metrics': {'cyclomatic_complexity': getattr(m, 'cyclomatic_complexity', 1)}
-                    })
-
-        for func in tree.functions:
-            f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
-            nodes_to_index.append({
-                'name': func.name,
-                'node_type': 'function',
-                'filepath': filepath,
-                'body_text': f_body,
-                'start_line': func.lineno,
-                'end_line': func.end_lineno,
-                'metrics': {'cyclomatic_complexity': getattr(func, 'cyclomatic_complexity', 1)}
-            })
-
-        if nodes_to_index:
-            await asyncio.to_thread(index.index_nodes, nodes_to_index)
+    def _index_dir():
+        indexer = CodebaseIndexer(repo_path=repo_root)
+        return indexer.index_directory(str(path))
 
     if path.is_dir():
-        ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
-        files = [f for f in path.rglob("*") if f.suffix in SUPPORTED and not any(p in ignore_dirs for p in f.parts)]
-        indexed_count = 0
-        for fp in files:
-            try:
-                content = await asyncio.to_thread(fp.read_text, encoding='utf-8', errors='ignore')
-                tree = await asyncio.to_thread(parse, content, fp.suffix)
-                await _index_file_tree(str(fp), content, tree)
-                indexed_count += 1
-            except Exception:
-                pass
-        return {"status": "success", "indexed_files": indexed_count, "total_files_found": len(files)}
+        res = await asyncio.to_thread(_index_dir)
+        res["target"] = path.as_posix()
+        return res
 
     if path.suffix not in SUPPORTED:
         raise ValueError(f"Unsupported extension: {path.suffix}")
 
     content = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='ignore')
-    tree = await asyncio.to_thread(parse, content, path.suffix)
-    await _index_file_tree(str(path), content, tree)
-    return {"status": "success", "indexed_files": 1, "total_files_found": 1}
+
+    def _index_file():
+        indexer = CodebaseIndexer(repo_path=repo_root)
+        indexer.index_file(str(path), content, path.suffix)
+
+    await asyncio.to_thread(_index_file)
+    return {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
 
 # Low-level Handlers
 
@@ -585,6 +524,8 @@ async def handle_completion(
                         ext = os.path.splitext(m)[1].lower()
                         if ext in SUPPORTED:
                             files.append(m)
+                    elif os.path.isdir(m):
+                        files.append(m)
                     if len(files) >= 50:
                         break
                 result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
@@ -619,6 +560,8 @@ async def handle_completion(
                         ext = os.path.splitext(m)[1].lower()
                         if ext in SUPPORTED:
                             files.append(m)
+                    elif os.path.isdir(m):
+                        files.append(m)
                     if len(files) >= 50:
                         break
                 result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
