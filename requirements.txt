@@ -1,15 +1,6 @@
 psutil>=5.0.0
 tree-sitter>=0.22.0
-tree-sitter-python
-tree-sitter-java
-tree-sitter-javascript
-tree-sitter-typescript
-tree-sitter-c
-tree-sitter-cpp
-tree-sitter-go
-tree-sitter-rust
-tree-sitter-ruby
-tree-sitter-swift
+tree-sitter-language-pack
 pydantic
 fastapi
 PyJWT
@@ -22,3 +13,4 @@ pytest-asyncio
 mypy>=1.0.0
 ruff>=0.1.0
 gorgonzola
+duckdb

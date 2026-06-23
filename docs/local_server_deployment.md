@@ -141,7 +141,7 @@ Replace `/path/to/gitstats3` with the actual absolute path to your cloned reposi
 Once the server is connected, the LLM client will have access to the following 4 tools:
 
 ### 1. `browse`
-Inspects directories, files, imports, or performs a semantic FTS5 search.
+Inspects directories, files, imports, or performs a semantic FTS search.
 - **Parameters:**
   - `target` *(string, required)*: Absolute path to the file or directory.
   - `view` *(string, optional)*:
@@ -150,7 +150,7 @@ Inspects directories, files, imports, or performs a semantic FTS5 search.
     - `"functions"`: Lists all functions, parameters, and sizes.
     - `"deps"`: File dependency graph based on import statements.
     - `"tree"`: Recursive directory tree.
-    - `"search"`: Performs FTS5 full-text search on the indexed codebase.
+    - `"search"`: Performs FTS full-text search on the indexed codebase.
   - `query` *(string, optional)*: Required if `view` is `"search"`.
   - `limit` *(integer, optional)*: Max number of search results (default: `10`).
 
@@ -167,7 +167,7 @@ Runs a full analysis scan over a git repository and exports the metrics dataset 
   - `output_path` *(string, required)*: Absolute path to the output directory.
 
 ### 4. `update_index`
-Indexes or re-indexes the AST of a target file or folder, storing the metadata in a local SQLite database for fast semantic searches.
+Indexes or re-indexes the AST of a target file or folder, storing the metadata in a local DuckDB database for fast semantic searches.
 - **Parameters:**
   - `target` *(string, required)*: Absolute path to the file or folder.
 
@@ -175,7 +175,7 @@ Indexes or re-indexes the AST of a target file or folder, storing the metadata i
 
 ## 🗄️ Database Storage & Indexing
 
-Under the hood, Gitstats3 uses an **SQLite FTS5 (Full-Text Search)** database to index AST nodes.
+Under the hood, Gitstats3 uses a **DuckDB FTS (Full-Text Search)** database to index AST nodes.
 - **Location:** Index databases are stored per-repository under your home directory:
-  `~/.gitstats3/indexes/<repo_md5_hash>_code_search.db`
+  `~/.gitstats3/indexes/<repo_md5_hash>_code_search.duckdb`
 - **Reindexing:** To ensure search queries return accurate results, run the `update_index` tool whenever codebase changes are made.

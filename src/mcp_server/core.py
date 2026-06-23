@@ -60,7 +60,7 @@ def safe_path(p: str) -> Path:
     return path
 
 # Core implementation of tools (without decorators)
-async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, max_depth: int = 3) -> dict:
+async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, max_depth: int = 3, output_file: Optional[str] = None) -> dict:
     path = safe_path(target)
     from src.mcp_server.index import CodeSearchIndex, find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
@@ -165,6 +165,51 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             sys.stderr.write(f"[WARNING] Graph database query failed: {e}\n")
             sys.stderr.flush()
 
+    if output_file:
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=2)
+        except Exception as e:
+            sys.stderr.write(f"[ERROR] Failed to write browse output to {output_file}: {e}\n")
+            sys.stderr.flush()
+
+        # Create a summarized version of result to return to the LLM
+        summary_result = {"saved_to": output_file}
+        if "query" in result:
+            summary_result["query"] = result["query"]
+        if "target" in result:
+            summary_result["target"] = result["target"]
+        if "type" in result:
+            summary_result["type"] = result["type"]
+
+        if "results" in result:
+            summary_result["results_summary"] = [
+                {k: v for k, v in r.items() if k != "body_text"}
+                for r in result["results"]
+            ]
+        elif "structure" in result:
+            struct = result["structure"]
+            if isinstance(struct, list):
+                summary_result["structure_summary_count"] = len(struct)
+                summary_result["structure_preview"] = struct[:5]
+            elif isinstance(struct, dict):
+                if "tree" in struct:
+                    summary_result["structure_preview"] = {"tree_length": len(struct["tree"])}
+                else:
+                    summary_result["structure"] = struct
+            else:
+                summary_result["structure"] = struct
+        else:
+            for k, v in result.items():
+                if k not in summary_result:
+                    if isinstance(v, list):
+                        summary_result[f"{k}_summary_count"] = len(v)
+                        summary_result[f"{k}_preview"] = v[:5]
+                    else:
+                        summary_result[k] = v
+
+        return summary_result
+
     return result
 
 
@@ -202,12 +247,32 @@ async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
                     fp = Path(r) / fname
                     if fp.suffix in SUPPORTED:
                         files.append(fp)
-            for fp in files:
+            from src.utils.helpers import print_progress_bar
+            import time
+            total_files = len(files)
+            start_time = time.time()
+            for idx, fp in enumerate(files):
+                print_progress_bar(
+                    idx,
+                    total_files,
+                    prefix="[INFO] Calculating metrics",
+                    suffix=f"({idx}/{total_files}) {fp.name[:30]:<30}",
+                    stream=sys.stderr,
+                    start_time=start_time
+                )
                 try:
                     txt = await asyncio.to_thread(fp.read_text, encoding='utf-8', errors='ignore')
                     analyzer.analyze_file(str(fp), txt, fp.suffix)
                 except Exception:
                     pass
+            print_progress_bar(
+                total_files,
+                total_files,
+                prefix="[INFO] Calculating metrics",
+                suffix=f"Completed ({total_files}/{total_files})",
+                stream=sys.stderr,
+                start_time=start_time
+            )
             analyzer.calculate_afferent_coupling()
             result["metrics_summary"] = analyzer.analyze_package(str(path))
 
@@ -296,6 +361,9 @@ async def do_update_index(target: str) -> dict:
 
         final_res = {}
         
+        import time
+        start_time = time.time()
+        
         async def read_stdout():
             nonlocal final_res
             while True:
@@ -312,10 +380,17 @@ async def do_update_index(target: str) -> dict:
                     elif "current" in data and "total" in data:
                         current = data["current"]
                         total = data["total"]
+                        from src.utils.helpers import print_progress_bar
                         filename = os.path.basename(data.get("file", ""))
                         msg = f"Indexing {filename} ({current}/{total})"
-                        sys.stderr.write(f"[INFO] {msg}\n")
-                        sys.stderr.flush()
+                        print_progress_bar(
+                            current,
+                            total,
+                            prefix="[INFO] Indexing",
+                            suffix=f"({current}/{total}) {filename[:30]:<30}",
+                            stream=sys.stderr,
+                            start_time=start_time
+                        )
                         
                         if ctx and progress_token is not None:
                             try:
@@ -384,6 +459,10 @@ async def handle_list_tools() -> types.ListToolsResult:
                         "view": {"type": "string", "default": "summary"},
                         "query": {"type": "string"},
                         "limit": {"type": "integer", "default": 10},
+                        "output_file": {
+                            "type": "string",
+                            "description": "Optional absolute path to a file where the full detailed JSON result should be saved. If provided, the tool response will be a compact summary to save tokens."
+                        },
                         "max_depth": {
                             "type": "integer",
                             "default": 3,
@@ -429,7 +508,7 @@ async def handle_list_tools() -> types.ListToolsResult:
             ),
             types.Tool(
                 name="update_index",
-                description="Update the codebase SQLite index via AST browsing.",
+                description="Update the codebase Gorgonzola index via AST browsing.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -476,7 +555,8 @@ async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 view=arguments.get("view", "summary"),
                 query=arguments.get("query"),
                 limit=arguments.get("limit", 10),
-                max_depth=arguments.get("max_depth", 3)
+                max_depth=arguments.get("max_depth", 3),
+                output_file=arguments.get("output_file")
             )
         elif name == "metrics":
             target = _normalize_target(arguments.get("target"))
@@ -558,7 +638,7 @@ async def handle_list_prompts() -> types.ListPromptsResult:
             ),
             types.Prompt(
                 name="update_index",
-                description="Update the codebase SQLite index via AST browsing.",
+                description="Update the codebase Gorgonzola index via AST browsing.",
                 arguments=[
                     types.PromptArgument(name="target", description="Target path to index", required=True)
                 ]
@@ -593,7 +673,7 @@ async def handle_get_prompt(name: str, arguments: dict | None) -> types.GetPromp
     elif name == "update_index":
         target = arguments.get("target", "")
         return types.GetPromptResult(
-            description="Update SQLite index",
+            description="Update Gorgonzola index",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the update_index tool on target '{target}'."))]
         )
     raise ValueError(f"Prompt not found: {name}")

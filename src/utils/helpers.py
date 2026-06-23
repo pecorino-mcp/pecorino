@@ -171,3 +171,55 @@ def parse_timestamp(timestamp_str: str) -> int:
 def get_output_format() -> str:
     """Return output format description."""
     return "HTML tables (no charts)"
+
+
+def print_progress_bar(iteration: int, total: int, prefix: str = '', suffix: str = '', decimals: int = 1, length: int = 30, fill: str = '█', stream=None, start_time: float = None):
+    """
+    Call in a loop to create terminal progress bar.
+    
+    Args:
+        iteration: Current iteration (Int)
+        total: Total iterations (Int)
+        prefix: Prefix string (Str)
+        suffix: Suffix string (Str)
+        decimals: Positive number of decimals in percent complete (Int)
+        length: Character length of bar (Int)
+        fill: Bar fill character (Str)
+        stream: Output stream (defaults to sys.stderr)
+        start_time: Optional start time to calculate elapsed and ETA (Float)
+    """
+    import sys
+    if stream is None:
+        stream = sys.stderr
+        
+    if total <= 0:
+        return
+        
+    percent_val = 100 * (iteration / float(total))
+    percent = f"{percent_val:.{decimals}f}"
+    
+    if start_time is not None:
+        elapsed = time.time() - start_time
+        if iteration > 0:
+            eta = elapsed * (total / iteration - 1)
+            time_str = f" [Elapsed: {format_duration(elapsed)} | ETA: {format_duration(eta)}]"
+        else:
+            time_str = f" [Elapsed: {format_duration(elapsed)} | ETA: ?]"
+        suffix += time_str
+    
+    if getattr(stream, 'isatty', lambda: False)():
+        filled_length = int(length * iteration // total)
+        bar = fill * filled_length + '-' * (length - filled_length)
+        msg = f'\r{prefix} |{bar}| {percent}% {suffix}'
+        stream.write(msg + '\033[K')
+        stream.flush()
+        if iteration >= total:
+            stream.write('\n')
+            stream.flush()
+    else:
+        # Non-TTY mode: print progress only at key milestones (~5% steps)
+        step = max(1, total // 20)
+        if iteration == 0 or iteration >= total or iteration % step == 0:
+            stream.write(f"{prefix} Progress: {percent}% {suffix}\n")
+            stream.flush()
+
