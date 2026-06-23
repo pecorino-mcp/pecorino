@@ -218,11 +218,22 @@ class TreeSitterExtractor:
         parameter_types = []
 
         name_node = node.child_by_field_name('name')
+        if not name_node:
+            decl_node = node.child_by_field_name('declarator')
+            while decl_node and decl_node.type in ('function_declarator', 'pointer_declarator', 'reference_declarator'):
+                inner_decl = decl_node.child_by_field_name('declarator')
+                if inner_decl:
+                    decl_node = inner_decl
+                else:
+                    break
+            if decl_node:
+                name_node = decl_node
+
         if name_node:
             name = self._get_text(name_node)
         else:
             for child in node.children:
-                if child.type in ('identifier', 'field_identifier'):
+                if child.type in ('identifier', 'field_identifier', 'qualified_identifier'):
                     name = self._get_text(child)
                     break
         if not name:

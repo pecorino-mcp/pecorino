@@ -14,7 +14,7 @@ def test_repo_root_resolution():
     assert Path(repo_root).resolve() == workspace.resolve()
 
     db_path = get_db_path_for_repo(repo_root)
-    assert db_path.endswith("_code_search.db")
+    assert db_path.endswith("_code_search.duckdb")
 
 
 @pytest.mark.asyncio

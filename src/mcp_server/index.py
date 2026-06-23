@@ -1,10 +1,10 @@
 import hashlib
 import json
 import os
-import sqlite3
-import fcntl
+import duckdb
 from pathlib import Path
 from typing import Any, Dict, List
+from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
 def find_repo_root(filepath: str) -> str:
     """Find the root directory of the repository containing the given filepath."""
@@ -31,202 +31,109 @@ def get_db_path_for_repo(repo_path: str) -> str:
     """Generate a centralized DB path for a specific repository."""
     repo_path = os.path.abspath(repo_path)
     hash_str = hashlib.md5(repo_path.encode('utf-8')).hexdigest()
-    return os.path.join(get_indexes_dir(), f"{hash_str}_code_search.db")
+    return os.path.join(get_indexes_dir(), f"{hash_str}_code_search.duckdb")
 
 def migrate_codebase(db_path: Path):
     """Formal, versioned migration that runs once per DB."""
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL") # central server = concurrent readers
-        # PRAGMA wal_autocheckpoint limits WAL file size
-        conn.execute("PRAGMA wal_autocheckpoint=1000")
-        conn.execute("PRAGMA journal_size_limit=402653184") # cap WAL at 384 MB
-        
-        ver = conn.execute("PRAGMA user_version").fetchone()[0]
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS code_nodes (
+                id VARCHAR PRIMARY KEY,
+                name VARCHAR,
+                node_type VARCHAR,
+                filepath VARCHAR,
+                body_text VARCHAR,
+                metrics_json VARCHAR,
+                start_line INTEGER,
+                end_line INTEGER
+            )
+        ''')
 
-        # check for legacy FTS5 (contentless or wrong content table)
-        fts_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='code_nodes_fts'"
-        ).fetchone()
-
-        has_nodes = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='code_nodes'"
-        ).fetchone()
-
-        if not has_nodes:
-            # We don't have code_nodes table. If we are starting from scratch, that's fine.
-            # But if we have fts table without code_nodes, it's a legacy DB.
-            if fts_sql:
-                raise RuntimeError(f"{db_path.name}: code_nodes missing but fts exists — skip or manually drop legacy DB.")
-            else:
-                return # Empty database, schema will be created by CodeSearchIndex._init_db
-
-        # v0 -> v1: switch to external-content FTS5
-        if ver < 1 or (fts_sql and "content='code_nodes'" not in fts_sql[0]):
-            print(f"Migrating {db_path.name} to external-content FTS5...")
-            conn.execute("DROP TABLE IF EXISTS code_nodes_fts")
-            conn.execute('''
-                CREATE VIRTUAL TABLE code_nodes_fts USING fts5(
-                    name,
-                    node_type,
-                    filepath,
-                    body_text,
-                    content='code_nodes',
-                    content_rowid='id',
-                    tokenize='unicode61 remove_diacritics 2'
-                )
-            ''')
-            # tune for read-heavy central server
-            conn.execute("INSERT INTO code_nodes_fts(code_nodes_fts, rank) VALUES('automerge', 8)")
-            conn.execute("INSERT INTO code_nodes_fts(code_nodes_fts, rank) VALUES('crisismerge', 32)")
-            conn.execute("INSERT INTO code_nodes_fts(code_nodes_fts, rank) VALUES('pgsz', 8192)")
-            conn.execute("INSERT INTO code_nodes_fts(code_nodes_fts) VALUES('rebuild')")
-            conn.execute("PRAGMA user_version = 1")
-            conn.commit()
-    finally:
-        conn.close()
+        # Files tracking table for incremental indexing
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS files (
+                filepath VARCHAR PRIMARY KEY,
+                content_hash VARCHAR,
+                mtime DOUBLE,
+                lang VARCHAR
+            )
+        ''')
 
 def migrate_all():
-    """Scan the indexes directory and safely run migrations with a lock."""
+    """Scan the indexes directory and safely run migrations."""
     indexes_dir = get_indexes_dir()
-    lock_file_path = os.path.join(indexes_dir, ".migration.lock")
-    
-    with open(lock_file_path, "w") as lock_file:
-        try:
-            # Exclusive, non-blocking lock
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("Migration already running in another process. Skipping.")
-            return
-
-        for path_str in os.listdir(indexes_dir):
-            if path_str.endswith(".db"):
-                db_path = Path(indexes_dir) / path_str
-                try:
-                    migrate_codebase(db_path)
-                except Exception as e:
-                    print(f"FAILED {path_str}: {e}")
-                    
-        # Unlock is handled automatically when file is closed, but good to be explicit
-        fcntl.flock(lock_file, fcntl.LOCK_UN)
-
+    for fname in os.listdir(indexes_dir):
+        if fname.endswith(".duckdb"):
+            db_path = Path(indexes_dir) / fname
+            migrate_codebase(db_path)
 
 class CodeSearchIndex:
-    """SQLite FTS5-backed Semantic Code Search Index."""
+    """DuckDB-backed Semantic Code Search Index."""
 
     def __init__(self, db_path: str = None):
         if db_path is None:
-            # Default to a centralized DB for the current working directory's repository
             repo_path = find_repo_root(os.getcwd())
             db_path = get_db_path_for_repo(repo_path)
         self.db_path = db_path
-        self._init_db()
+        migrate_codebase(self.db_path)
+        self.graph = GorgonzolaGraph(db_path=self.db_path)
 
-    def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            # Performance pragmas
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute("PRAGMA wal_autocheckpoint=1000;")
-            conn.execute("PRAGMA journal_size_limit=67108864;") # cap WAL at 64 MB
-            
-            # Standard SQLite backing table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS code_nodes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT,
-                    node_type TEXT,
-                    filepath TEXT,
-                    body_text TEXT,
-                    metrics_json TEXT,
-                    start_line INTEGER,
-                    end_line INTEGER
-                )
-            ''')
-            
-            # Files tracking table for incremental indexing
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS files (
-                    filepath TEXT PRIMARY KEY,
-                    content_hash TEXT,
-                    mtime REAL,
-                    lang TEXT
-                )
-            ''')
-            
-            # FTS5 external content table
-            conn.execute('''
-                CREATE VIRTUAL TABLE IF NOT EXISTS code_nodes_fts USING fts5(
-                    name,
-                    node_type,
-                    filepath,
-                    body_text,
-                    content='code_nodes',
-                    content_rowid='id',
-                    tokenize='unicode61 remove_diacritics 2'
-                )
-            ''')
-            
-            # External content synchronization triggers
-            conn.execute('''
-                CREATE TRIGGER IF NOT EXISTS code_nodes_ai AFTER INSERT ON code_nodes BEGIN
-                  INSERT INTO code_nodes_fts(rowid, name, node_type, filepath, body_text) 
-                  VALUES (new.id, new.name, new.node_type, new.filepath, new.body_text);
-                END;
-            ''')
-            conn.execute('''
-                CREATE TRIGGER IF NOT EXISTS code_nodes_ad AFTER DELETE ON code_nodes BEGIN
-                  INSERT INTO code_nodes_fts(code_nodes_fts, rowid, name, node_type, filepath, body_text) 
-                  VALUES('delete', old.id, old.name, old.node_type, old.filepath, old.body_text);
-                END;
-            ''')
-            conn.execute('''
-                CREATE TRIGGER IF NOT EXISTS code_nodes_au AFTER UPDATE ON code_nodes BEGIN
-                  INSERT INTO code_nodes_fts(code_nodes_fts, rowid, name, node_type, filepath, body_text) 
-                  VALUES('delete', old.id, old.name, old.node_type, old.filepath, old.body_text);
-                  INSERT INTO code_nodes_fts(rowid, name, node_type, filepath, body_text) 
-                  VALUES (new.id, new.name, new.node_type, new.filepath, new.body_text);
-                END;
-            ''')
-            
-            # FTS5 Tuning (if it's a new DB we can insert pragmas here too)
+    def rebuild_fts(self):
+        """Rebuild the index."""
+        with duckdb.connect(self.db_path) as conn:
+            conn.execute("INSTALL fts")
+            conn.execute("LOAD fts")
+            # Drop the index if it exists to rebuild
             try:
-                conn.execute("INSERT INTO code_nodes_fts(code_nodes_fts, rank) VALUES('automerge', 8)")
-                conn.execute("INSERT INTO code_nodes_fts(code_nodes_fts, rank) VALUES('crisismerge', 32)")
-                conn.execute("INSERT INTO code_nodes_fts(code_nodes_fts, rank) VALUES('pgsz', 8192)")
-            except sqlite3.Error:
+                conn.execute("PRAGMA drop_fts_index('code_nodes')")
+            except Exception:
                 pass
-            
-            # Ensure new DBs have user_version = 1
-            ver = conn.execute("PRAGMA user_version").fetchone()[0]
-            if ver == 0:
-                conn.execute("PRAGMA user_version = 1")
-                
-            conn.commit()
-
+            conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'body_text')")
 
     def index_nodes(self, nodes: List[Dict[str, Any]]):
         """Index a batch of AST nodes."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executemany('''
-                INSERT INTO code_nodes (name, node_type, filepath, body_text, metrics_json, start_line, end_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', [
-                (n['name'], n['node_type'], n['filepath'], n['body_text'], json.dumps(n.get('metrics', {})), n['start_line'], n['end_line'])
-                for n in nodes
-            ])
-            conn.commit()
+        with duckdb.connect(self.db_path) as conn:
+            for n in nodes:
+                node_id = f"{n['filepath']}::{n['name']}::{n['start_line']}"
+                conn.execute('''
+                    INSERT INTO code_nodes (id, name, node_type, filepath, body_text, metrics_json, start_line, end_line)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name=excluded.name,
+                        node_type=excluded.node_type,
+                        filepath=excluded.filepath,
+                        body_text=excluded.body_text,
+                        metrics_json=excluded.metrics_json,
+                        start_line=excluded.start_line,
+                        end_line=excluded.end_line
+                ''', (
+                    node_id,
+                    n['name'], 
+                    n['node_type'], 
+                    n['filepath'], 
+                    n['body_text'], 
+                    json.dumps(n.get('metrics', {})), 
+                    n['start_line'], 
+                    n['end_line']
+                ))
 
     def clear_file(self, filepath: str):
         """Remove all nodes for a given file before re-indexing it."""
-        with sqlite3.connect(self.db_path) as conn:
+        with duckdb.connect(self.db_path) as conn:
             conn.execute('DELETE FROM code_nodes WHERE filepath = ?', (filepath,))
             conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
-            conn.commit()
+            
+        try:
+            self.graph.query("MATCH (f:File {id: $id})-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
+            self.graph.query("MATCH (f:File {id: $id})-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
+            self.graph.query("MATCH (f:File {id: $id})-[r:CONTAINS]->(child) DETACH DELETE child", {"id": filepath})
+            self.graph.query("MATCH (f:File {id: $id}) DETACH DELETE f", {"id": filepath})
+        except Exception:
+            pass
 
     def upsert_file_hash(self, filepath: str, content_hash: str, mtime: float, lang: str):
         """Upsert a file's hash and metadata for incremental indexing."""
-        with sqlite3.connect(self.db_path) as conn:
+        with duckdb.connect(self.db_path) as conn:
             conn.execute('''
                 INSERT INTO files (filepath, content_hash, mtime, lang)
                 VALUES (?, ?, ?, ?)
@@ -235,57 +142,79 @@ class CodeSearchIndex:
                     mtime=excluded.mtime,
                     lang=excluded.lang
             ''', (filepath, content_hash, mtime, lang))
-            conn.commit()
+            
+        name = os.path.basename(filepath)
+        ext = os.path.splitext(filepath)[1]
+        query = """
+            MERGE (f:File {id: $id})
+            ON CREATE SET f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            ON MATCH SET f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+        """
+        try:
+            self.graph.query(query, {
+                "id": filepath,
+                "name": name,
+                "ext": ext,
+                "content_hash": content_hash,
+                "mtime": float(mtime),
+                "lang": lang
+            })
+        except Exception:
+            pass
 
     def get_file_hash(self, filepath: str) -> str:
         """Retrieve the stored hash for a given file, or None if not found."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('SELECT content_hash FROM files WHERE filepath = ?', (filepath,))
-            row = cursor.fetchone()
-            return row[0] if row else None
-            
+        with duckdb.connect(self.db_path) as conn:
+            res = conn.execute('SELECT content_hash FROM files WHERE filepath = ?', (filepath,)).fetchone()
+            return res[0] if res else None
+
     def get_all_tracked_files(self) -> list:
         """Retrieve a list of all filepaths currently tracked in the index."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('SELECT filepath FROM files')
-            return [row[0] for row in cursor]
+        with duckdb.connect(self.db_path) as conn:
+            res = conn.execute('SELECT filepath FROM files').fetchall()
+            return [row[0] for row in res]
 
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search the FTS5 index for a match."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('''
-                SELECT c.name, c.node_type, c.filepath, c.body_text, c.metrics_json, c.start_line, c.end_line
-                FROM code_nodes_fts f
-                JOIN code_nodes c ON f.rowid = c.id
-                WHERE code_nodes_fts MATCH ?
-                ORDER BY f.rank
-                LIMIT ?
-            ''', (query, limit))
-
-            results = []
-            for row in cursor:
-                results.append({
-                    'name': row[0],
-                    'node_type': row[1],
-                    'filepath': row[2],
-                    'body_text': row[3],
-                    'metrics': json.loads(row[4]) if row[4] else {},
-                    'start_line': row[5],
-                    'end_line': row[6]
-                })
-            return results
+        """Search the DuckDB FTS index for a match."""
+        with duckdb.connect(self.db_path) as conn:
+            # Drop query into tokens to make it more FTS-friendly? Just passing query is fine if match_bm25 accepts it.
+            # But wait, match_bm25 may raise if index doesn't exist, though we try to ensure it exists.
+            try:
+                res = conn.execute('''
+                    SELECT c.name, c.node_type, c.filepath, c.body_text, c.metrics_json, c.start_line, c.end_line,
+                           fts_main_code_nodes.match_bm25(c.id, ?) AS score
+                    FROM code_nodes c
+                    WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
+                    ORDER BY score DESC
+                    LIMIT ?
+                ''', (query, query, limit)).fetchall()
+                
+                results = []
+                for row in res:
+                    results.append({
+                        'name': row[0],
+                        'node_type': row[1],
+                        'filepath': row[2],
+                        'body_text': row[3],
+                        'metrics': json.loads(row[4]) if row[4] else {},
+                        'start_line': row[5],
+                        'end_line': row[6]
+                    })
+                return results
+            except Exception:
+                return []
 
     def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
         """Get all nodes for a specific file."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('''
+        with duckdb.connect(self.db_path) as conn:
+            res = conn.execute('''
                 SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
                 FROM code_nodes
                 WHERE filepath = ?
-            ''', (filepath,))
-
+            ''', (filepath,)).fetchall()
+            
             results = []
-            for row in cursor:
+            for row in res:
                 results.append({
                     'name': row[0],
                     'node_type': row[1],
@@ -299,17 +228,16 @@ class CodeSearchIndex:
 
     def get_dir_nodes(self, dirpath: str) -> List[Dict[str, Any]]:
         """Get all nodes for files within a specific directory."""
-        # Ensure trailing slash for directory matching
         prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('''
+        with duckdb.connect(self.db_path) as conn:
+            res = conn.execute('''
                 SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
                 FROM code_nodes
                 WHERE filepath LIKE ?
-            ''', (f"{prefix}%",))
-
+            ''', (f"{prefix}%",)).fetchall()
+            
             results = []
-            for row in cursor:
+            for row in res:
                 results.append({
                     'name': row[0],
                     'node_type': row[1],
@@ -320,4 +248,3 @@ class CodeSearchIndex:
                     'end_line': row[6]
                 })
             return results
-

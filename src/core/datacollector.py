@@ -1463,8 +1463,16 @@ class DataCollector:
 			successful_calculations = 0
 
 			print(f'\n  🔬 Calculating MI for {len(source_files)} files...')
+			from src.utils.helpers import print_progress_bar
 
 			for i, filepath in enumerate(source_files):
+				print_progress_bar(
+					i,
+					len(source_files),
+					prefix='  MI Analysis:',
+					suffix=f'({i}/{len(source_files)}) {os.path.basename(filepath)[:30]:<30}',
+					stream=sys.stderr
+				)
 				try:
 					metrics = self.calculate_comprehensive_metrics(filepath)
 					if metrics and 'maintainability_index' in metrics:
@@ -1481,12 +1489,21 @@ class DataCollector:
 						mi_results.append(file_result)
 						successful_calculations += 1
 
-						# Output MI result to CLI
-						print(f'      📄 {filepath}: MI = {mi_data["mi"]:.1f} ({mi_data["interpretation"]})')
+						# Output MI result to CLI for small projects
+						if len(source_files) <= 10:
+							print(f'      📄 {filepath}: MI = {mi_data["mi"]:.1f} ({mi_data["interpretation"]})')
 
 				except Exception as e:
-					if conf['debug']:
+					if len(source_files) <= 10 or conf.get('debug', False):
 						print(f'      ⚠️  Failed to calculate MI for {filepath}: {e}')
+
+			print_progress_bar(
+				len(source_files),
+				len(source_files),
+				prefix='  MI Analysis:',
+				suffix=f'Completed ({len(source_files)}/{len(source_files)})',
+				stream=sys.stderr
+			)
 
 			# Calculate summary statistics
 			if mi_results:
@@ -1555,8 +1572,16 @@ class DataCollector:
 			print(f'  🔬 Calculating complexity for {len(source_files)} files...')
 
 			complexity_results = []
+			from src.utils.helpers import print_progress_bar
 
-			for filepath in source_files:
+			for i, filepath in enumerate(source_files):
+				print_progress_bar(
+					i,
+					len(source_files),
+					prefix='  McCabe Analysis:',
+					suffix=f'({i}/{len(source_files)}) {os.path.basename(filepath)[:30]:<30}',
+					stream=sys.stderr
+				)
 				try:
 					full_filepath = os.path.join(repository_path or os.getcwd(), filepath)
 					with open(full_filepath, encoding='utf-8', errors='ignore') as f:
@@ -1583,10 +1608,20 @@ class DataCollector:
 					}
 					complexity_results.append(result)
 
-					print(f'      📄 {filepath}: Complexity = {complexity} ({category})')
+					if len(source_files) <= 10:
+						print(f'      📄 {filepath}: Complexity = {complexity} ({category})')
 
 				except Exception as e:
-					print(f'      ❌ Error analyzing {filepath}: {e}')
+					if len(source_files) <= 10 or conf.get('debug', False):
+						print(f'      ❌ Error analyzing {filepath}: {e}')
+
+			print_progress_bar(
+				len(source_files),
+				len(source_files),
+				prefix='  McCabe Analysis:',
+				suffix=f'Completed ({len(source_files)}/{len(source_files)})',
+				stream=sys.stderr
+			)
 
 			if complexity_results:
 				# Calculate summary statistics
@@ -1669,8 +1704,16 @@ class DataCollector:
 			print(f'  🔬 Calculating metrics for {len(source_files)} files...')
 
 			halstead_results = []
+			from src.utils.helpers import print_progress_bar
 
-			for filepath in source_files:
+			for i, filepath in enumerate(source_files):
+				print_progress_bar(
+					i,
+					len(source_files),
+					prefix='  Halstead Analysis:',
+					suffix=f'({i}/{len(source_files)}) {os.path.basename(filepath)[:30]:<30}',
+					stream=sys.stderr
+				)
 				try:
 					full_filepath = os.path.join(repository_path or os.getcwd(), filepath)
 					with open(full_filepath, encoding='utf-8', errors='ignore') as f:
@@ -1689,10 +1732,20 @@ class DataCollector:
 					}
 					halstead_results.append(result)
 
-					print(f'      📄 {filepath}: Volume={halstead_metrics["V"]:.1f}, Difficulty={halstead_metrics["D"]:.1f}, Effort={halstead_metrics["E"]:.1f}')
+					if len(source_files) <= 10:
+						print(f'      📄 {filepath}: Volume={halstead_metrics["V"]:.1f}, Difficulty={halstead_metrics["D"]:.1f}, Effort={halstead_metrics["E"]:.1f}')
 
 				except Exception as e:
-					print(f'      ❌ Error analyzing {filepath}: {e}')
+					if len(source_files) <= 10 or conf.get('debug', False):
+						print(f'      ❌ Error analyzing {filepath}: {e}')
+
+			print_progress_bar(
+				len(source_files),
+				len(source_files),
+				prefix='  Halstead Analysis:',
+				suffix=f'Completed ({len(source_files)}/{len(source_files)})',
+				stream=sys.stderr
+			)
 
 			if halstead_results:
 				# Calculate summary statistics
@@ -1767,7 +1820,16 @@ class DataCollector:
 			total_ca = 0
 			total_abstract = 0
 
-			for filepath in source_files:
+			from src.utils.helpers import print_progress_bar
+
+			for i, filepath in enumerate(source_files):
+				print_progress_bar(
+					i,
+					len(source_files),
+					prefix='  OOP Analysis:',
+					suffix=f'({i}/{len(source_files)}) {os.path.basename(filepath)[:30]:<30}',
+					stream=sys.stderr
+				)
 				try:
 					full_filepath = os.path.join(repository_path or os.getcwd(), filepath)
 					with open(full_filepath, encoding='utf-8', errors='ignore') as f:
@@ -1791,13 +1853,23 @@ class DataCollector:
 					}
 					oop_results.append(result)
 
-					if oop_metrics['classes_defined'] > 0:
-						print(f'      📄 {filepath}: Classes={oop_metrics["classes_defined"]}, Methods={oop_metrics["method_count"]}, Coupling={oop_metrics["coupling"]:.1f}')
-					else:
-						print(f'      📄 {filepath}: No OOP constructs found')
+					if len(source_files) <= 10:
+						if oop_metrics['classes_defined'] > 0:
+							print(f'      📄 {filepath}: Classes={oop_metrics["classes_defined"]}, Methods={oop_metrics["method_count"]}, Coupling={oop_metrics["coupling"]:.1f}')
+						else:
+							print(f'      📄 {filepath}: No OOP constructs found')
 
 				except Exception as e:
-					print(f'      ❌ Error analyzing {filepath}: {e}')
+					if len(source_files) <= 10 or conf.get('debug', False):
+						print(f'      ❌ Error analyzing {filepath}: {e}')
+
+			print_progress_bar(
+				len(source_files),
+				len(source_files),
+				prefix='  OOP Analysis:',
+				suffix=f'Completed ({len(source_files)}/{len(source_files)})',
+				stream=sys.stderr
+			)
 
 			if oop_results:
 				# Calculate summary statistics
