@@ -12,7 +12,7 @@ Gitstats3 allows Large Language Models (LLMs) and dev tools (such as Claude Desk
 - 📊 **Git History Analytics**: Commits, LOC growth, author contributions, activity patterns, and team performance tracking.
 - 📐 **Object-Oriented Design Metrics**: Afferent/efferent coupling (Ca/Ce), instability (I), abstractness (A), and Distance-from-Main-Sequence (D) analysis.
 - 🚨 **Risk Hotspot Detection**: Combines code churn (revision frequency) and complexity to pinpoint high-risk source files.
-- 🗄️ **Fast SQLite-backed AST Indexing**: Leverages tree-sitter to index class definitions, functions, and imports for rapid codebase navigation and search.
+- 🗄️ **Fast DuckDB-backed AST Indexing**: Leverages tree-sitter to index class definitions, functions, and imports for rapid codebase navigation and search.
 - 💻 **Flexible CLI & HTTP SSE**: Run as a standard CLI tool, start a local stdio MCP server, or deploy as a network-accessible SSE server.
 
 ---
@@ -84,7 +84,7 @@ Runs a full repository scan and exports a structured JSON report directly to `<r
   - `output_path` *(string, required)*: Absolute path to the output directory.
 
 ### 4. `/update_index`
-Performs tree-sitter AST analysis and populates the SQLite codebase index for fast semantic searching.
+Performs tree-sitter AST analysis and populates the DuckDB codebase index for fast semantic searching.
 - **Parameters**:
   - `target` *(string, required)*: Absolute path to the file or folder to index.
 
@@ -92,12 +92,16 @@ Performs tree-sitter AST analysis and populates the SQLite codebase index for fa
 
 ## 📂 Repository Layout
 
-- `src/gitstats_mcp.py` — The core MCP server implementation.
-- `src/gitstats_cli.py` — Command-line interface and orchestrator.
-- `src/gitstats_oopmetrics.py` — Object-oriented design metrics analyzer.
-- `src/gitstats_datacollector.py` — Base metrics collector.
-- `src/gitstats_gitdatacollector.py` — Git history log parser.
-- `src/gitstats_index.py` — SQLite Full-Text Search (FTS5) codebase index.
+- `src/cli/` — Command-line interface and entry points.
+- `src/core/` — Core metrics collector and configuration.
+- `src/git/` — Git history and commit log parsers.
+- `src/mcp_server/` — MCP server endpoints and core logic.
+  - `src/mcp_server/index.py` — DuckDB Full-Text Search (FTS) codebase index.
+  - `src/mcp_server/gorgonzola_graph.py` — Gorgonzola graph database adapter.
+- `src/metrics/` — Maintainability index and Object-Oriented design metrics analyzers.
+- `src/parsers/` — AST parsing (using Tree-sitter).
+- `src/transports/` — MCP Adapters (stdio, fastAPI).
+- `src/utils/` — Export formats and helper utilities.
 - `tests/` — Automated test suites.
 
 ---

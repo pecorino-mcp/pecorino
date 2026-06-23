@@ -46,6 +46,7 @@ dependencies = [
     "PyJWT",
     "prometheus_client",
     "gorgonzola",
+    "duckdb",
 ]
 
 [project.optional-dependencies]

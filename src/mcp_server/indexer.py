@@ -14,8 +14,9 @@ class CodebaseIndexer:
         self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
         db_path = get_db_path_for_repo(self.repo_path)
         
-        self.search_index = CodeSearchIndex(db_path)
         self.graph = GorgonzolaGraph(db_path=db_path)
+        self.search_index = CodeSearchIndex(db_path)
+        self.search_index.graph = self.graph
 
     def _resolve_dependency(self, dep_string: str, source_filepath: str, file_extension: str) -> str:
         """Enhanced language-specific dependency file resolution."""
@@ -98,7 +99,7 @@ class CodebaseIndexer:
                     return os.path.abspath(test_abs_path)
             return dep_string
 
-    def index_file(self, filepath: str, content: str, file_extension: str):
+    def index_file(self, filepath: str, content: str, file_extension: str, rebuild_fts: bool = True):
         """Parse and index a single file for search and dependency graph."""
         tree = parse_with_tree_sitter(content, file_extension)
         if not tree:
@@ -106,15 +107,6 @@ class CodebaseIndexer:
             
         self.search_index.clear_file(filepath)
         
-        # Clear graph database nodes for this file
-        try:
-            self.graph.query("MATCH (f:File {id: $id})-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
-            self.graph.query("MATCH (f:File {id: $id})-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
-            self.graph.query("MATCH (f:File {id: $id})-[r:CONTAINS]->(child) DETACH DELETE child", {"id": filepath})
-            self.graph.query("MATCH (f:File {id: $id}) DETACH DELETE f", {"id": filepath})
-        except Exception:
-            pass
-
         content_lines = content.splitlines()
         nodes_to_index = []
         
@@ -131,6 +123,7 @@ class CodebaseIndexer:
                 body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
                 # Get metrics with defaults since we don't have CK metrics calculator
                 wmc = getattr(node, 'wmc', 0)
+                metrics = {'wmc': wmc, 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
                 nodes_to_index.append({
                     'name': node.name,
                     'node_type': 'class',
@@ -138,11 +131,18 @@ class CodebaseIndexer:
                     'body_text': body,
                     'start_line': node.lineno,
                     'end_line': node.end_lineno,
-                    'metrics': {'wmc': wmc, 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
+                    'metrics': metrics
                 })
                 
                 class_id = f"{filepath}::{node.name}"
-                graph_nodes_dict[class_id] = (class_id, {"name": node.name}, "Class")
+                graph_nodes_dict[class_id] = (class_id, {
+                    "name": node.name,
+                    "filepath": filepath,
+                    "body_text": body,
+                    "start_line": node.lineno,
+                    "end_line": node.end_lineno,
+                    "metrics_json": json.dumps(metrics)
+                }, "Class")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                 
                 for base in getattr(node, 'bases', []):
@@ -157,6 +157,7 @@ class CodebaseIndexer:
                 for m in node.methods:
                     m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
                     m_cc = getattr(m, 'cyclomatic_complexity', 1)
+                    method_metrics = {'cyclomatic_complexity': m_cc}
                     nodes_to_index.append({
                         'name': f"{node.name}.{m.name}",
                         'node_type': 'method',
@@ -164,10 +165,18 @@ class CodebaseIndexer:
                         'body_text': m_body,
                         'start_line': m.lineno,
                         'end_line': m.end_lineno,
-                        'metrics': {'cyclomatic_complexity': m_cc}
+                        'metrics': method_metrics
                     })
                     method_id = f"{class_id}::{m.name}"
-                    graph_nodes_dict[method_id] = (method_id, {"name": m.name, "complexity": m_cc}, "Method")
+                    graph_nodes_dict[method_id] = (method_id, {
+                        "name": m.name,
+                        "complexity": m_cc,
+                        "filepath": filepath,
+                        "body_text": m_body,
+                        "start_line": m.lineno,
+                        "end_line": m.end_lineno,
+                        "metrics_json": json.dumps(method_metrics)
+                    }, "Method")
                     graph_edges.append((class_id, method_id, {}, "CONTAINS"))
                     
                     for call in getattr(m, 'called_methods', set()):
@@ -186,11 +195,19 @@ class CodebaseIndexer:
                     'metrics': {}
                 })
                 class_id = f"{filepath}::{node.name}"
-                graph_nodes_dict[class_id] = (class_id, {"name": node.name}, "Interface")
+                graph_nodes_dict[class_id] = (class_id, {
+                    "name": node.name,
+                    "filepath": filepath,
+                    "body_text": body,
+                    "start_line": node.lineno,
+                    "end_line": node.end_lineno,
+                    "metrics_json": json.dumps({})
+                }, "Interface")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                 for m in node.methods:
                     m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
                     m_cc = getattr(m, 'cyclomatic_complexity', 1)
+                    method_metrics = {'cyclomatic_complexity': m_cc}
                     nodes_to_index.append({
                         'name': f"{node.name}.{m.name}",
                         'node_type': 'method',
@@ -198,10 +215,18 @@ class CodebaseIndexer:
                         'body_text': m_body,
                         'start_line': m.lineno,
                         'end_line': m.end_lineno,
-                        'metrics': {'cyclomatic_complexity': m_cc}
+                        'metrics': method_metrics
                     })
                     method_id = f"{class_id}::{m.name}"
-                    graph_nodes_dict[method_id] = (method_id, {"name": m.name, "complexity": m_cc}, "Method")
+                    graph_nodes_dict[method_id] = (method_id, {
+                        "name": m.name,
+                        "complexity": m_cc,
+                        "filepath": filepath,
+                        "body_text": m_body,
+                        "start_line": m.lineno,
+                        "end_line": m.end_lineno,
+                        "metrics_json": json.dumps(method_metrics)
+                    }, "Method")
                     graph_edges.append((class_id, method_id, {}, "CONTAINS"))
             elif type(node).__name__ == 'ImportDef':
                 if node.module:
@@ -210,6 +235,7 @@ class CodebaseIndexer:
         for func in tree.functions:
             f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
             f_cc = getattr(func, 'cyclomatic_complexity', 1)
+            func_metrics = {'cyclomatic_complexity': f_cc}
             nodes_to_index.append({
                 'name': func.name,
                 'node_type': 'function',
@@ -217,10 +243,18 @@ class CodebaseIndexer:
                 'body_text': f_body,
                 'start_line': func.lineno,
                 'end_line': func.end_lineno,
-                'metrics': {'cyclomatic_complexity': f_cc}
+                'metrics': func_metrics
             })
             func_id = f"{filepath}::{func.name}"
-            graph_nodes_dict[func_id] = (func_id, {"name": func.name, "complexity": f_cc}, "Function")
+            graph_nodes_dict[func_id] = (func_id, {
+                "name": func.name,
+                "complexity": f_cc,
+                "filepath": filepath,
+                "body_text": f_body,
+                "start_line": func.lineno,
+                "end_line": func.end_lineno,
+                "metrics_json": json.dumps(func_metrics)
+            }, "Function")
             graph_edges.append((file_id, func_id, {}, "CONTAINS"))
             
             for call in getattr(func, 'called_methods', set()):
@@ -249,6 +283,14 @@ class CodebaseIndexer:
             except Exception as e:
                 import sys
                 print(f"Warning: Failed to insert graph nodes/edges for {filepath}: {e}", file=sys.stderr)
+
+        if rebuild_fts:
+            try:
+                self.search_index.rebuild_fts()
+            except Exception as e:
+                import sys
+                print(f"Warning: Failed to rebuild FTS index for {filepath}: {e}", file=sys.stderr)
+
 
     def index_directory(self, dirpath: str, progress_callback=None) -> dict:
         import pathlib
@@ -285,7 +327,7 @@ class CodebaseIndexer:
                     skipped_count += 1
                     continue
                     
-                self.index_file(file_str, content, fp.suffix)
+                self.index_file(file_str, content, fp.suffix, rebuild_fts=False)
                 
                 # Update hash in tracking table
                 from src.core.constants import get_language_for_extension
@@ -315,6 +357,13 @@ class CodebaseIndexer:
         from src.mcp_server.graph_api import GraphAPI
         graph_api = GraphAPI(dirpath)
         graph_api.resolve_symbols()
+        
+        # Rebuild the FTS index for the whole directory once
+        try:
+            self.search_index.rebuild_fts()
+        except Exception as e:
+            import sys
+            print(f"Warning: Failed to rebuild FTS index for directory: {e}", file=sys.stderr)
         
         return {
             "status": "success", 
