@@ -137,8 +137,4 @@ class GraphAPI:
             '''
         ]
         
-        for q in queries:
-            try:
-                self.graph.query(q)
-            except Exception:
-                pass
+        self.graph.query_batch(queries)

@@ -99,7 +99,7 @@ class CodebaseIndexer:
                     return os.path.abspath(test_abs_path)
             return dep_string
 
-    def index_file(self, filepath: str, content: str, file_extension: str, rebuild_fts: bool = True):
+    def index_file(self, filepath: str, content: str, file_extension: str, rebuild_fts: bool = False):
         """Parse and index a single file for search and dependency graph."""
         tree = parse_with_tree_sitter(content, file_extension)
         if not tree:
@@ -292,9 +292,191 @@ class CodebaseIndexer:
                 print(f"Warning: Failed to rebuild FTS index for {filepath}: {e}", file=sys.stderr)
 
 
+    def _parse_file_task(self, fp: Any, file_str: str, content_hash: str, mtime: float):
+        try:
+            content = fp.read_text(encoding='utf-8', errors='ignore')
+            file_extension = fp.suffix
+            tree = parse_with_tree_sitter(content, file_extension)
+            if not tree:
+                return None
+                
+            content_lines = content.splitlines()
+            nodes_to_index = []
+            graph_nodes_dict = {}
+            graph_edges = []
+            
+            file_id = file_str
+            graph_nodes_dict[file_id] = (file_id, {"name": os.path.basename(file_str), "path": file_str, "extension": file_extension}, "File")
+            dependencies = set()
+
+            for node in walk(tree):
+                if isinstance(node, ClassDef):
+                    body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
+                    wmc = getattr(node, 'wmc', 0)
+                    metrics = {'wmc': wmc, 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
+                    nodes_to_index.append({
+                        'name': node.name,
+                        'node_type': 'class',
+                        'filepath': file_str,
+                        'body_text': body,
+                        'start_line': node.lineno,
+                        'end_line': node.end_lineno,
+                        'metrics': metrics
+                    })
+                    
+                    class_id = f"{file_str}::{node.name}"
+                    graph_nodes_dict[class_id] = (class_id, {
+                        "name": node.name,
+                        "filepath": file_str,
+                        "body_text": body,
+                        "start_line": node.lineno,
+                        "end_line": node.end_lineno,
+                        "metrics_json": json.dumps(metrics)
+                    }, "Class")
+                    graph_edges.append((file_id, class_id, {}, "CONTAINS"))
+                    
+                    for base in getattr(node, 'bases', []):
+                        symbol_id = f"Symbol::{base}"
+                        graph_nodes_dict[symbol_id] = (symbol_id, {"name": base}, "Symbol")
+                        graph_edges.append((class_id, symbol_id, {}, "EXTENDS"))
+
+                    for interface in getattr(node, 'interfaces', []):
+                        symbol_id = f"Symbol::{interface}"
+                        graph_nodes_dict[symbol_id] = (symbol_id, {"name": interface}, "Symbol")
+                        graph_edges.append((class_id, symbol_id, {}, "IMPLEMENTS"))
+                    for m in node.methods:
+                        m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
+                        m_cc = getattr(m, 'cyclomatic_complexity', 1)
+                        method_metrics = {'cyclomatic_complexity': m_cc}
+                        nodes_to_index.append({
+                            'name': f"{node.name}.{m.name}",
+                            'node_type': 'method',
+                            'filepath': file_str,
+                            'body_text': m_body,
+                            'start_line': m.lineno,
+                            'end_line': m.end_lineno,
+                            'metrics': method_metrics
+                        })
+                        method_id = f"{class_id}::{m.name}"
+                        graph_nodes_dict[method_id] = (method_id, {
+                            "name": m.name,
+                            "complexity": m_cc,
+                            "filepath": file_str,
+                            "body_text": m_body,
+                            "start_line": m.lineno,
+                            "end_line": m.end_lineno,
+                            "metrics_json": json.dumps(method_metrics)
+                        }, "Method")
+                        graph_edges.append((class_id, method_id, {}, "CONTAINS"))
+                        
+                        for call in getattr(m, 'called_methods', set()):
+                            symbol_id = f"Symbol::{call}"
+                            graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
+                            graph_edges.append((method_id, symbol_id, {}, "CALLS"))
+                elif isinstance(node, InterfaceDef):
+                    body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
+                    nodes_to_index.append({
+                        'name': node.name,
+                        'node_type': 'interface',
+                        'filepath': file_str,
+                        'body_text': body,
+                        'start_line': node.lineno,
+                        'end_line': node.end_lineno,
+                        'metrics': {}
+                    })
+                    class_id = f"{file_str}::{node.name}"
+                    graph_nodes_dict[class_id] = (class_id, {
+                        "name": node.name,
+                        "filepath": file_str,
+                        "body_text": body,
+                        "start_line": node.lineno,
+                        "end_line": node.end_lineno,
+                        "metrics_json": json.dumps({})
+                    }, "Interface")
+                    graph_edges.append((file_id, class_id, {}, "CONTAINS"))
+                    for m in node.methods:
+                        m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
+                        m_cc = getattr(m, 'cyclomatic_complexity', 1)
+                        method_metrics = {'cyclomatic_complexity': m_cc}
+                        nodes_to_index.append({
+                            'name': f"{node.name}.{m.name}",
+                            'node_type': 'method',
+                            'filepath': file_str,
+                            'body_text': m_body,
+                            'start_line': m.lineno,
+                            'end_line': m.end_lineno,
+                            'metrics': method_metrics
+                        })
+                        method_id = f"{class_id}::{m.name}"
+                        graph_nodes_dict[method_id] = (method_id, {
+                            "name": m.name,
+                            "complexity": m_cc,
+                            "filepath": file_str,
+                            "body_text": m_body,
+                            "start_line": m.lineno,
+                            "end_line": m.end_lineno,
+                            "metrics_json": json.dumps(method_metrics)
+                        }, "Method")
+                        graph_edges.append((class_id, method_id, {}, "CONTAINS"))
+                elif type(node).__name__ == 'ImportDef':
+                    if node.module:
+                        dependencies.add(node.module)
+
+            for func in tree.functions:
+                f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
+                f_cc = getattr(func, 'cyclomatic_complexity', 1)
+                func_metrics = {'func_cc': f_cc}
+                nodes_to_index.append({
+                    'name': func.name,
+                    'node_type': 'function',
+                    'filepath': file_str,
+                    'body_text': f_body,
+                    'start_line': func.lineno,
+                    'end_line': func.end_lineno,
+                    'metrics': func_metrics
+                })
+                func_id = f"{file_str}::{func.name}"
+                graph_nodes_dict[func_id] = (func_id, {
+                    "name": func.name,
+                    "complexity": f_cc,
+                    "filepath": file_str,
+                    "body_text": f_body,
+                    "start_line": func.lineno,
+                    "end_line": func.end_lineno,
+                    "metrics_json": json.dumps(func_metrics)
+                }, "Function")
+                graph_edges.append((file_id, func_id, {}, "CONTAINS"))
+                
+                for call in getattr(func, 'called_methods', set()):
+                    symbol_id = f"Symbol::{call}"
+                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
+                    graph_edges.append((func_id, symbol_id, {}, "CALLS"))
+
+            resolved_deps = []
+            for dep in dependencies:
+                resolved_dep = self._resolve_dependency(dep, file_str, file_extension)
+                resolved_deps.append((dep, resolved_dep))
+
+            return {
+                "file_str": file_str,
+                "content_hash": content_hash,
+                "mtime": mtime,
+                "lang": file_extension,
+                "nodes_to_index": nodes_to_index,
+                "graph_nodes": list(graph_nodes_dict.values()),
+                "graph_edges": graph_edges,
+                "resolved_deps": resolved_deps
+            }
+        except Exception as e:
+            import sys
+            print(f"Warning: Failed to parse {file_str}: {e}", file=sys.stderr)
+            return None
+
     def index_directory(self, dirpath: str, progress_callback=None) -> dict:
         import pathlib
         import hashlib
+        from concurrent.futures import ThreadPoolExecutor
+        
         path = pathlib.Path(dirpath)
         SUPPORTED = {'.py','.pyi','.java','.scala','.kt','.js','.jsx','.ts','.tsx',
                      '.cpp','.cc','.cxx','.c','.h','.hpp','.hxx','.go','.rs','.swift'}
@@ -311,33 +493,84 @@ class CodebaseIndexer:
         skipped_count = 0
         current_files_set = set()
         
+        # 1. Filter out files that have not changed
+        parse_jobs = []
         for idx, fp in enumerate(files):
             file_str = str(fp)
             current_files_set.add(file_str)
-            if progress_callback:
-                progress_callback(idx, len(files), file_str)
             try:
+                # We do a quick stat to check modified time and compute md5
                 content = fp.read_text(encoding='utf-8', errors='ignore')
                 content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
                 mtime = os.path.getmtime(file_str)
                 
-                # Check if file has changed
                 existing_hash = self.search_index.get_file_hash(file_str)
                 if existing_hash == content_hash:
                     skipped_count += 1
                     continue
-                    
-                self.index_file(file_str, content, fp.suffix, rebuild_fts=False)
                 
-                # Update hash in tracking table
+                parse_jobs.append((fp, file_str, content_hash, mtime))
+            except Exception as e:
+                import sys
+                print(f"Warning: Failed to scan hash for {file_str}: {e}", file=sys.stderr)
+
+        # 2. Parse AST of modified files concurrently
+        max_workers = min(8, os.cpu_count() or 4)
+        results = []
+        if parse_jobs:
+            if progress_callback:
+                progress_callback(0, len(parse_jobs), "Starting parallel parsing...")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(self._parse_file_task, job[0], job[1], job[2], job[3])
+                    for job in parse_jobs
+                ]
+                for idx, fut in enumerate(futures):
+                    res = fut.result()
+                    if res:
+                        results.append(res)
+                    if progress_callback:
+                        progress_callback(idx + 1, len(parse_jobs), f"Parsed {idx+1}/{len(parse_jobs)}")
+
+        # 3. Insert parsed results sequentially (to prevent database concurrency lock)
+        if progress_callback and results:
+            progress_callback(0, len(results), "Writing parsed ASTs to database...")
+            
+        for idx, res in enumerate(results):
+            file_str = res["file_str"]
+            if progress_callback:
+                progress_callback(idx + 1, len(results), f"Saving {os.path.basename(file_str)}")
+                
+            try:
+                self.search_index.clear_file(file_str)
+                
+                if res["nodes_to_index"]:
+                    self.search_index.index_nodes(res["nodes_to_index"])
+                
+                if res["graph_nodes"]:
+                    id_map = self.graph.insert_nodes_bulk(res["graph_nodes"])
+                    if res["graph_edges"]:
+                        self.graph.insert_edges_bulk(res["graph_edges"], id_map)
+                
+                # Add resolved dependencies
+                for dep, resolved_dep in res["resolved_deps"]:
+                    if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
+                        dep_name = os.path.basename(resolved_dep)
+                        dep_ext = os.path.splitext(resolved_dep)[1]
+                        self.graph.insert_nodes_bulk([(resolved_dep, {"name": dep_name, "path": resolved_dep, "extension": dep_ext}, "File")])
+                        self.graph.insert_edges_bulk([(file_str, resolved_dep, {}, "DEPENDS_ON")], {file_str: "File", resolved_dep: "File"})
+                    else:
+                        self.graph.insert_nodes_bulk([(resolved_dep, {"name": resolved_dep}, "Module")])
+                        self.graph.insert_edges_bulk([(file_str, resolved_dep, {}, "DEPENDS_ON")], {file_str: "File", resolved_dep: "Module"})
+                
+                # Update hash tracking
                 from src.core.constants import get_language_for_extension
-                lang = get_language_for_extension(fp.suffix)
-                self.search_index.upsert_file_hash(file_str, content_hash, mtime, lang)
-                
+                lang_name = get_language_for_extension(res["lang"])
+                self.search_index.upsert_file_hash(file_str, res["content_hash"], res["mtime"], lang_name)
                 indexed_count += 1
             except Exception as e:
                 import sys
-                print(f"Warning: Failed to index {fp}: {e}", file=sys.stderr)
+                print(f"Warning: Failed to save index for {file_str}: {e}", file=sys.stderr)
                 
         # Clean up stale files that no longer exist on disk
         tracked_files = self.search_index.get_all_tracked_files()
@@ -346,13 +579,10 @@ class CodebaseIndexer:
             if tf not in current_files_set:
                 self.search_index.clear_file(tf)
                 stale_count += 1
-                
-        # Note: Optimize is intentionally left out here to prevent 
-        # blocking database queries with a full vacuum/merge during normal ingestion.
-        
+         
         if progress_callback:
             progress_callback(len(files), len(files), "Resolving symbols")
-
+ 
         # Resolve all unlinked AST symbols (CALLS, EXTENDS, IMPLEMENTS)
         from src.mcp_server.graph_api import GraphAPI
         graph_api = GraphAPI(dirpath)
