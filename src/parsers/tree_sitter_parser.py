@@ -694,32 +694,46 @@ class TreeSitterExtractor:
             target_cls.methods.extend(methods)
 
 
+# Module-level singletons for tree-sitter parser reuse (Fix #4: Performance)
+_grammar_manager = None
+_parsers: dict = {}
+
+
+import threading
+
+_parser_lock = threading.Lock()
+
 def parse_with_tree_sitter(source: str, extension: str) -> Optional[Any]:
     """
     Parses source code into a ModuleDef AST using Tree-sitter.
     Returns None if the grammar is not found or fails to load.
     """
+    global _grammar_manager
+
     language = get_language_from_extension(extension)
     if language == 'unknown':
         return None
 
     ts_lang_name = language
 
-    # Try to load parser using TreeSitterGrammarManager
-    from src.parsers.tsgm import TreeSitterGrammarManager
-    manager = TreeSitterGrammarManager()
+    with _parser_lock:
+        # Lazily initialize the singleton grammar manager
+        if _grammar_manager is None:
+            from src.parsers.tsgm import TreeSitterGrammarManager
+            _grammar_manager = TreeSitterGrammarManager()
 
-    try:
-        lang_obj = manager.get_language(ts_lang_name)
-    except Exception:
-        # Dynamically install/build if not available
         try:
-            manager.install(ts_lang_name)
-            manager.build_all()
-            lang_obj = manager.get_language(ts_lang_name)
+            lang_obj = _grammar_manager.get_language(ts_lang_name)
         except Exception:
-            return None
+            # Dynamically install/build if not available
+            try:
+                _grammar_manager.install(ts_lang_name)
+                _grammar_manager.build_all()
+                lang_obj = _grammar_manager.get_language(ts_lang_name)
+            except Exception:
+                return None
 
+    # Always instantiate a new Parser for the current call/thread to avoid concurrency issues
     parser = tree_sitter.Parser(lang_obj)
 
     source_bytes = source.encode('utf-8')

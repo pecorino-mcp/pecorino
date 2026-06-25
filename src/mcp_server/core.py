@@ -434,7 +434,7 @@ async def do_update_index(target: str) -> dict:
 
     def _index_file():
         indexer = CodebaseIndexer(repo_path=repo_root)
-        indexer.index_file(str(path), content, path.suffix)
+        indexer.index_file(str(path), content, path.suffix, rebuild_fts=True)
 
     await asyncio.to_thread(_index_file)
     return {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}

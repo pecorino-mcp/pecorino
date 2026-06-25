@@ -75,73 +75,91 @@ class CodeSearchIndex:
             repo_path = find_repo_root(os.getcwd())
             db_path = get_db_path_for_repo(repo_path)
         self.db_path = db_path
+        self._conn = duckdb.connect(self.db_path)
         migrate_codebase(self.db_path)
         self.graph = GorgonzolaGraph(db_path=self.db_path)
 
-    def rebuild_fts(self):
-        """Rebuild the index."""
-        with duckdb.connect(self.db_path) as conn:
-            conn.execute("INSTALL fts")
-            conn.execute("LOAD fts")
-            # Drop the index if it exists to rebuild
+    def close(self):
+        """Close the persistent DuckDB connection."""
+        if self._conn:
             try:
-                conn.execute("PRAGMA drop_fts_index('code_nodes')")
+                self._conn.close()
             except Exception:
                 pass
-            conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'body_text')")
+            self._conn = None
+
+    def __del__(self):
+        self.close()
+
+    def rebuild_fts(self):
+        """Rebuild the index."""
+        conn = self._conn
+        conn.execute("INSTALL fts")
+        conn.execute("LOAD fts")
+        # Drop the index if it exists to rebuild
+        try:
+            conn.execute("PRAGMA drop_fts_index('code_nodes')")
+        except Exception:
+            pass
+        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'body_text')")
 
     def index_nodes(self, nodes: List[Dict[str, Any]]):
         """Index a batch of AST nodes."""
-        with duckdb.connect(self.db_path) as conn:
-            for n in nodes:
-                node_id = f"{n['filepath']}::{n['name']}::{n['start_line']}"
-                conn.execute('''
-                    INSERT INTO code_nodes (id, name, node_type, filepath, body_text, metrics_json, start_line, end_line)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        name=excluded.name,
-                        node_type=excluded.node_type,
-                        filepath=excluded.filepath,
-                        body_text=excluded.body_text,
-                        metrics_json=excluded.metrics_json,
-                        start_line=excluded.start_line,
-                        end_line=excluded.end_line
-                ''', (
-                    node_id,
-                    n['name'], 
-                    n['node_type'], 
-                    n['filepath'], 
-                    n['body_text'], 
-                    json.dumps(n.get('metrics', {})), 
-                    n['start_line'], 
-                    n['end_line']
-                ))
+        conn = self._conn
+        data = []
+        for n in nodes:
+            node_id = f"{n['filepath']}::{n['name']}::{n['start_line']}"
+            data.append((
+                node_id,
+                n['name'],
+                n['node_type'],
+                n['filepath'],
+                n['body_text'],
+                json.dumps(n.get('metrics', {})),
+                n['start_line'],
+                n['end_line']
+            ))
+        if data:
+            conn.executemany('''
+                INSERT INTO code_nodes (id, name, node_type, filepath, body_text, metrics_json, start_line, end_line)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    node_type=excluded.node_type,
+                    filepath=excluded.filepath,
+                    body_text=excluded.body_text,
+                    metrics_json=excluded.metrics_json,
+                    start_line=excluded.start_line,
+                    end_line=excluded.end_line
+            ''', data)
 
     def clear_file(self, filepath: str):
         """Remove all nodes for a given file before re-indexing it."""
-        with duckdb.connect(self.db_path) as conn:
-            conn.execute('DELETE FROM code_nodes WHERE filepath = ?', (filepath,))
-            conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
+        conn = self._conn
+        conn.execute('DELETE FROM code_nodes WHERE filepath = ?', (filepath,))
+        conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
             
         try:
-            self.graph.query("MATCH (f:File {id: $id})-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
-            self.graph.query("MATCH (f:File {id: $id})-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) DETACH DELETE m", {"id": filepath})
-            self.graph.query("MATCH (f:File {id: $id})-[r:CONTAINS]->(child) DETACH DELETE child", {"id": filepath})
-            self.graph.query("MATCH (f:File {id: $id}) DETACH DELETE f", {"id": filepath})
+            self.graph.query_batch([
+                "MATCH (f:File {id: $id})-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) DETACH DELETE m",
+                "MATCH (f:File {id: $id})-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) DETACH DELETE m",
+                "MATCH (f:File {id: $id})-[r:CONTAINS]->(child) DETACH DELETE child",
+                "MATCH (f:File {id: $id}) DETACH DELETE f",
+            ], {"id": filepath})
         except Exception:
             pass
 
     def upsert_file_hash(self, filepath: str, content_hash: str, mtime: float, lang: str):
         """Upsert a file's hash and metadata for incremental indexing."""
-        with duckdb.connect(self.db_path) as conn:
-            conn.execute('''
-                INSERT INTO files (filepath, content_hash, mtime, lang)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(filepath) DO UPDATE SET
-                    content_hash=excluded.content_hash,
-                    mtime=excluded.mtime,
-                    lang=excluded.lang
-            ''', (filepath, content_hash, mtime, lang))
+        conn = self._conn
+        conn.execute('''
+            INSERT INTO files (filepath, content_hash, mtime, lang)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(filepath) DO UPDATE SET
+                content_hash=excluded.content_hash,
+                mtime=excluded.mtime,
+                lang=excluded.lang
+        ''', (filepath, content_hash, mtime, lang))
             
         name = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1]
@@ -164,54 +182,30 @@ class CodeSearchIndex:
 
     def get_file_hash(self, filepath: str) -> str:
         """Retrieve the stored hash for a given file, or None if not found."""
-        with duckdb.connect(self.db_path) as conn:
-            res = conn.execute('SELECT content_hash FROM files WHERE filepath = ?', (filepath,)).fetchone()
-            return res[0] if res else None
+        conn = self._conn
+        res = conn.execute('SELECT content_hash FROM files WHERE filepath = ?', (filepath,)).fetchone()
+        return res[0] if res else None
 
     def get_all_tracked_files(self) -> list:
         """Retrieve a list of all filepaths currently tracked in the index."""
-        with duckdb.connect(self.db_path) as conn:
-            res = conn.execute('SELECT filepath FROM files').fetchall()
-            return [row[0] for row in res]
+        conn = self._conn
+        res = conn.execute('SELECT filepath FROM files').fetchall()
+        return [row[0] for row in res]
 
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search the DuckDB FTS index for a match."""
-        with duckdb.connect(self.db_path) as conn:
-            # Drop query into tokens to make it more FTS-friendly? Just passing query is fine if match_bm25 accepts it.
-            # But wait, match_bm25 may raise if index doesn't exist, though we try to ensure it exists.
-            try:
-                res = conn.execute('''
-                    SELECT c.name, c.node_type, c.filepath, c.body_text, c.metrics_json, c.start_line, c.end_line,
-                           fts_main_code_nodes.match_bm25(c.id, ?) AS score
-                    FROM code_nodes c
-                    WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
-                    ORDER BY score DESC
-                    LIMIT ?
-                ''', (query, query, limit)).fetchall()
-                
-                results = []
-                for row in res:
-                    results.append({
-                        'name': row[0],
-                        'node_type': row[1],
-                        'filepath': row[2],
-                        'body_text': row[3],
-                        'metrics': json.loads(row[4]) if row[4] else {},
-                        'start_line': row[5],
-                        'end_line': row[6]
-                    })
-                return results
-            except Exception:
-                return []
-
-    def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
-        """Get all nodes for a specific file."""
-        with duckdb.connect(self.db_path) as conn:
+        conn = self._conn
+        # Drop query into tokens to make it more FTS-friendly? Just passing query is fine if match_bm25 accepts it.
+        # But wait, match_bm25 may raise if index doesn't exist, though we try to ensure it exists.
+        try:
             res = conn.execute('''
-                SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
-                FROM code_nodes
-                WHERE filepath = ?
-            ''', (filepath,)).fetchall()
+                SELECT c.name, c.node_type, c.filepath, c.body_text, c.metrics_json, c.start_line, c.end_line,
+                       fts_main_code_nodes.match_bm25(c.id, ?) AS score
+                FROM code_nodes c
+                WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
+                ORDER BY score DESC
+                LIMIT ?
+            ''', (query, query, limit)).fetchall()
             
             results = []
             for row in res:
@@ -225,26 +219,50 @@ class CodeSearchIndex:
                     'end_line': row[6]
                 })
             return results
+        except Exception:
+            return []
+
+    def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
+        """Get all nodes for a specific file."""
+        conn = self._conn
+        res = conn.execute('''
+            SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
+            FROM code_nodes
+            WHERE filepath = ?
+        ''', (filepath,)).fetchall()
+        
+        results = []
+        for row in res:
+            results.append({
+                'name': row[0],
+                'node_type': row[1],
+                'filepath': row[2],
+                'body_text': row[3],
+                'metrics': json.loads(row[4]) if row[4] else {},
+                'start_line': row[5],
+                'end_line': row[6]
+            })
+        return results
 
     def get_dir_nodes(self, dirpath: str) -> List[Dict[str, Any]]:
         """Get all nodes for files within a specific directory."""
         prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
-        with duckdb.connect(self.db_path) as conn:
-            res = conn.execute('''
-                SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
-                FROM code_nodes
-                WHERE filepath LIKE ?
-            ''', (f"{prefix}%",)).fetchall()
-            
-            results = []
-            for row in res:
-                results.append({
-                    'name': row[0],
-                    'node_type': row[1],
-                    'filepath': row[2],
-                    'body_text': row[3],
-                    'metrics': json.loads(row[4]) if row[4] else {},
-                    'start_line': row[5],
-                    'end_line': row[6]
-                })
-            return results
+        conn = self._conn
+        res = conn.execute('''
+            SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
+            FROM code_nodes
+            WHERE filepath LIKE ?
+        ''', (f"{prefix}%",)).fetchall()
+        
+        results = []
+        for row in res:
+            results.append({
+                'name': row[0],
+                'node_type': row[1],
+                'filepath': row[2],
+                'body_text': row[3],
+                'metrics': json.loads(row[4]) if row[4] else {},
+                'start_line': row[5],
+                'end_line': row[6]
+            })
+        return results

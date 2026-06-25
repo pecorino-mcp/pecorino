@@ -139,15 +139,16 @@ class GorgonzolaGraph:
                     r = conn.execute(query, params)
                     r.close()
             
-        return {node_id: node_id for node_id, _, _ in nodes}
+        return {node_id: label for node_id, _, label in nodes}
 
     def insert_edges_bulk(self, edges, id_map=None):
         # edges is a list of (src_id, dst_id, properties, rel_type)
+        label_map = id_map or {}
         with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
             with self.gorgonzola.Connection(db) as conn:
                 for src_id, dst_id, properties, rel_type in edges:
-                    src_label = self._get_node_label(src_id, conn)
-                    dst_label = self._get_node_label(dst_id, conn)
+                    src_label = label_map.get(src_id) or self._get_node_label(src_id, conn)
+                    dst_label = label_map.get(dst_id) or self._get_node_label(dst_id, conn)
                     
                     if not src_label or not dst_label:
                         continue
@@ -155,6 +156,19 @@ class GorgonzolaGraph:
                     query = f"MATCH (src:{src_label} {{id: $src}}), (dst:{dst_label} {{id: $dst}}) MERGE (src)-[:{rel_type}]->(dst)"
                     r = conn.execute(query, {"src": src_id, "dst": dst_id})
                     r.close()
+
+    def query_batch(self, queries, parameters=None):
+        """Execute multiple queries within a single connection."""
+        if parameters is None:
+            parameters = {}
+        with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
+            with self.gorgonzola.Connection(db) as conn:
+                for q in queries:
+                    try:
+                        r = conn.execute(q, parameters)
+                        r.close()
+                    except Exception:
+                        pass
 
     def pagerank(self) -> list:
         try:
