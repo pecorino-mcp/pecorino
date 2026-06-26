@@ -55,6 +55,7 @@ class GorgonzolaGraph:
         self._db = None
         self._conn = None
         self._in_context = False
+        self._schema_initialized = False
         # Normalize path
         if db_path.endswith(".duckdb"):
             self.gorgonzola_db_path = db_path[:-7] + "_gorgonzola"
@@ -67,10 +68,11 @@ class GorgonzolaGraph:
         
         import gorgonzola
         self.gorgonzola = gorgonzola
-        
-        with gorgonzola.Database(self.gorgonzola_db_path) as db:
-            with gorgonzola.Connection(db) as conn:
-                init_gorgonzola_schema(conn)
+
+    def _ensure_schema(self, conn):
+        if not self._schema_initialized:
+            init_gorgonzola_schema(conn)
+            self._schema_initialized = True
 
     def __enter__(self):
         self._db_ctx = self.gorgonzola.Database(self.gorgonzola_db_path)
@@ -78,6 +80,7 @@ class GorgonzolaGraph:
         self._conn_ctx = self.gorgonzola.Connection(self._db)
         self._conn = self._conn_ctx.__enter__()
         self._in_context = True
+        self._ensure_schema(self._conn)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -125,6 +128,7 @@ class GorgonzolaGraph:
         else:
             with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
                 with self.gorgonzola.Connection(db) as conn:
+                    self._ensure_schema(conn)
                     return self._query_conn(query, parameters, conn)
 
     def _query_conn(self, query: str, parameters: dict, conn) -> list:
@@ -184,6 +188,7 @@ class GorgonzolaGraph:
         else:
             with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
                 with self.gorgonzola.Connection(db) as conn:
+                    self._ensure_schema(conn)
                     return self._insert_nodes_bulk_conn(nodes, conn)
 
     def _insert_nodes_bulk_conn(self, nodes, conn) -> dict:
@@ -224,7 +229,7 @@ class GorgonzolaGraph:
                                     row.append("")
                         writer.writerow(row)
 
-                r = conn.execute(f"COPY {label} FROM '{csv_path}' (HEADER=false, PARALLEL=false)")
+                r = conn.execute(f"COPY {label} FROM '{csv_path}' (HEADER=false, PARALLEL=false, ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)")
                 r.close()
             finally:
                 if os.path.exists(csv_path):
@@ -249,6 +254,7 @@ class GorgonzolaGraph:
         else:
             with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
                 with self.gorgonzola.Connection(db) as conn:
+                    self._ensure_schema(conn)
                     self._insert_edges_bulk_conn(edges, conn, label_map)
 
     def _insert_edges_bulk_conn(self, edges, conn, label_map):
@@ -278,7 +284,7 @@ class GorgonzolaGraph:
                         ])
 
                 r = conn.execute(
-                    f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}')"
+                    f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
                 )
                 r.close()
             except Exception as e:
@@ -300,6 +306,7 @@ class GorgonzolaGraph:
         else:
             with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
                 with self.gorgonzola.Connection(db) as conn:
+                    self._ensure_schema(conn)
                     self._query_batch_conn(queries, parameters, conn)
 
     def _query_batch_conn(self, queries, parameters, conn):
@@ -312,39 +319,43 @@ class GorgonzolaGraph:
 
     def pagerank(self) -> list:
         try:
-            import networkx as nx
-            nx_graph = nx.DiGraph()
-            
+            results = []
             with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
                 with self.gorgonzola.Connection(db) as conn:
-                    # Add all node types
-                    node_types = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module"]
-                    for nt in node_types:
-                        try:
-                            res = conn.execute(f"MATCH (n:{nt}) RETURN n.id AS id")
-                            while res.has_next():
-                                nx_graph.add_node(res.get_next()[0])
-                            res.close()
-                        except Exception:
-                            pass
-                            
-                    # Add all relationship types
-                    rel_types = ["DEPENDS_ON", "CONTAINS", "EXTENDS", "IMPLEMENTS", "CALLS"]
-                    for rt in rel_types:
-                        try:
-                            res = conn.execute(f"MATCH (a)-[:{rt}]->(b) RETURN a.id AS src, b.id AS dst")
-                            while res.has_next():
-                                row = res.get_next()
-                                nx_graph.add_edge(row[0], row[1])
-                            res.close()
-                        except Exception:
-                            pass
+                    self._ensure_schema(conn)
+                    
+                    # Load the algo extension dynamically
+                    ext_path = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "modules", "gorgonzola", "extension", "algo", "build", "libalgo.gorgonzola_extension"
+                    )
+                    conn.execute(f"LOAD EXTENSION '{ext_path}';")
+                    
+                    # Project graph
+                    try:
+                        conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
+                    except Exception:
+                        pass
                         
-            if len(nx_graph) == 0:
-                return []
-                
-            pr = nx.pagerank(nx_graph)
-            return [{"node_id": node, "score": score} for node, score in pr.items()]
+                    conn.execute("""
+                        CALL PROJECT_GRAPH('CodeGraph', 
+                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module'],
+                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS']
+                        );
+                    """)
+                    
+                    res = conn.execute("CALL page_rank('CodeGraph') RETURN node.id AS node_id, rank AS score;")
+                    while res.has_next():
+                        row = res.get_next()
+                        results.append({"node_id": row[0], "score": row[1]})
+                    res.close()
+                    
+                    try:
+                        conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
+                    except Exception:
+                        pass
+                        
+            return results
         except Exception as e:
             sys.stderr.write(f"[WARNING] PageRank calculation failed: {e}\n")
             sys.stderr.flush()
