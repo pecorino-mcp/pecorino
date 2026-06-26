@@ -82,3 +82,5 @@ bin/
 gitstats_metrics.json
 test_metrics.json
 git
+test_db
+output.log

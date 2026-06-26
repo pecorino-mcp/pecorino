@@ -1,10 +1,12 @@
 import os
+import sys
 import json
 import asyncio
 from typing import Dict, Any, List
 
 from src.mcp_server.index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
+from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
 
 from src.parsers.ast import ClassDef, InterfaceDef, walk
 from src.parsers.tree_sitter_parser import parse_with_tree_sitter
@@ -138,10 +140,8 @@ class CodebaseIndexer:
                 graph_nodes_dict[class_id] = (class_id, {
                     "name": node.name,
                     "filepath": filepath,
-                    "body_text": body,
                     "start_line": node.lineno,
                     "end_line": node.end_lineno,
-                    "metrics_json": json.dumps(metrics)
                 }, "Class")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                 
@@ -172,10 +172,8 @@ class CodebaseIndexer:
                         "name": m.name,
                         "complexity": m_cc,
                         "filepath": filepath,
-                        "body_text": m_body,
                         "start_line": m.lineno,
                         "end_line": m.end_lineno,
-                        "metrics_json": json.dumps(method_metrics)
                     }, "Method")
                     graph_edges.append((class_id, method_id, {}, "CONTAINS"))
                     
@@ -198,10 +196,8 @@ class CodebaseIndexer:
                 graph_nodes_dict[class_id] = (class_id, {
                     "name": node.name,
                     "filepath": filepath,
-                    "body_text": body,
                     "start_line": node.lineno,
                     "end_line": node.end_lineno,
-                    "metrics_json": json.dumps({})
                 }, "Interface")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                 for m in node.methods:
@@ -222,10 +218,8 @@ class CodebaseIndexer:
                         "name": m.name,
                         "complexity": m_cc,
                         "filepath": filepath,
-                        "body_text": m_body,
                         "start_line": m.lineno,
                         "end_line": m.end_lineno,
-                        "metrics_json": json.dumps(method_metrics)
                     }, "Method")
                     graph_edges.append((class_id, method_id, {}, "CONTAINS"))
             elif type(node).__name__ == 'ImportDef':
@@ -250,10 +244,8 @@ class CodebaseIndexer:
                 "name": func.name,
                 "complexity": f_cc,
                 "filepath": filepath,
-                "body_text": f_body,
                 "start_line": func.lineno,
                 "end_line": func.end_lineno,
-                "metrics_json": json.dumps(func_metrics)
             }, "Function")
             graph_edges.append((file_id, func_id, {}, "CONTAINS"))
             
@@ -306,7 +298,16 @@ class CodebaseIndexer:
             graph_edges = []
             
             file_id = file_str
-            graph_nodes_dict[file_id] = (file_id, {"name": os.path.basename(file_str), "path": file_str, "extension": file_extension}, "File")
+            from src.core.constants import get_language_for_extension
+            lang_name = get_language_for_extension(file_extension)
+            graph_nodes_dict[file_id] = (file_id, {
+                "name": os.path.basename(file_str),
+                "path": file_str,
+                "extension": file_extension,
+                "content_hash": content_hash,
+                "mtime": float(mtime),
+                "lang": lang_name
+            }, "File")
             dependencies = set()
 
             for node in walk(tree):
@@ -328,10 +329,8 @@ class CodebaseIndexer:
                     graph_nodes_dict[class_id] = (class_id, {
                         "name": node.name,
                         "filepath": file_str,
-                        "body_text": body,
                         "start_line": node.lineno,
                         "end_line": node.end_lineno,
-                        "metrics_json": json.dumps(metrics)
                     }, "Class")
                     graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                     
@@ -362,10 +361,8 @@ class CodebaseIndexer:
                             "name": m.name,
                             "complexity": m_cc,
                             "filepath": file_str,
-                            "body_text": m_body,
                             "start_line": m.lineno,
                             "end_line": m.end_lineno,
-                            "metrics_json": json.dumps(method_metrics)
                         }, "Method")
                         graph_edges.append((class_id, method_id, {}, "CONTAINS"))
                         
@@ -388,10 +385,8 @@ class CodebaseIndexer:
                     graph_nodes_dict[class_id] = (class_id, {
                         "name": node.name,
                         "filepath": file_str,
-                        "body_text": body,
                         "start_line": node.lineno,
                         "end_line": node.end_lineno,
-                        "metrics_json": json.dumps({})
                     }, "Interface")
                     graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                     for m in node.methods:
@@ -412,10 +407,8 @@ class CodebaseIndexer:
                             "name": m.name,
                             "complexity": m_cc,
                             "filepath": file_str,
-                            "body_text": m_body,
                             "start_line": m.lineno,
                             "end_line": m.end_lineno,
-                            "metrics_json": json.dumps(method_metrics)
                         }, "Method")
                         graph_edges.append((class_id, method_id, {}, "CONTAINS"))
                 elif type(node).__name__ == 'ImportDef':
@@ -440,10 +433,8 @@ class CodebaseIndexer:
                     "name": func.name,
                     "complexity": f_cc,
                     "filepath": file_str,
-                    "body_text": f_body,
                     "start_line": func.lineno,
                     "end_line": func.end_lineno,
-                    "metrics_json": json.dumps(func_metrics)
                 }, "Function")
                 graph_edges.append((file_id, func_id, {}, "CONTAINS"))
                 
@@ -489,6 +480,19 @@ class CodebaseIndexer:
                 if fp.suffix in SUPPORTED:
                     files.append(fp)
         
+        # Estimate required RAM disk quota based on a 40x source-to-database size multiplier
+        try:
+            total_source_bytes = sum(fp.stat().st_size for fp in files)
+        except Exception:
+            total_source_bytes = 0
+            
+        projected_db_bytes = int(total_source_bytes * 40.0)
+        # 1.5x safety buffer, with a minimum of 1 GB
+        required_ramdisk_bytes = max(int(projected_db_bytes * 1.5), 1024 * 1024 * 1024)
+        
+        if progress_callback:
+            progress_callback(0, len(files), f"Projected raw DB size: {projected_db_bytes / (1024*1024):.1f} MB (Allocating {required_ramdisk_bytes / (1024*1024):.1f} MB safe quota)")
+
         indexed_count = 0
         skipped_count = 0
         current_files_set = set()
@@ -499,7 +503,6 @@ class CodebaseIndexer:
             file_str = str(fp)
             current_files_set.add(file_str)
             try:
-                # We do a quick stat to check modified time and compute md5
                 content = fp.read_text(encoding='utf-8', errors='ignore')
                 content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
                 mtime = os.path.getmtime(file_str)
@@ -511,7 +514,6 @@ class CodebaseIndexer:
                 
                 parse_jobs.append((fp, file_str, content_hash, mtime))
             except Exception as e:
-                import sys
                 print(f"Warning: Failed to scan hash for {file_str}: {e}", file=sys.stderr)
 
         # 2. Parse AST of modified files concurrently
@@ -532,53 +534,134 @@ class CodebaseIndexer:
                     if progress_callback:
                         progress_callback(idx + 1, len(parse_jobs), f"Parsed {idx+1}/{len(parse_jobs)}")
 
-        # 3. Insert parsed results sequentially (to prevent database concurrency lock)
-        if progress_callback and results:
-            progress_callback(0, len(results), "Writing parsed ASTs to database...")
-            
-        for idx, res in enumerate(results):
-            file_str = res["file_str"]
+        if not results:
+            # Nothing to index — still clean up stale files
+            tracked_files = self.search_index.get_all_tracked_files()
+            stale_files = [tf for tf in tracked_files if tf not in current_files_set]
+            stale_count = len(stale_files)
+            if stale_files:
+                if progress_callback:
+                    progress_callback(len(files), len(files), f"Removing {stale_count} stale files...")
+                with self.graph:
+                    self.search_index.clear_files_bulk(stale_files)
+            return {
+                "status": "success",
+                "indexed_files": 0,
+                "skipped_files": skipped_count,
+                "stale_files_removed": stale_count,
+                "total_files_found": len(files)
+            }
+
+        # 3. Build the index in RAM (/dev/shm), then sync to SSD
+        ssd_db_path = self.search_index.db_path
+        ramdisk = RamdiskIndex(ssd_db_path, max_bytes=required_ramdisk_bytes)
+
+        with ramdisk:
+            # Create fresh DB instances pointing at the ramdisk
+            ram_search = CodeSearchIndex(ramdisk.db_path)
+            ram_graph = ram_search.graph  # Already initialized by CodeSearchIndex.__init__
+
             if progress_callback:
-                progress_callback(idx + 1, len(results), f"Saving {os.path.basename(file_str)}")
-                
-            try:
-                self.search_index.clear_file(file_str)
-                
-                if res["nodes_to_index"]:
-                    self.search_index.index_nodes(res["nodes_to_index"])
-                
-                if res["graph_nodes"]:
-                    id_map = self.graph.insert_nodes_bulk(res["graph_nodes"])
+                progress_callback(0, len(results), "Writing parsed ASTs to RAM database...")
+
+            with ram_graph:
+                # Clear files in bulk (in RAM DB — fast, no SSD I/O)
+                files_to_clear = [res["file_str"] for res in results]
+                if files_to_clear:
+                    if progress_callback:
+                        progress_callback(0, len(results), "Clearing existing indexes for modified files...")
+                    ram_search.clear_files_bulk(files_to_clear)
+
+                # Aggregate all data
+                all_search_nodes = []
+                all_graph_nodes = {}
+                all_graph_edges = set()
+                files_metadata = []
+
+                for res in results:
+                    file_str = res["file_str"]
+                    
+                    if res["nodes_to_index"]:
+                        all_search_nodes.extend(res["nodes_to_index"])
+                    
+                    if res["graph_nodes"]:
+                        for node_id, props, lbl in res["graph_nodes"]:
+                            all_graph_nodes[node_id] = (props, lbl)
+                    
                     if res["graph_edges"]:
-                        self.graph.insert_edges_bulk(res["graph_edges"], id_map)
-                
-                # Add resolved dependencies
-                for dep, resolved_dep in res["resolved_deps"]:
-                    if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
-                        dep_name = os.path.basename(resolved_dep)
-                        dep_ext = os.path.splitext(resolved_dep)[1]
-                        self.graph.insert_nodes_bulk([(resolved_dep, {"name": dep_name, "path": resolved_dep, "extension": dep_ext}, "File")])
-                        self.graph.insert_edges_bulk([(file_str, resolved_dep, {}, "DEPENDS_ON")], {file_str: "File", resolved_dep: "File"})
-                    else:
-                        self.graph.insert_nodes_bulk([(resolved_dep, {"name": resolved_dep}, "Module")])
-                        self.graph.insert_edges_bulk([(file_str, resolved_dep, {}, "DEPENDS_ON")], {file_str: "File", resolved_dep: "Module"})
-                
-                # Update hash tracking
-                from src.core.constants import get_language_for_extension
-                lang_name = get_language_for_extension(res["lang"])
-                self.search_index.upsert_file_hash(file_str, res["content_hash"], res["mtime"], lang_name)
-                indexed_count += 1
-            except Exception as e:
-                import sys
-                print(f"Warning: Failed to save index for {file_str}: {e}", file=sys.stderr)
-                
+                        for src, dst, props, rel in res["graph_edges"]:
+                            all_graph_edges.add((src, dst, frozenset(props.items()), rel))
+                    
+                    for dep, resolved_dep in res["resolved_deps"]:
+                        if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
+                            dep_name = os.path.basename(resolved_dep)
+                            dep_ext = os.path.splitext(resolved_dep)[1]
+                            if resolved_dep not in all_graph_nodes:
+                                all_graph_nodes[resolved_dep] = ({"name": dep_name, "path": resolved_dep, "extension": dep_ext}, "File")
+                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "DEPENDS_ON"))
+                        else:
+                            if resolved_dep not in all_graph_nodes:
+                                all_graph_nodes[resolved_dep] = ({"name": resolved_dep}, "Module")
+                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "DEPENDS_ON"))
+                    
+                    from src.core.constants import get_language_for_extension
+                    lang_name = get_language_for_extension(res["lang"])
+                    files_metadata.append((file_str, res["content_hash"], res["mtime"], lang_name))
+
+                # Perform bulk saving — all to RAM
+                try:
+                    if all_search_nodes:
+                        if progress_callback:
+                            progress_callback(30, 100, "Saving search nodes to RAM DuckDB...")
+                        ram_search.index_nodes(all_search_nodes)
+
+                    if all_graph_nodes:
+                        if progress_callback:
+                            progress_callback(50, 100, "Inserting graph nodes into RAM Gorgonzola...")
+                        nodes_list = [(nid, props, lbl) for nid, (props, lbl) in all_graph_nodes.items()]
+                        id_map = ram_graph.insert_nodes_bulk(nodes_list)
+                        
+                        if all_graph_edges:
+                            if progress_callback:
+                                progress_callback(70, 100, "Linking graph edges in RAM...")
+                            edges_list = [(src, dst, dict(props), rel) for src, dst, props, rel in all_graph_edges]
+                            ram_graph.insert_edges_bulk(edges_list, id_map)
+
+                    # Check quota after heavy writes
+                    ramdisk.check_quota()
+                    usage_mb = ramdisk.get_usage_bytes() / 1024 / 1024
+                    print(f"[ramdisk] Current usage: {usage_mb:.2f} MB", file=sys.stderr, flush=True)
+
+                    if files_metadata:
+                        if progress_callback:
+                            progress_callback(90, 100, "Updating file hash tracking in RAM...")
+                        ram_search.upsert_file_hashes_bulk(files_metadata)
+                        
+                    indexed_count = len(results)
+                except RamdiskQuotaExceeded as e:
+                    print(f"[ramdisk] QUOTA EXCEEDED: {e}", file=sys.stderr, flush=True)
+                    raise
+                except Exception as e:
+                    print(f"Warning: Failed during bulk database write: {e}", file=sys.stderr)
+
+            # Close RAM DB connections before sync
+            ram_search.close()
+
+        # After ramdisk context exits, files are on SSD.
+        # Re-open the SSD-backed connections for cleanup work.
+        self.search_index.close()
+        self.search_index = CodeSearchIndex(ssd_db_path)
+        self.graph = self.search_index.graph
+
         # Clean up stale files that no longer exist on disk
         tracked_files = self.search_index.get_all_tracked_files()
-        stale_count = 0
-        for tf in tracked_files:
-            if tf not in current_files_set:
-                self.search_index.clear_file(tf)
-                stale_count += 1
+        stale_files = [tf for tf in tracked_files if tf not in current_files_set]
+        stale_count = len(stale_files)
+        if stale_files:
+            if progress_callback:
+                progress_callback(len(files), len(files), f"Removing {stale_count} stale files...")
+            with self.graph:
+                self.search_index.clear_files_bulk(stale_files)
          
         if progress_callback:
             progress_callback(len(files), len(files), "Resolving symbols")
@@ -592,7 +675,6 @@ class CodebaseIndexer:
         try:
             self.search_index.rebuild_fts()
         except Exception as e:
-            import sys
             print(f"Warning: Failed to rebuild FTS index for directory: {e}", file=sys.stderr)
         
         return {
@@ -602,4 +684,5 @@ class CodebaseIndexer:
             "stale_files_removed": stale_count,
             "total_files_found": len(files)
         }
+
 

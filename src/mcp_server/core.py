@@ -59,19 +59,31 @@ def safe_path(p: str) -> Path:
         raise ValueError(f"Not found: {path}")
     return path
 
+_API_CACHE = {}
+
+def _get_cached_api(repo_root: str, db_path: str, api_type: str):
+    key = (db_path, api_type)
+    if key not in _API_CACHE:
+        if api_type == "index":
+            from src.mcp_server.index import CodeSearchIndex
+            _API_CACHE[key] = CodeSearchIndex(db_path=db_path, read_only=True)
+        elif api_type == "graph":
+            from src.mcp_server.graph_api import GraphAPI
+            _API_CACHE[key] = GraphAPI(repo_path=repo_root)
+    return _API_CACHE[key]
+
 # Core implementation of tools (without decorators)
 async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, max_depth: int = 3, output_file: Optional[str] = None) -> dict:
     path = safe_path(target)
-    from src.mcp_server.index import CodeSearchIndex, find_repo_root, get_db_path_for_repo
+    from src.mcp_server.index import find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
-    index = CodeSearchIndex(db_path=db_path)
+    index = _get_cached_api(repo_root, db_path, "index")
 
     # Initialize GraphAPI if view is a graph-related view
     api = None
     if view in ("callers", "callees", "impact", "summary", "deps"):
-        from src.mcp_server.graph_api import GraphAPI
-        api = GraphAPI(repo_path=repo_root)
+        api = _get_cached_api(repo_root, db_path, "graph")
 
     if view == "callers":
         if not query:
