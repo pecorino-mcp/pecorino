@@ -42,12 +42,22 @@ def migrate_codebase(db_path: Path):
                 name VARCHAR,
                 node_type VARCHAR,
                 filepath VARCHAR,
-                body_text VARCHAR,
-                metrics_json VARCHAR,
                 start_line INTEGER,
                 end_line INTEGER
             )
         ''')
+
+        # Handle existing DBs with old schema that had body_text
+        try:
+            conn.execute('ALTER TABLE code_nodes DROP COLUMN body_text')
+        except Exception:
+            pass
+
+        # Handle existing DBs with metrics_json
+        try:
+            conn.execute('ALTER TABLE code_nodes DROP COLUMN metrics_json')
+        except Exception:
+            pass
 
         # Files tracking table for incremental indexing
         conn.execute('''
@@ -70,13 +80,14 @@ def migrate_all():
 class CodeSearchIndex:
     """DuckDB-backed Semantic Code Search Index."""
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, read_only: bool = False):
         if db_path is None:
             repo_path = find_repo_root(os.getcwd())
             db_path = get_db_path_for_repo(repo_path)
         self.db_path = db_path
-        self._conn = duckdb.connect(self.db_path)
-        migrate_codebase(self.db_path)
+        self._conn = duckdb.connect(self.db_path, read_only=read_only)
+        if not read_only:
+            migrate_codebase(self.db_path)
         self.graph = GorgonzolaGraph(db_path=self.db_path)
 
     def close(self):
@@ -101,7 +112,16 @@ class CodeSearchIndex:
             conn.execute("PRAGMA drop_fts_index('code_nodes')")
         except Exception:
             pass
-        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'body_text')")
+        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name')")
+
+    def _lazy_load_body(self, filepath: str, start_line: int, end_line: int) -> str:
+        """Lazy-load source code from disk using filepath + line range."""
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+                return ''.join(lines[max(0, start_line-1):end_line])
+        except (FileNotFoundError, OSError):
+            return ''
 
     def index_nodes(self, nodes: List[Dict[str, Any]]):
         """Index a batch of AST nodes."""
@@ -114,24 +134,26 @@ class CodeSearchIndex:
                 n['name'],
                 n['node_type'],
                 n['filepath'],
-                n['body_text'],
-                json.dumps(n.get('metrics', {})),
                 n['start_line'],
                 n['end_line']
             ))
         if data:
-            conn.executemany('''
-                INSERT INTO code_nodes (id, name, node_type, filepath, body_text, metrics_json, start_line, end_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name=excluded.name,
-                    node_type=excluded.node_type,
-                    filepath=excluded.filepath,
-                    body_text=excluded.body_text,
-                    metrics_json=excluded.metrics_json,
-                    start_line=excluded.start_line,
-                    end_line=excluded.end_line
-            ''', data)
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.executemany('''
+                    INSERT INTO code_nodes (id, name, node_type, filepath, start_line, end_line)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name=excluded.name,
+                        node_type=excluded.node_type,
+                        filepath=excluded.filepath,
+                        start_line=excluded.start_line,
+                        end_line=excluded.end_line
+                ''', data)
+                conn.execute("COMMIT")
+            except Exception as e:
+                conn.execute("ROLLBACK")
+                raise e
 
     def clear_file(self, filepath: str):
         """Remove all nodes for a given file before re-indexing it."""
@@ -148,6 +170,50 @@ class CodeSearchIndex:
             ], {"id": filepath})
         except Exception:
             pass
+
+    def clear_files_bulk(self, filepaths: List[str]):
+        """Remove all nodes for a list of files before re-indexing them, in bulk."""
+        if not filepaths:
+            return
+        conn = self._conn
+        chunk_size = 500
+        for i in range(0, len(filepaths), chunk_size):
+            chunk = filepaths[i:i+chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            conn.execute(f'DELETE FROM code_nodes WHERE filepath IN ({placeholders})', chunk)
+            conn.execute(f'DELETE FROM files WHERE filepath IN ({placeholders})', chunk)
+            
+        for i in range(0, len(filepaths), chunk_size):
+            chunk = filepaths[i:i+chunk_size]
+            try:
+                self.graph.query_batch([
+                    "MATCH (f:File)-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) WHERE f.id IN $ids DETACH DELETE m",
+                    "MATCH (f:File)-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) WHERE f.id IN $ids DETACH DELETE m",
+                    "MATCH (f:File)-[r:CONTAINS]->(child) WHERE f.id IN $ids DETACH DELETE child",
+                    "MATCH (f:File) WHERE f.id IN $ids DETACH DELETE f",
+                ], {"ids": chunk})
+            except Exception:
+                pass
+
+    def upsert_file_hashes_bulk(self, files_data: List[tuple]):
+        """Upsert a list of file hashes and metadata in bulk."""
+        if not files_data:
+            return
+        conn = self._conn
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.executemany('''
+                INSERT INTO files (filepath, content_hash, mtime, lang)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(filepath) DO UPDATE SET
+                    content_hash=excluded.content_hash,
+                    mtime=excluded.mtime,
+                    lang=excluded.lang
+            ''', files_data)
+            conn.execute("COMMIT")
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            raise e
 
     def upsert_file_hash(self, filepath: str, content_hash: str, mtime: float, lang: str):
         """Upsert a file's hash and metadata for incremental indexing."""
@@ -199,7 +265,7 @@ class CodeSearchIndex:
         # But wait, match_bm25 may raise if index doesn't exist, though we try to ensure it exists.
         try:
             res = conn.execute('''
-                SELECT c.name, c.node_type, c.filepath, c.body_text, c.metrics_json, c.start_line, c.end_line,
+                SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line,
                        fts_main_code_nodes.match_bm25(c.id, ?) AS score
                 FROM code_nodes c
                 WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
@@ -213,10 +279,10 @@ class CodeSearchIndex:
                     'name': row[0],
                     'node_type': row[1],
                     'filepath': row[2],
-                    'body_text': row[3],
-                    'metrics': json.loads(row[4]) if row[4] else {},
-                    'start_line': row[5],
-                    'end_line': row[6]
+                    'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                    'metrics': {},
+                    'start_line': row[3],
+                    'end_line': row[4]
                 })
             return results
         except Exception:
@@ -226,7 +292,7 @@ class CodeSearchIndex:
         """Get all nodes for a specific file."""
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
+            SELECT name, node_type, filepath, start_line, end_line
             FROM code_nodes
             WHERE filepath = ?
         ''', (filepath,)).fetchall()
@@ -237,10 +303,10 @@ class CodeSearchIndex:
                 'name': row[0],
                 'node_type': row[1],
                 'filepath': row[2],
-                'body_text': row[3],
-                'metrics': json.loads(row[4]) if row[4] else {},
-                'start_line': row[5],
-                'end_line': row[6]
+                'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                'metrics': {},
+                'start_line': row[3],
+                'end_line': row[4]
             })
         return results
 
@@ -249,7 +315,7 @@ class CodeSearchIndex:
         prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, body_text, metrics_json, start_line, end_line
+            SELECT name, node_type, filepath, start_line, end_line
             FROM code_nodes
             WHERE filepath LIKE ?
         ''', (f"{prefix}%",)).fetchall()
@@ -260,9 +326,9 @@ class CodeSearchIndex:
                 'name': row[0],
                 'node_type': row[1],
                 'filepath': row[2],
-                'body_text': row[3],
-                'metrics': json.loads(row[4]) if row[4] else {},
-                'start_line': row[5],
-                'end_line': row[6]
+                'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                'metrics': {},
+                'start_line': row[3],
+                'end_line': row[4]
             })
         return results
