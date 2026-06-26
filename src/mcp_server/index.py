@@ -33,41 +33,40 @@ def get_db_path_for_repo(repo_path: str) -> str:
     hash_str = hashlib.md5(repo_path.encode('utf-8')).hexdigest()
     return os.path.join(get_indexes_dir(), f"{hash_str}_code_search.duckdb")
 
-def migrate_codebase(db_path: Path):
+def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     """Formal, versioned migration that runs once per DB."""
-    with duckdb.connect(str(db_path)) as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS code_nodes (
-                id VARCHAR PRIMARY KEY,
-                name VARCHAR,
-                node_type VARCHAR,
-                filepath VARCHAR,
-                start_line INTEGER,
-                end_line INTEGER
-            )
-        ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS code_nodes (
+            id VARCHAR PRIMARY KEY,
+            name VARCHAR,
+            node_type VARCHAR,
+            filepath VARCHAR,
+            start_line INTEGER,
+            end_line INTEGER
+        )
+    ''')
 
-        # Handle existing DBs with old schema that had body_text
-        try:
-            conn.execute('ALTER TABLE code_nodes DROP COLUMN body_text')
-        except Exception:
-            pass
+    # Handle existing DBs with old schema that had body_text
+    try:
+        conn.execute('ALTER TABLE code_nodes DROP COLUMN body_text')
+    except Exception:
+        pass
 
-        # Handle existing DBs with metrics_json
-        try:
-            conn.execute('ALTER TABLE code_nodes DROP COLUMN metrics_json')
-        except Exception:
-            pass
+    # Handle existing DBs with metrics_json
+    try:
+        conn.execute('ALTER TABLE code_nodes DROP COLUMN metrics_json')
+    except Exception:
+        pass
 
-        # Files tracking table for incremental indexing
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS files (
-                filepath VARCHAR PRIMARY KEY,
-                content_hash VARCHAR,
-                mtime DOUBLE,
-                lang VARCHAR
-            )
-        ''')
+    # Files tracking table for incremental indexing
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS files (
+            filepath VARCHAR PRIMARY KEY,
+            content_hash VARCHAR,
+            mtime DOUBLE,
+            lang VARCHAR
+        )
+    ''')
 
 def migrate_all():
     """Scan the indexes directory and safely run migrations."""
@@ -75,7 +74,8 @@ def migrate_all():
     for fname in os.listdir(indexes_dir):
         if fname.endswith(".duckdb"):
             db_path = Path(indexes_dir) / fname
-            migrate_codebase(db_path)
+            with duckdb.connect(str(db_path)) as conn:
+                migrate_codebase(conn)
 
 class CodeSearchIndex:
     """DuckDB-backed Semantic Code Search Index."""
@@ -87,7 +87,7 @@ class CodeSearchIndex:
         self.db_path = db_path
         self._conn = duckdb.connect(self.db_path, read_only=read_only)
         if not read_only:
-            migrate_codebase(self.db_path)
+            migrate_codebase(self._conn)
         self.graph = GorgonzolaGraph(db_path=self.db_path)
 
     def close(self):
@@ -140,16 +140,20 @@ class CodeSearchIndex:
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
-                conn.executemany('''
-                    INSERT INTO code_nodes (id, name, node_type, filepath, start_line, end_line)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
+                conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
+                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?)", data)
+                conn.execute('''
+                    INSERT INTO code_nodes
+                    SELECT * FROM temp_code_nodes
                     ON CONFLICT(id) DO UPDATE SET
                         name=excluded.name,
                         node_type=excluded.node_type,
                         filepath=excluded.filepath,
                         start_line=excluded.start_line,
                         end_line=excluded.end_line
-                ''', data)
+                ''')
+                conn.execute("DROP TABLE temp_code_nodes")
                 conn.execute("COMMIT")
             except Exception as e:
                 conn.execute("ROLLBACK")
@@ -162,12 +166,13 @@ class CodeSearchIndex:
         conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
             
         try:
-            self.graph.query_batch([
-                "MATCH (f:File {id: $id})-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) DETACH DELETE m",
-                "MATCH (f:File {id: $id})-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) DETACH DELETE m",
-                "MATCH (f:File {id: $id})-[r:CONTAINS]->(child) DETACH DELETE child",
-                "MATCH (f:File {id: $id}) DETACH DELETE f",
-            ], {"id": filepath})
+            with self.graph:
+                self.graph.query_batch([
+                    "MATCH (f:File {id: $id})-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) DETACH DELETE m",
+                    "MATCH (f:File {id: $id})-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) DETACH DELETE m",
+                    "MATCH (f:File {id: $id})-[r:CONTAINS]->(child) DETACH DELETE child",
+                    "MATCH (f:File {id: $id}) DETACH DELETE f",
+                ], {"id": filepath})
         except Exception:
             pass
 
@@ -202,18 +207,49 @@ class CodeSearchIndex:
         conn = self._conn
         conn.execute("BEGIN TRANSACTION")
         try:
-            conn.executemany('''
-                INSERT INTO files (filepath, content_hash, mtime, lang)
-                VALUES (?, ?, ?, ?)
+            # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
+            conn.execute("CREATE TEMP TABLE temp_files AS SELECT * FROM files LIMIT 0")
+            conn.executemany("INSERT INTO temp_files VALUES (?, ?, ?, ?)", files_data)
+            conn.execute('''
+                INSERT INTO files
+                SELECT * FROM temp_files
                 ON CONFLICT(filepath) DO UPDATE SET
                     content_hash=excluded.content_hash,
                     mtime=excluded.mtime,
                     lang=excluded.lang
-            ''', files_data)
+            ''')
+            conn.execute("DROP TABLE temp_files")
             conn.execute("COMMIT")
         except Exception as e:
             conn.execute("ROLLBACK")
             raise e
+            
+        queries = []
+        params = {}
+        for i, (filepath, content_hash, mtime, lang) in enumerate(files_data):
+            name = os.path.basename(filepath)
+            ext = os.path.splitext(filepath)[1]
+            q = f"""
+                MERGE (f:File {{id: $id_{i}}})
+                ON CREATE SET f.name = $name_{i}, f.path = $id_{i}, f.extension = $ext_{i}, f.content_hash = $content_hash_{i}, f.mtime = $mtime_{i}, f.lang = $lang_{i}
+                ON MATCH SET f.content_hash = $content_hash_{i}, f.mtime = $mtime_{i}, f.lang = $lang_{i}
+            """
+            queries.append(q)
+            params.update({
+                f"id_{i}": filepath,
+                f"name_{i}": name,
+                f"ext_{i}": ext,
+                f"content_hash_{i}": content_hash,
+                f"mtime_{i}": float(mtime),
+                f"lang_{i}": lang
+            })
+            
+        if queries:
+            try:
+                with self.graph:
+                    self.graph.query_batch(queries, params)
+            except Exception:
+                pass
 
     def upsert_file_hash(self, filepath: str, content_hash: str, mtime: float, lang: str):
         """Upsert a file's hash and metadata for incremental indexing."""
@@ -235,14 +271,15 @@ class CodeSearchIndex:
             ON MATCH SET f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
         """
         try:
-            self.graph.query(query, {
-                "id": filepath,
-                "name": name,
-                "ext": ext,
-                "content_hash": content_hash,
-                "mtime": float(mtime),
-                "lang": lang
-            })
+            with self.graph:
+                self.graph.query(query, {
+                    "id": filepath,
+                    "name": name,
+                    "ext": ext,
+                    "content_hash": content_hash,
+                    "mtime": float(mtime),
+                    "lang": lang
+                })
         except Exception:
             pass
 

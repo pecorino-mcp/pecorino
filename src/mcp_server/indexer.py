@@ -109,7 +109,6 @@ class CodebaseIndexer:
             
         self.search_index.clear_file(filepath)
         
-        content_lines = content.splitlines()
         nodes_to_index = []
         
         graph_nodes_dict = {}
@@ -122,7 +121,6 @@ class CodebaseIndexer:
 
         for node in walk(tree):
             if isinstance(node, ClassDef):
-                body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
                 # Get metrics with defaults since we don't have CK metrics calculator
                 wmc = getattr(node, 'wmc', 0)
                 metrics = {'wmc': wmc, 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
@@ -130,7 +128,6 @@ class CodebaseIndexer:
                     'name': node.name,
                     'node_type': 'class',
                     'filepath': filepath,
-                    'body_text': body,
                     'start_line': node.lineno,
                     'end_line': node.end_lineno,
                     'metrics': metrics
@@ -155,14 +152,12 @@ class CodebaseIndexer:
                     graph_nodes_dict[symbol_id] = (symbol_id, {"name": interface}, "Symbol")
                     graph_edges.append((class_id, symbol_id, {}, "IMPLEMENTS"))
                 for m in node.methods:
-                    m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
                     m_cc = getattr(m, 'cyclomatic_complexity', 1)
                     method_metrics = {'cyclomatic_complexity': m_cc}
                     nodes_to_index.append({
                         'name': f"{node.name}.{m.name}",
                         'node_type': 'method',
                         'filepath': filepath,
-                        'body_text': m_body,
                         'start_line': m.lineno,
                         'end_line': m.end_lineno,
                         'metrics': method_metrics
@@ -182,12 +177,10 @@ class CodebaseIndexer:
                         graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                         graph_edges.append((method_id, symbol_id, {}, "CALLS"))
             elif isinstance(node, InterfaceDef):
-                body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
                 nodes_to_index.append({
                     'name': node.name,
                     'node_type': 'interface',
                     'filepath': filepath,
-                    'body_text': body,
                     'start_line': node.lineno,
                     'end_line': node.end_lineno,
                     'metrics': {}
@@ -201,14 +194,12 @@ class CodebaseIndexer:
                 }, "Interface")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                 for m in node.methods:
-                    m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
                     m_cc = getattr(m, 'cyclomatic_complexity', 1)
                     method_metrics = {'cyclomatic_complexity': m_cc}
                     nodes_to_index.append({
                         'name': f"{node.name}.{m.name}",
                         'node_type': 'method',
                         'filepath': filepath,
-                        'body_text': m_body,
                         'start_line': m.lineno,
                         'end_line': m.end_lineno,
                         'metrics': method_metrics
@@ -227,14 +218,12 @@ class CodebaseIndexer:
                     dependencies.add(node.module)
 
         for func in tree.functions:
-            f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
             f_cc = getattr(func, 'cyclomatic_complexity', 1)
             func_metrics = {'cyclomatic_complexity': f_cc}
             nodes_to_index.append({
                 'name': func.name,
                 'node_type': 'function',
                 'filepath': filepath,
-                'body_text': f_body,
                 'start_line': func.lineno,
                 'end_line': func.end_lineno,
                 'metrics': func_metrics
@@ -292,7 +281,6 @@ class CodebaseIndexer:
             if not tree:
                 return None
                 
-            content_lines = content.splitlines()
             nodes_to_index = []
             graph_nodes_dict = {}
             graph_edges = []
@@ -312,14 +300,12 @@ class CodebaseIndexer:
 
             for node in walk(tree):
                 if isinstance(node, ClassDef):
-                    body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
                     wmc = getattr(node, 'wmc', 0)
                     metrics = {'wmc': wmc, 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
                     nodes_to_index.append({
                         'name': node.name,
                         'node_type': 'class',
                         'filepath': file_str,
-                        'body_text': body,
                         'start_line': node.lineno,
                         'end_line': node.end_lineno,
                         'metrics': metrics
@@ -344,14 +330,12 @@ class CodebaseIndexer:
                         graph_nodes_dict[symbol_id] = (symbol_id, {"name": interface}, "Symbol")
                         graph_edges.append((class_id, symbol_id, {}, "IMPLEMENTS"))
                     for m in node.methods:
-                        m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
                         m_cc = getattr(m, 'cyclomatic_complexity', 1)
                         method_metrics = {'cyclomatic_complexity': m_cc}
                         nodes_to_index.append({
                             'name': f"{node.name}.{m.name}",
                             'node_type': 'method',
                             'filepath': file_str,
-                            'body_text': m_body,
                             'start_line': m.lineno,
                             'end_line': m.end_lineno,
                             'metrics': method_metrics
@@ -371,12 +355,10 @@ class CodebaseIndexer:
                             graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                             graph_edges.append((method_id, symbol_id, {}, "CALLS"))
                 elif isinstance(node, InterfaceDef):
-                    body = '\n'.join(content_lines[max(0, node.lineno-1):node.end_lineno]) if node.lineno > 0 else ''
                     nodes_to_index.append({
                         'name': node.name,
                         'node_type': 'interface',
                         'filepath': file_str,
-                        'body_text': body,
                         'start_line': node.lineno,
                         'end_line': node.end_lineno,
                         'metrics': {}
@@ -390,14 +372,12 @@ class CodebaseIndexer:
                     }, "Interface")
                     graph_edges.append((file_id, class_id, {}, "CONTAINS"))
                     for m in node.methods:
-                        m_body = '\n'.join(content_lines[max(0, m.lineno-1):m.end_lineno]) if m.lineno > 0 else ''
                         m_cc = getattr(m, 'cyclomatic_complexity', 1)
                         method_metrics = {'cyclomatic_complexity': m_cc}
                         nodes_to_index.append({
                             'name': f"{node.name}.{m.name}",
                             'node_type': 'method',
                             'filepath': file_str,
-                            'body_text': m_body,
                             'start_line': m.lineno,
                             'end_line': m.end_lineno,
                             'metrics': method_metrics
@@ -416,14 +396,12 @@ class CodebaseIndexer:
                         dependencies.add(node.module)
 
             for func in tree.functions:
-                f_body = '\n'.join(content_lines[max(0, func.lineno-1):func.end_lineno]) if func.lineno > 0 else ''
                 f_cc = getattr(func, 'cyclomatic_complexity', 1)
                 func_metrics = {'func_cc': f_cc}
                 nodes_to_index.append({
                     'name': func.name,
                     'node_type': 'function',
                     'filepath': file_str,
-                    'body_text': f_body,
                     'start_line': func.lineno,
                     'end_line': func.end_lineno,
                     'metrics': func_metrics

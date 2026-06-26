@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import glob
 import json
 import os
@@ -59,18 +60,30 @@ def safe_path(p: str) -> Path:
         raise ValueError(f"Not found: {path}")
     return path
 
-_API_CACHE = {}
+_API_CACHE_MAX_SIZE = 10
+_API_CACHE = collections.OrderedDict()
 
 def _get_cached_api(repo_root: str, db_path: str, api_type: str):
     key = (db_path, api_type)
-    if key not in _API_CACHE:
-        if api_type == "index":
-            from src.mcp_server.index import CodeSearchIndex
-            _API_CACHE[key] = CodeSearchIndex(db_path=db_path, read_only=True)
-        elif api_type == "graph":
-            from src.mcp_server.graph_api import GraphAPI
-            _API_CACHE[key] = GraphAPI(repo_path=repo_root)
-    return _API_CACHE[key]
+    if key in _API_CACHE:
+        _API_CACHE.move_to_end(key)
+        return _API_CACHE[key]
+        
+    if api_type == "index":
+        from src.mcp_server.index import CodeSearchIndex
+        new_api = CodeSearchIndex(db_path=db_path, read_only=True)
+    elif api_type == "graph":
+        from src.mcp_server.graph_api import GraphAPI
+        new_api = GraphAPI(repo_path=repo_root)
+        
+    _API_CACHE[key] = new_api
+    
+    if len(_API_CACHE) > _API_CACHE_MAX_SIZE:
+        oldest_key, oldest_api = _API_CACHE.popitem(last=False)
+        if hasattr(oldest_api, 'close'):
+            oldest_api.close()
+            
+    return new_api
 
 # Core implementation of tools (without decorators)
 async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, max_depth: int = 3, output_file: Optional[str] = None) -> dict:
