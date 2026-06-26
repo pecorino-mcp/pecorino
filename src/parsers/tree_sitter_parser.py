@@ -15,7 +15,7 @@ from typing import Any, List, Optional, Set
 import tree_sitter
 
 
-# Lazy imports from gitstats_oopmetrics to avoid circular imports
+# Lazy imports from pecorino_oopmetrics to avoid circular imports
 def get_ast_classes():
     from src.parsers.ast import (
         AttributeDef,

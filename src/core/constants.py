@@ -1,5 +1,5 @@
 """
-Language constants and file extension definitions for Gitstats3.
+Language constants and file extension definitions for Pecorino.
 
 This module centralizes language-specific constants used across the codebase,
 including file extensions for analysis and language keywords for parsing.

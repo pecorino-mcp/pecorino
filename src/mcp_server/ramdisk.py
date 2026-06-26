@@ -36,7 +36,7 @@ class RamdiskIndex:
         """
         Args:
             ssd_db_path: The *final* DuckDB path on the SSD
-                         (e.g. ~/.gitstats3/indexes/<hash>_code_search.duckdb).
+                         (e.g. ~/.pecorino/indexes/<hash>_code_search.duckdb).
             max_bytes:   Hard cap on total bytes written to the ramdisk dir.
                          Default 60 MB.  Set to 0 to disable the quota.
         """
@@ -50,7 +50,7 @@ class RamdiskIndex:
             self.ssd_gorgonzola_path = ssd_db_path + "_gorgonzola"
 
         # Session directory under /dev/shm
-        session_id = f"gitstats3_{uuid.uuid4().hex[:12]}"
+        session_id = f"pecorino_{uuid.uuid4().hex[:12]}"
         self.ram_dir = os.path.join(_SHM_ROOT, session_id)
 
         # Mirror the filenames inside the ramdisk dir

@@ -1,10 +1,10 @@
 # Implementation Plan: Tree-Sitter Parsing Optimization
 
-This document outlines the proposed implementation plan for the final identified bottleneck in the Gitstats3 indexing pipeline: CPU overhead caused by Python-side AST traversal and string allocations.
+This document outlines the proposed implementation plan for the final identified bottleneck in the Pecorino indexing pipeline: CPU overhead caused by Python-side AST traversal and string allocations.
 
 ## Current State & Bottleneck
 
-Currently, `gitstats3` uses the `tree-sitter` Python bindings to parse source files into a C-backed syntax tree. However, it extracts metrics and structures using a **full recursive walk** written in Python (`TreeSitterExtractor.traverse()` in `tree_sitter_parser.py`). 
+Currently, `pecorino` uses the `tree-sitter` Python bindings to parse source files into a C-backed syntax tree. However, it extracts metrics and structures using a **full recursive walk** written in Python (`TreeSitterExtractor.traverse()` in `tree_sitter_parser.py`). 
 
 This causes two major issues during ingestion:
 1. **Python Recursion Overhead:** Walking thousands of AST nodes per file in Python is significantly slower than letting the underlying C/Rust engine perform the traversal.

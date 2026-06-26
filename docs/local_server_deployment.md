@@ -1,12 +1,12 @@
-# Gitstats3 Local Server Deployment & Single-Machine Guide
+# Pecorino Local Server Deployment & Single-Machine Guide
 
-This guide details how to deploy and run the **Gitstats3 Model Context Protocol (MCP) server** locally on a single machine. The MCP server enables Large Language Models (LLMs) and dev assistant clients to browse codebases, compute metrics, perform semantic searches, and generate repository reports.
+This guide details how to deploy and run the **Pecorino Model Context Protocol (MCP) server** locally on a single machine. The MCP server enables Large Language Models (LLMs) and dev assistant clients to browse codebases, compute metrics, perform semantic searches, and generate repository reports.
 
 ---
 
 ## ⚙️ Prerequisites & System Requirements
 
-Before setting up the Gitstats3 server, ensure your machine meets the following:
+Before setting up the Pecorino server, ensure your machine meets the following:
 
 - **Operating System:** Linux, macOS, or Windows (via WSL or native Python).
 - **Python:** Version `3.8` or newer (Python `3.10+` recommended for optimized performance).
@@ -17,14 +17,14 @@ Before setting up the Gitstats3 server, ensure your machine meets the following:
 
 ## 🚀 Installation & Environment Setup
 
-Follow these steps to set up Gitstats3 and its MCP dependencies on your local machine:
+Follow these steps to set up Pecorino and its MCP dependencies on your local machine:
 
 ### 1. Clone the Repository (with Submodules)
-Gitstats3 relies on the Model Context Protocol Python SDK, which is tracked as a Git submodule. Clone the repository recursively:
+Pecorino relies on the Model Context Protocol Python SDK, which is tracked as a Git submodule. Clone the repository recursively:
 
 ```bash
-git clone --recursive https://github.com/gitstats3/gitstats3.git
-cd gitstats3
+git clone --recursive https://github.com/pecorino/pecorino.git
+cd pecorino
 ```
 
 > [!TIP]
@@ -56,7 +56,7 @@ Install the required packages, including parser modules and tree-sitter grammars
 pip install -r requirements.txt
 ```
 
-### 4. Install Gitstats3
+### 4. Install Pecorino
 Install the package in editable mode to register command-line entry points:
 
 ```bash
@@ -67,25 +67,25 @@ pip install -e .
 
 ## 🏃 Running the MCP Server
 
-Gitstats3 supports two transport protocols for single-machine deployments: **Standard I/O (`stdio`)** and **Server-Sent Events (`sse`)**.
+Pecorino supports two transport protocols for single-machine deployments: **Standard I/O (`stdio`)** and **Server-Sent Events (`sse`)**.
 
 ### Option A: Standard I/O (`stdio`) Transport (Recommended)
 In `stdio` mode, the MCP client (such as Claude Desktop) starts the server as a child process and communicates via standard input/output. This is the simplest setup and does not require opening network ports.
 
 Run using the registered entry point:
 ```bash
-gitstats3-mcp --transport stdio
+pecorino-mcp --transport stdio
 ```
 
 Or run via the main entry script:
 ```bash
-python gitstats.py --mcp --transport stdio
+python pecorino.py --mcp --transport stdio
 ```
 
 ---
 
 ### Option B: Server-Sent Events (`sse`) Transport
-In `sse` mode, Gitstats3 runs as a persistent HTTP server. Clients connect to the server over the network. This is useful for sharing a single local instance across multiple development tools.
+In `sse` mode, Pecorino runs as a persistent HTTP server. Clients connect to the server over the network. This is useful for sharing a single local instance across multiple development tools.
 
 > [!IMPORTANT]
 > The `sse` transport requires `starlette` and `uvicorn` web server packages. You can install them by running:
@@ -95,7 +95,7 @@ In `sse` mode, Gitstats3 runs as a persistent HTTP server. Clients connect to th
 
 Start the server:
 ```bash
-gitstats3-mcp --transport sse --host 127.0.0.1 --port 8000
+pecorino-mcp --transport sse --host 127.0.0.1 --port 8000
 ```
 
 This starts a server listening on `http://127.0.0.1:8000` with the following endpoints:
@@ -107,7 +107,7 @@ This starts a server listening on `http://127.0.0.1:8000` with the following end
 ## 🖥️ Integrating with LLM Clients
 
 ### Claude Desktop Integration
-To use Gitstats3 with Claude Desktop, add the server configuration to your `claude_desktop_config.json` file.
+To use Pecorino with Claude Desktop, add the server configuration to your `claude_desktop_config.json` file.
 
 * **File Location:**
   * **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -118,21 +118,21 @@ To use Gitstats3 with Claude Desktop, add the server configuration to your `clau
 ```json
 {
   "mcpServers": {
-    "gitstats3": {
-      "command": "/path/to/gitstats3/.venv/bin/gitstats3-mcp",
+    "pecorino": {
+      "command": "/path/to/pecorino/.venv/bin/pecorino-mcp",
       "args": [
         "--transport",
         "stdio"
       ],
       "env": {
-        "PYTHONPATH": "/path/to/gitstats3"
+        "PYTHONPATH": "/path/to/pecorino"
       }
     }
   }
 }
 ```
 
-Replace `/path/to/gitstats3` with the actual absolute path to your cloned repository.
+Replace `/path/to/pecorino` with the actual absolute path to your cloned repository.
 
 ---
 
@@ -161,7 +161,7 @@ Computes design, complexity, or hotspot metrics on a target file or folder.
   - `what` *(array of strings, optional)*: Metrics to calculate. Can contain `"oop"`, `"complexity"`, `"hotspots"`, or `"all"` (default: `["all"]`).
 
 ### 3. `report`
-Runs a full analysis scan over a git repository and exports the metrics dataset directly to a repository-specific subdirectory (`<repo_name>_report/gitstats_metrics.json`) inside the specified output directory.
+Runs a full analysis scan over a git repository and exports the metrics dataset directly to a repository-specific subdirectory (`<repo_name>_report/pecorino_metrics.json`) inside the specified output directory.
 - **Parameters:**
   - `repo_path` *(string, required)*: Absolute path to the git repository.
   - `output_path` *(string, required)*: Absolute path to the output directory.
@@ -175,7 +175,7 @@ Indexes or re-indexes the AST of a target file or folder, storing the metadata i
 
 ## 🗄️ Database Storage & Indexing
 
-Under the hood, Gitstats3 uses a **DuckDB FTS (Full-Text Search)** database to index AST nodes.
+Under the hood, Pecorino uses a **DuckDB FTS (Full-Text Search)** database to index AST nodes.
 - **Location:** Index databases are stored per-repository under your home directory:
-  `~/.gitstats3/indexes/<repo_md5_hash>_code_search.duckdb`
+  `~/.pecorino/indexes/<repo_md5_hash>_code_search.duckdb`
 - **Reindexing:** To ensure search queries return accurate results, run the `update_index` tool whenever codebase changes are made.

@@ -1,5 +1,5 @@
 """
-Git data collector module for Gitstats3.
+Git data collector module for Pecorino.
 
 Contains the GitDataCollector class that extends DataCollector with git-specific data collection.
 """

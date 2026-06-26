@@ -1,8 +1,8 @@
-# Gitstats3 MCP Server
+# Pecorino MCP Server
 
 A Model Context Protocol (MCP) server for deep Git history statistics, repository health tracking, and Object-Oriented Design (OOD) metrics analysis. 
 
-Gitstats3 allows Large Language Models (LLMs) and dev tools (such as Claude Desktop or Cursor) to inspect codebases, analyze code structures, compute complexity/maintainability indexes, and detect risk hotspots.
+Pecorino allows Large Language Models (LLMs) and dev tools (such as Claude Desktop or Cursor) to inspect codebases, analyze code structures, compute complexity/maintainability indexes, and detect risk hotspots.
 
 ---
 
@@ -24,8 +24,8 @@ Clone the repository recursively (to fetch the MCP SDK submodule) and set up the
 
 ```bash
 # Clone recursively
-git clone --recursive https://github.com/lechibang-1512/gitstats3.git
-cd gitstats3
+git clone --recursive https://github.com/lechibang-1512/pecorino.git
+cd pecorino
 
 # Create and activate virtual environment
 python3 -m venv .venv
@@ -37,7 +37,7 @@ pip install -e .
 ```
 
 ### 2. Configure Claude Desktop
-Add Gitstats3 to your `claude_desktop_config.json`:
+Add Pecorino to your `claude_desktop_config.json`:
 
 * **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 * **Linux:** `~/.config/Claude/claude_desktop_config.json`
@@ -46,17 +46,17 @@ Add Gitstats3 to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "gitstats3": {
-      "command": "/path/to/gitstats3/.venv/bin/gitstats3-mcp",
+    "pecorino": {
+      "command": "/path/to/pecorino/.venv/bin/pecorino-mcp",
       "args": ["--transport", "stdio"],
       "env": {
-        "PYTHONPATH": "/path/to/gitstats3"
+        "PYTHONPATH": "/path/to/pecorino"
       }
     }
   }
 }
 ```
-*(Replace `/path/to/gitstats3` with your actual absolute path).*
+*(Replace `/path/to/pecorino` with your actual absolute path).*
 
 ---
 
@@ -78,7 +78,7 @@ Computes design metrics, cyclomatic complexity, Halstead metrics, or risk hotspo
   - `what` *(array of strings, optional)*: Metrics to run (`"oop"`, `"complexity"`, `"hotspots"`, or `"all"`).
 
 ### 3. `/report`
-Runs a full repository scan and exports a structured JSON report directly to `<repo_name>_report/gitstats_metrics.json` inside your specified output directory.
+Runs a full repository scan and exports a structured JSON report directly to `<repo_name>_report/pecorino_metrics.json` inside your specified output directory.
 - **Parameters**:
   - `repo_path` *(string, required)*: Absolute path to the Git repository.
   - `output_path` *(string, required)*: Absolute path to the output directory.
@@ -108,17 +108,17 @@ Performs tree-sitter AST analysis and populates the DuckDB codebase index for fa
 
 ## 🖥️ Command Line Interface (CLI)
 
-You can also run Gitstats3 directly via the terminal:
+You can also run Pecorino directly via the terminal:
 
 ```bash
 # Start the stdio MCP server manually
-gitstats3-mcp --transport stdio
+pecorino-mcp --transport stdio
 
 # Start the SSE MCP server (requires Starlette & Uvicorn: pip install -e .[sse])
-gitstats3-mcp --transport sse --host 127.0.0.1 --port 8000
+pecorino-mcp --transport sse --host 127.0.0.1 --port 8000
 
 # Run a CLI analysis and save the report inside a directory
-python gitstats.py /path/to/repo /path/to/output_dir
+python pecorino.py /path/to/repo /path/to/output_dir
 ```
 
 For comprehensive CLI flags, transport details, and configuration options, see the [Local Server Deployment Guide](docs/local_server_deployment.md).

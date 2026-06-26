@@ -1,5 +1,5 @@
 """
-Export module for Gitstats3.
+Export module for Pecorino.
 
 Provides JSON and YAML export functionality for all collected metrics.
 """
@@ -53,7 +53,7 @@ class MetricsCollector:
         """Get export metadata."""
         return {
             'generated_at': datetime.datetime.now().isoformat(),
-            'gitstats_version': '3.0',
+            'pecorino_version': '3.0',
             'repository_name': getattr(self.data, 'projectname', 'unknown'),
             'repository_path': getattr(self.data, 'repository_path', 'unknown'),
         }
@@ -338,7 +338,7 @@ class MetricsExporter:
         """
         metrics = self.collector.collect_all()
 
-        filepath = os.path.join(output_path, 'gitstats_metrics.json')
+        filepath = os.path.join(output_path, 'pecorino_metrics.json')
 
         with open(filepath, 'w', encoding='utf-8') as f:
             if pretty:
@@ -370,7 +370,7 @@ class MetricsExporter:
 
         metrics = self.collector.collect_all()
 
-        filepath = os.path.join(output_path, 'gitstats_metrics.yaml')
+        filepath = os.path.join(output_path, 'pecorino_metrics.yaml')
 
         with open(filepath, 'w', encoding='utf-8') as f:
             yaml.dump(metrics, f, default_flow_style=False, allow_unicode=True, sort_keys=False)

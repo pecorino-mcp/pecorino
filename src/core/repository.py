@@ -1,5 +1,5 @@
 """
-Repository discovery module for Gitstats3.
+Repository discovery module for Pecorino.
 
 Contains functions for discovering and validating git repositories.
 """

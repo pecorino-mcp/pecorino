@@ -9,8 +9,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 import mcp_types as types
-from mcp.server.lowlevel import Server
-from mcp.server import ServerRequestContext
+from mcp.server import Server, ServerRequestContext
 
 from src.core.gitdatacollector import GitDataCollector
 from src.mcp_server.metrics import TOOL_CALLS, TOOL_DURATION, TOOL_ERRORS
@@ -420,17 +419,6 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None) 
         raise ValueError(f"Repository root outside allowed workspace: {repo_root_path}")
 
     if path.is_dir():
-        # Get request context to retrieve progress token and session
-        progress_token = None
-        if ctx and ctx.meta:
-            sys.stderr.write(f"[DEBUG] ctx.meta type: {type(ctx.meta)}, value: {ctx.meta}\n")
-            sys.stderr.flush()
-            if isinstance(ctx.meta, dict):
-                progress_token = ctx.meta.get("progressToken") or ctx.meta.get("progress_token")
-            else:
-                progress_token = getattr(ctx.meta, "progressToken", getattr(ctx.meta, "progress_token", None))
-
-
         # Spawn index_worker.py in a subprocess using same python executable
         python_bin = sys.executable or "python"
         
@@ -474,15 +462,12 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None) 
                             start_time=start_time
                         )
                         
-                        if ctx and progress_token is not None:
+                        if ctx:
                             try:
-                                req_id = str(ctx.request_id) if ctx.request_id is not None else None
-                                await ctx.session.send_progress_notification(
-                                    progress_token=progress_token,
+                                await ctx.report_progress(
                                     progress=current,
                                     total=total,
-                                    message=msg,
-                                    related_request_id=req_id
+                                    message=msg
                                 )
                             except Exception as e:
                                 sys.stderr.write(f"[WARNING] Failed to send progress notification: {e}\n")
@@ -554,7 +539,7 @@ async def handle_list_tools(
             types.Tool(
                 name="browse",
                 description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank.",
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "target": {
@@ -579,7 +564,7 @@ async def handle_list_tools(
             types.Tool(
                 name="metrics",
                 description="Calculate OOP, complexity, or hotspot metrics, with an optional report output path.",
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "target": {
@@ -601,7 +586,7 @@ async def handle_list_tools(
             types.Tool(
                 name="update_index",
                 description="Update the codebase Gorgonzola index via AST browsing and return a structural summary.",
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "target": {
@@ -630,20 +615,6 @@ async def handle_call_tool(
     TOOL_CALLS.labels(tool=name).inc()
 
     try:
-        # Refresh allowed workspace roots from MCP client
-        _cached_roots = None
-        try:
-            _cached_roots = await asyncio.wait_for(ctx.session.list_roots(), timeout=2.0)
-            if _cached_roots and _cached_roots.roots:
-                for root in _cached_roots.roots:
-                    uri = str(root.uri)
-                    resolved = uri[7:] if uri.startswith("file://") else uri
-                    root_path = Path(resolved).resolve()
-                    if root_path.exists() and root_path.is_dir():
-                        _ALLOWED_WORKSPACE_ROOTS.add(root_path)
-        except (asyncio.TimeoutError, Exception):
-            pass  # Non-critical; workspace_root is always available
-
         def _normalize_target(t: Any) -> Any:
             if isinstance(t, dict) and "target" in t:
                 t = t["target"]
@@ -660,14 +631,7 @@ async def handle_call_tool(
         async def _detect_directory(t: Any) -> str:
             """Resolve empty/None/dot targets to a real workspace path."""
             if t is None or (isinstance(t, str) and (not t.strip() or t.strip() == ".")):
-                # Use cached roots from the refresh above
-                if _cached_roots and _cached_roots.roots:
-                    uri = str(_cached_roots.roots[0].uri)
-                    resolved = uri[7:] if uri.startswith("file://") else uri
-                    sys.stderr.write(f"[INFO] Detected workspace from MCP roots: {resolved}\n")
-                    sys.stderr.flush()
-                    return resolved
-                # Fall back to workspace_root (the gitstats3 project root, always known)
+                # Fall back to workspace_root (the pecorino project root, always known)
                 fallback = str(workspace_root)
                 sys.stderr.write(f"[INFO] Using workspace_root fallback: {fallback}\n")
                 sys.stderr.flush()
@@ -747,7 +711,7 @@ async def handle_call_tool(
 
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=f"Error: {e}")],
-            isError=True
+            is_error=True
         )
 
 async def handle_list_prompts(
@@ -830,12 +794,12 @@ async def handle_completion(
                 views = ["summary", "classes", "functions", "deps", "tree", "search", "callers", "callees", "impact", "pagerank"]
                 result = types.Completion(
                     values=[v for v in views if v.startswith(argument.value.lower())],
-                    hasMore=False
+                    has_more=False
                 )
             elif argument.name == "target":
                 val = argument.value or ""
                 if ".." in val or "\x00" in val:
-                    result = types.Completion(values=[], hasMore=False)
+                    result = types.Completion(values=[], has_more=False)
                 else:
                     matches = glob.glob(val + "*") + glob.glob(val + "**/*", recursive=True)
                     files = []
@@ -848,23 +812,23 @@ async def handle_completion(
                             files.append(m)
                         if len(files) >= 50:
                             break
-                    result = types.Completion(values=sorted(files)[:20], hasMore=len(files) > 20)
+                    result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
 
         elif ref.name == "metrics":
             if argument.name == "what":
                 whats = ["oop", "complexity", "hotspots", "all"]
                 result = types.Completion(
                     values=[w for w in whats if w.startswith(argument.value.lower())],
-                    hasMore=False
+                    has_more=False
                 )
             elif argument.name == "target":
                 val = argument.value or ""
                 if ".." in val or "\x00" in val:
-                    result = types.Completion(values=[], hasMore=False)
+                    result = types.Completion(values=[], has_more=False)
                 else:
                     matches = glob.glob(val + "*")
                     paths = sorted(matches)[:20]
-                    result = types.Completion(values=paths, hasMore=len(matches) > 20)
+                    result = types.Completion(values=paths, has_more=len(matches) > 20)
 
 
 
@@ -872,7 +836,7 @@ async def handle_completion(
             if argument.name == "target":
                 val = argument.value or ""
                 if ".." in val or "\x00" in val:
-                    result = types.Completion(values=[], hasMore=False)
+                    result = types.Completion(values=[], has_more=False)
                 else:
                     matches = glob.glob(val + "*") + glob.glob(val + "**/*", recursive=True)
                     files = []
@@ -885,10 +849,10 @@ async def handle_completion(
                             files.append(m)
                         if len(files) >= 50:
                             break
-                    result = types.Completion(values=sorted(files)[:20], hasMore=len(files) > 20)
+                    result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
 
     return types.CompleteResult(
-        completion=result if result is not None else types.Completion(values=[], total=None, hasMore=None)
+        completion=result if result is not None else types.Completion(values=[], total=None, has_more=None)
     )
 
 
