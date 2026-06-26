@@ -297,8 +297,45 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     return result
 
 
-async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
+async def do_metrics(target: str, what: List[str] = ["all"], output_path: Optional[str] = None) -> dict:
     path = safe_path(target)
+    if output_path:
+        safe_out = safe_output_path(output_path)
+        safe_out.parent.mkdir(parents=True, exist_ok=True)
+        if (path / ".git").exists():
+            from src.core.config import conf
+            conf['calculate_mi_per_repository'] = True
+
+            data = GitDataCollector()
+            await asyncio.to_thread(data.collect, str(path))
+            await asyncio.to_thread(data.calculate_mi_for_repository, str(path))
+            await asyncio.to_thread(data.calculate_mccabe_for_repository, str(path))
+            await asyncio.to_thread(data.calculate_halstead_for_repository, str(path))
+            await asyncio.to_thread(data.calculate_oop_for_repository, str(path))
+            await asyncio.to_thread(data.refine)
+
+            detector = HotspotDetector(data)
+            hotspots = await asyncio.to_thread(detector.analyze)
+            summary = detector.get_summary()
+
+            from src.utils.export import MetricsExporter
+            exporter = MetricsExporter(data, {"hotspots": hotspots, "summary": summary})
+            out_dir = safe_out.parent
+            json_file = await asyncio.to_thread(exporter.export_json, str(out_dir))
+            generated_path = Path(json_file)
+            if generated_path.resolve() != safe_out.resolve():
+                import shutil
+                await asyncio.to_thread(shutil.move, str(generated_path), str(safe_out))
+        else:
+            sub_res = await do_metrics(target=target, what=what, output_path=None)
+            import json
+            await asyncio.to_thread(safe_out.write_text, json.dumps(sub_res, indent=2))
+
+        return {
+            "status": "success",
+            "report_path": safe_out.as_posix()
+        }
+
     from src.mcp_server.index import find_repo_root
     repo_root = find_repo_root(str(path))
     what_set = {w.lower() for w in what if w.lower() in ALLOWED_WHAT}
@@ -370,43 +407,6 @@ async def do_metrics(target: str, what: List[str] = ["all"]) -> dict:
         result["hotspots"] = hotspots[:30]
 
     return result
-
-async def do_report(repo_path: str, output_path: str) -> dict:
-    path = safe_path(repo_path)
-    if not (path/".git").exists():
-        raise ValueError(f"Not a git repository: {path}")
-
-    import re
-    repo_name = path.name
-    safe_repo_name = re.sub(r'[<>:"/\\|?*]', '_', repo_name).strip('. ')
-    if not safe_repo_name:
-        safe_repo_name = 'unnamed_repo'
-
-    out_dir = ALLOWED_OUTPUT / f"{safe_repo_name}_report"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    from src.core.config import conf
-    conf['calculate_mi_per_repository'] = True
-
-    data = GitDataCollector()
-    await asyncio.to_thread(data.collect, str(path))
-    await asyncio.to_thread(data.calculate_mi_for_repository, str(path))
-    await asyncio.to_thread(data.calculate_mccabe_for_repository, str(path))
-    await asyncio.to_thread(data.calculate_halstead_for_repository, str(path))
-    await asyncio.to_thread(data.calculate_oop_for_repository, str(path))
-    await asyncio.to_thread(data.refine)
-
-    detector = HotspotDetector(data)
-    hotspots = await asyncio.to_thread(detector.analyze)
-    summary = detector.get_summary()
-
-    exporter = MetricsExporter(data, {"hotspots": hotspots, "summary": summary})
-    json_file = await asyncio.to_thread(exporter.export_json, str(out_dir))
-
-    return {
-        "status": "success",
-        "report_path": json_file
-    }
 
 async def do_update_index(target: str, ctx: ServerRequestContext | None = None) -> dict:
     clear_api_cache()
@@ -578,7 +578,7 @@ async def handle_list_tools(
             ),
             types.Tool(
                 name="metrics",
-                description="Calculate OOP, complexity, or hotspot metrics.",
+                description="Calculate OOP, complexity, or hotspot metrics, with an optional report output path.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -590,23 +590,12 @@ async def handle_list_tools(
                             "type": "array",
                             "items": {"type": "string"},
                             "default": ["all"]
+                        },
+                        "output_path": {
+                            "type": "string",
+                            "description": "Optional file path to export the report to disk. If provided, saves the analysis to this path."
                         }
                     }
-                }
-            ),
-            types.Tool(
-                name="report",
-                description="Generate and export a full analysis report to disk.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "repo_path": {
-                            "type": "string",
-                            "description": "Absolute path to the target repository. Optional. Defaults to the current workspace root."
-                        },
-                        "output_path": {"type": "string"}
-                    },
-                    "required": ["output_path"]
                 }
             ),
             types.Tool(
@@ -711,19 +700,14 @@ async def handle_call_tool(
             if not isinstance(target, str):
                 raise ValueError("target must be a string")
             _check_suspicious(target, "target")
+            output_path = arguments.get("output_path")
+            if output_path:
+                if not isinstance(output_path, str):
+                    raise ValueError("output_path must be a string")
+                _check_suspicious(output_path, "output_path")
             res = await do_metrics(
                 target=target,
-                what=arguments.get("what", ["all"])
-            )
-        elif name == "report":
-            repo_path = await _detect_directory(arguments.get("repo_path"))
-            output_path = arguments.get("output_path")
-            if not isinstance(repo_path, str) or not isinstance(output_path, str):
-                raise ValueError("repo_path and output_path must be strings")
-            _check_suspicious(repo_path, "repo_path")
-            _check_suspicious(output_path, "output_path")
-            res = await do_report(
-                repo_path=repo_path,
+                what=arguments.get("what", ["all"]),
                 output_path=output_path
             )
         elif name == "update_index":
@@ -785,15 +769,8 @@ async def handle_list_prompts(
                 description="Calculate OOP, complexity, or hotspot metrics.",
                 arguments=[
                     types.PromptArgument(name="target", description="Target path", required=False),
-                    types.PromptArgument(name="what", description="What to measure (oop, complexity, hotspots, all)", required=False)
-                ]
-            ),
-            types.Prompt(
-                name="report",
-                description="Export a full analysis report to disk.",
-                arguments=[
-                    types.PromptArgument(name="repo_path", description="Repository path", required=False),
-                    types.PromptArgument(name="output_path", description="Output JSON report path", required=True)
+                    types.PromptArgument(name="what", description="What to measure (oop, complexity, hotspots, all)", required=False),
+                    types.PromptArgument(name="output_path", description="Optional file path to export the report to disk", required=False)
                 ]
             ),
             types.Prompt(
@@ -823,16 +800,13 @@ async def handle_get_prompt(
     elif name == "metrics":
         target = arguments.get("target", "")
         what = arguments.get("what", "all")
+        output_path = arguments.get("output_path")
+        msg = f"Please calculate '{what}' metrics for the target '{target}'."
+        if output_path:
+            msg += f" Export the report to '{output_path}'."
         return types.GetPromptResult(
             description="Calculate metrics",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please calculate '{what}' metrics for the target '{target}'."))]
-        )
-    elif name == "report":
-        repo_path = arguments.get("repo_path", "")
-        output_path = arguments.get("output_path", "")
-        return types.GetPromptResult(
-            description="Generate report",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please generate and export an analysis report for '{repo_path}' to '{output_path}'."))]
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=msg))]
         )
     elif name == "update_index":
         target = arguments.get("target", "")
@@ -892,15 +866,7 @@ async def handle_completion(
                     paths = sorted(matches)[:20]
                     result = types.Completion(values=paths, hasMore=len(matches) > 20)
 
-        elif ref.name == "report":
-            if argument.name == "repo_path":
-                val = argument.value or ""
-                if ".." in val or "\x00" in val:
-                    result = types.Completion(values=[], hasMore=False)
-                else:
-                    matches = [m for m in glob.glob(val + "*") if os.path.isdir(m)]
-                    paths = sorted(matches)[:20]
-                    result = types.Completion(values=paths, hasMore=len(matches) > 20)
+
 
         elif ref.name == "update_index":
             if argument.name == "target":

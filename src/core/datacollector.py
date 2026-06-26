@@ -6,6 +6,7 @@ Contains the base DataCollector class with repository metrics collection.
 
 import datetime
 import os
+import sys
 import pickle
 import re
 import time

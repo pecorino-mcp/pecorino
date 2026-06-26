@@ -224,7 +224,9 @@ class DockerRuntime:
             return status
 
         except Exception as e:
-            return {"worker_id": worker_id, "status": "error", "error": str(e)}
+            sys.stderr.write(f"[ERROR] Error waiting for container {worker_id}: {str(e)}\n")
+            sys.stderr.flush()
+            return {"worker_id": worker_id, "status": "error", "error": "An error or timeout occurred during container execution"}
 
     def _ensure_image(self, image: str):
         """Pull the base image if not available locally."""

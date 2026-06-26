@@ -64,18 +64,22 @@ class GitDataCollector(DataCollector):
 		# tags
 		lines = getpipeoutput(['git show-ref --tags']).split('\n')
 		for line in lines:
-			if len(line) == 0:
+			line = line.strip()
+			if not line:
 				continue
-			(hash, tag) = line.split(' ')
+			parts = line.split(' ', 1)
+			if len(parts) < 2:
+				continue
+			hash, tag = parts[0], parts[1]
 
 			tag = tag.replace('refs/tags/', '')
 			output = getpipeoutput(['git log "%s" --pretty=format:"%%at %%aN" -n 1' % hash])
 			if len(output) > 0:
-				parts = output.split(' ')
+				parts = output.split(' ', 1)
 				stamp = 0
 				try:
 					stamp = int(parts[0])
-				except ValueError:
+				except (ValueError, IndexError):
 					stamp = 0
 				self.tags[tag] = { 'stamp': stamp, 'hash' : hash, 'date' : datetime.datetime.fromtimestamp(stamp).strftime('%Y-%m-%d'), 'commits': 0, 'authors': {} }
 
@@ -91,24 +95,39 @@ class GitDataCollector(DataCollector):
 				continue
 			prev = tag
 			for line in output.split('\n'):
-				parts = re.split(r'\s+', line, maxsplit=2)
-				commits = int(parts[1])
-				author = parts[2]
-				self.tags[tag]['commits'] += commits
-				self.tags[tag]['authors'][author] = commits
+				line = line.strip()
+				if not line:
+					continue
+				parts = re.split(r'\s+', line, maxsplit=1)
+				if len(parts) < 2:
+					continue
+				try:
+					commits = int(parts[0])
+					author = parts[1]
+					self.tags[tag]['commits'] += commits
+					self.tags[tag]['authors'][author] = commits
+				except ValueError:
+					continue
 
 		# Collect revision statistics
 		# Outputs "<stamp> <date> <time> <timezone> <author> '<' <mail> '>'"
 		first_parent_flag = get_first_parent_flag()
 		lines = getpipeoutput(['git rev-list %s --pretty=format:"%%at %%ai %%aN <%%aE>" %s' % (first_parent_flag, getlogrange('HEAD')), 'grep -v ^commit']).split('\n')
 		for line in lines:
+			line = line.strip()
+			if not line:
+				continue
 			parts = line.split(' ', 4)
+			if len(parts) < 5:
+				continue
 			author = ''
 			try:
 				stamp = int(parts[0])
 			except ValueError:
 				stamp = 0
 			timezone = parts[3]
+			if '<' not in parts[4]:
+				continue
 			author, mail = parts[4].split('<', 1)
 			author = author.rstrip()
 			mail = mail.rstrip('>')

@@ -268,7 +268,25 @@ def _resolve_source(name: str, source: str) -> str:
         return str(clone_dir)
 
     # Local path
-    source_path = Path(source).expanduser().resolve()
+    try:
+        source_path = Path(source).expanduser().resolve()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid source path")
+
+    # Validate resolved path is within allowed directories to prevent path injection
+    project_root = Path(__file__).resolve().parent.parent.parent
+    allowed_roots = [
+        project_root,
+        settings.base_dir.resolve(),
+        Path("/tmp").resolve()
+    ]
+
+    if not any(source_path.is_relative_to(root) for root in allowed_roots):
+        raise HTTPException(
+            status_code=400,
+            detail="Access denied: local source path must reside within workspace, project root, or /tmp"
+        )
+
     if not source_path.exists():
         raise HTTPException(status_code=400, detail=f"Source path does not exist: {source}")
 
