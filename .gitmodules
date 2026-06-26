@@ -1,7 +1,7 @@
 [submodule "python-sdk"]
 	path = modules/python-sdk
 	url = https://github.com/modelcontextprotocol/python-sdk
-	branch = master
+	branch = main
 
 [submodule "tree-sitter"]
 	path = modules/tree-sitter
