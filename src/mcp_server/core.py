@@ -82,7 +82,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
     # Initialize GraphAPI if view is a graph-related view
     api = None
-    if view in ("callers", "callees", "impact", "summary", "deps"):
+    if view in ("callers", "callees", "impact", "summary", "deps", "pagerank"):
         api = _get_cached_api(repo_root, db_path, "graph")
 
     if view == "callers":
@@ -101,6 +101,13 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         deps = await asyncio.to_thread(api.impact_analysis, path.as_posix(), max_depth)
         return {"status": "success", "target": path.as_posix(), "dependent_files": deps}
 
+    if view == "pagerank":
+        pr_scores = await asyncio.to_thread(api.graph.pagerank)
+        filtered_pr = [pr for pr in pr_scores if pr.get("node_id", "").startswith(path.as_posix())]
+        filtered_pr.sort(key=lambda x: x.get("score", 0), reverse=True)
+        top_pr = filtered_pr[:limit]
+        return {"status": "success", "target": path.as_posix(), "pagerank": top_pr}
+
     if view == "search":
         if not query:
             raise ValueError("Query is required for search view")
@@ -109,7 +116,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
 
     if path.is_dir():
-        if view not in ["summary", "search", "callers", "callees"]:
+        if view not in ["summary", "search", "callers", "callees", "pagerank"]:
             raise ValueError(f"View '{view}' is only supported for specific files, not directories.")
 
         nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
@@ -148,12 +155,12 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
         if view == "classes":
             result["structure"] = [
-                {"name": n['name'], "line": n['start_line'], "metrics": n.get('metrics', {})}
+                {"name": n['name'], "line": n['start_line']}
                 for n in nodes if n['node_type'] in ('class', 'interface')
             ]
         elif view == "functions":
             result["structure"] = [
-                {"name": n['name'], "cc": n.get('metrics', {}).get('cyclomatic_complexity', 1), "line": n['start_line']}
+                {"name": n['name'], "line": n['start_line']}
                 for n in nodes if n['node_type'] in ('function', 'method')
             ]
         else: # summary
@@ -460,7 +467,7 @@ async def handle_list_tools() -> types.ListToolsResult:
         tools=[
             types.Tool(
                 name="browse",
-                description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact.",
+                description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -700,7 +707,7 @@ async def handle_completion(
     if isinstance(ref, types.PromptReference):
         if ref.name == "browse":
             if argument.name == "view":
-                views = ["summary", "classes", "functions", "deps", "tree", "search"]
+                views = ["summary", "classes", "functions", "deps", "tree", "search", "callers", "callees", "impact", "pagerank"]
                 result = types.Completion(
                     values=[v for v in views if v.startswith(argument.value.lower())],
                     hasMore=False
