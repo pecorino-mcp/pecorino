@@ -33,11 +33,9 @@ def create_base_app(title: str) -> FastAPI:
 
 async def run_sse(mcp_server):
     from mcp.server.sse import SseServerTransport
-    from mcp.server.models import InitializationOptions
-    from mcp.server.lowlevel import NotificationOptions
     
     transport = SseServerTransport("/messages/")
-    app = create_base_app("gitstats3 MCP Server (SSE)")
+    app = create_base_app("pecorino MCP Server (SSE)")
 
     async def handle_sse(request: Request):
         ACTIVE_SESSIONS.inc()
@@ -61,7 +59,7 @@ async def run_sse(mcp_server):
 
 
 async def run_streamable_http(mcp_server):
-    app = create_base_app("gitstats3 MCP Server (Streamable HTTP)")
+    app = create_base_app("pecorino MCP Server (Streamable HTTP)")
 
     streamable_app = mcp_server.streamable_http_app(
         streamable_http_path="/",

@@ -1,5 +1,5 @@
 """
-Configuration module for Gitstats3.
+Configuration module for Pecorino.
 
 Provides a dataclass-based configuration with sensible defaults
 and a global configuration accessor.
@@ -14,12 +14,12 @@ from src.core.constants import ALLOWED_EXTENSIONS
 
 @dataclass
 class GitStatsConfig:
-    """Configuration settings for gitstats3 analysis."""
+    """Configuration settings for pecorino analysis."""
 
     # Display settings
     max_domains: int = 10
     max_ext_length: int = 10
-    style: str = 'gitstats.css'
+    style: str = 'pecorino.css'
     max_authors: int = 20
     authors_top: int = 5
 

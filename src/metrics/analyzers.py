@@ -1,5 +1,5 @@
 """
-Analyzer functions for Gitstats3.
+Analyzer functions for Pecorino.
 
 Contains functions for analyzing files, blobs, and SLOC that were previously
 in the main module but caused circular dependencies when used by collectors.

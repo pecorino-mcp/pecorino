@@ -1,5 +1,5 @@
 """
-Maintainability Index calculator for Gitstats3.
+Maintainability Index calculator for Pecorino.
 
 Implements the Maintainability Index (MI) metric based on:
 - Lines of Code (LOC)

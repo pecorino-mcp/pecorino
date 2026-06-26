@@ -1,7 +1,7 @@
 """
-Helper utility functions for Gitstats3.
+Helper utility functions for Pecorino.
 
-Contains constants and utility functions extracted from the monolithic gitstats.py.
+Contains constants and utility functions extracted from the monolithic pecorino.py.
 """
 
 import os

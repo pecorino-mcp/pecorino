@@ -1,4 +1,4 @@
-# GitStats3 Pipeline Architecture
+# Pecorino Pipeline Architecture
 
 This document outlines the end-to-end pipeline of how source code is discovered, parsed, tagged with metrics, and mapped to the underlying DuckDB and Gorgonzola (KuzuDB) databases.
 
@@ -37,5 +37,5 @@ The relationships are mapped to a KuzuDB graph (wrapped by `gorgonzola_graph.py`
   - `EXTENDS` / `IMPLEMENTS` (Class → Class, Class → Interface)
 
 ## 5. Persistent Sync & Querying
-Upon successful ingestion in RAM, the `.duckdb` file and `_gorgonzola` directory are flushed to `~/.gitstats3/indexes/<repo_hash>_...` in a single sequential SSD write.
+Upon successful ingestion in RAM, the `.duckdb` file and `_gorgonzola` directory are flushed to `~/.pecorino/indexes/<repo_hash>_...` in a single sequential SSD write.
 When the `browse` MCP tool queries the data (e.g., `view='classes'`), it utilizes connection caching in `core.py` to maintain a persistent, read-only lock on the database, allowing sub-50ms retrieval of indexed files and their associated OOP metrics.

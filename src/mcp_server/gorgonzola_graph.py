@@ -154,7 +154,7 @@ class GorgonzolaGraph:
         if isinstance(v, dict):
             if ("_label" in v and "_id" in v) or ("_LABEL" in v and "_ID" in v):
                 label_key = "_label" if "_label" in v else "_LABEL"
-                properties = {key: val for key, val in v.items() if not key.startswith("_")}
+                properties = {key: val for key, val in v.items() if not key.startswith("_") and val is not None}
                 return {
                     "properties": properties,
                     "labels": [v[label_key]],
@@ -162,7 +162,7 @@ class GorgonzolaGraph:
                 }
             elif ("_src" in v and "_dst" in v) or ("_SRC" in v and "_DST" in v):
                 label_key = "_label" if "_label" in v else "_LABEL"
-                properties = {key: val for key, val in v.items() if not key.startswith("_")}
+                properties = {key: val for key, val in v.items() if not key.startswith("_") and val is not None}
                 return {
                     "properties": properties,
                     "type": v.get(label_key, "Unknown")

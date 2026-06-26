@@ -1,5 +1,5 @@
 """
-Command-line interface module for Gitstats3.
+Command-line interface module for Pecorino.
 
 Contains the GitStats CLI class and usage functions.
 """
@@ -29,8 +29,8 @@ from src.core.repository import discover_repositories
 
 def usage():
 	print("""
-Usage: gitstats [options] <gitpath..> <outputpath>
-       gitstats [options] --multi-repo <scan-folder> <outputpath>
+Usage: pecorino [options] <gitpath..> <outputpath>
+       pecorino [options] --multi-repo <scan-folder> <outputpath>
 
 Options:
 -c key=value     Override configuration value
@@ -44,10 +44,10 @@ Options:
 Note: GitStats generates structured JSON reports with detailed statistics.
 
 Examples:
-  gitstats repo output                    # Generates JSON report
-  gitstats --verbose repo output          # With verbose output
-  gitstats --multi-repo /path/to/repos output  # Generate reports for all repos found recursively
-  gitstats --debug -c max_authors=50 repo output
+  pecorino repo output                    # Generates JSON report
+  pecorino --verbose repo output          # With verbose output
+  pecorino --multi-repo /path/to/repos output  # Generate reports for all repos found recursively
+  pecorino --debug -c max_authors=50 repo output
 """)
 
 
@@ -341,7 +341,7 @@ class GitStats:
 				safe_repo_name = self._sanitize_filename(repo_name)
 				if not any(repo_name == failed[0] for failed in failed_reports):
 					report_path = os.path.join(base_outputpath, f'{safe_repo_name}_report')
-					print(f'  - {repo_name}: {report_path}/gitstats_metrics.json')
+					print(f'  - {repo_name}: {report_path}/pecorino_metrics.json')
 
 			summary_path = os.path.join(base_outputpath, 'multi_repo_summary.json')
 			if os.path.exists(summary_path):
@@ -444,7 +444,7 @@ class GitStats:
 			for repo_name, repo_path, repo_type in repositories:
 				if not any(repo_name == failed[0] for failed in failed_reports):
 					safe_repo_name = self._sanitize_filename(repo_name)
-					report_file = os.path.join(base_outputpath, f'{safe_repo_name}_report', 'gitstats_metrics.json')
+					report_file = os.path.join(base_outputpath, f'{safe_repo_name}_report', 'pecorino_metrics.json')
 					summary_data['repositories'].append({
 						'name': repo_name,
 						'path': repo_path,
@@ -557,7 +557,7 @@ class GitStats:
 			print('Git path: %s' % gitpath)
 			print('Output path: %s' % outputpath)
 
-			cachefile = os.path.join(outputpath, 'gitstats.cache')
+			cachefile = os.path.join(outputpath, 'pecorino.cache')
 
 			data = GitDataCollector()
 			data.loadCache(cachefile)
@@ -660,7 +660,7 @@ class GitStats:
 
 			if sys.stdin.isatty():
 				print('Report has been generated at:')
-				print(f'  {os.path.join(outputpath, "gitstats_metrics.json")}')
+				print(f'  {os.path.join(outputpath, "pecorino_metrics.json")}')
 				print()
 		else:
 			# For multiple repositories, show the base path
@@ -810,7 +810,7 @@ class GitStats:
 		if not is_git_repository(repo_path):
 			raise ValueError(f"Path is not a valid git repository: {repo_path}")
 
-		cachefile = os.path.join(output_path, 'gitstats.cache')
+		cachefile = os.path.join(output_path, 'pecorino.cache')
 
 		# Initialize data collector with proper cleanup
 		data = None

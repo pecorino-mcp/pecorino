@@ -40,7 +40,7 @@ def verify_oauth_token(request: Request) -> dict:
         )
 
     if payload.get("iss") != settings.oauth_issuer:
-        sys.stderr.write(f"[AUTH ERROR] Issuer mismatch: expected {settings.oauth_issuer}, got {payload.get('iss')}\n")
+        sys.stderr.write("[AUTH ERROR] Issuer mismatch\n")
         sys.stderr.flush()
         raise HTTPException(
             status_code=401, 
@@ -53,7 +53,7 @@ def verify_oauth_token(request: Request) -> dict:
         resources = [resources]
 
     if settings.oauth_resource not in resources:
-        sys.stderr.write(f"[AUTH ERROR] Resource mismatch: expected {settings.oauth_resource} in {resources}\n")
+        sys.stderr.write("[AUTH ERROR] Resource mismatch\n")
         sys.stderr.flush()
         raise HTTPException(
             status_code=403, 

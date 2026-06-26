@@ -1,11 +1,12 @@
 """
-Data collector module for Gitstats3.
+Data collector module for Pecorino.
 
 Contains the base DataCollector class with repository metrics collection.
 """
 
 import datetime
 import os
+import sys
 import pickle
 import re
 import time

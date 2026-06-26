@@ -23,7 +23,7 @@ def find_repo_root(filepath: str) -> str:
 
 def get_indexes_dir() -> str:
     """Get the centralized indexes directory."""
-    indexes_dir = os.path.expanduser("~/.gitstats3/indexes")
+    indexes_dir = os.path.expanduser("~/.pecorino/indexes")
     os.makedirs(indexes_dir, exist_ok=True)
     return indexes_dir
 
