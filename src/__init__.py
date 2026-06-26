@@ -1,5 +1,5 @@
 """
-Gitstats3 - Modular Git Repository Statistics Package
+Pecorino - Modular Git Repository Statistics Package
 
 This package provides comprehensive git repository analysis and HTML report generation.
 All functionality is organized into focused modules for better maintainability.

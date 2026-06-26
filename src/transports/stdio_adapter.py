@@ -1,8 +1,6 @@
 import io
 import sys
 import anyio
-from mcp.server.models import InitializationOptions
-from mcp.server.lowlevel import NotificationOptions
 
 async def run_stdio(mcp_server):
     import mcp.server.stdio

@@ -1,6 +1,6 @@
-# Gitstats3 Performance Optimizations
+# Pecorino Performance Optimizations
 
-This document details the performance bottlenecks, their root causes, and the corresponding optimizations applied to the Gitstats3 codebase indexing pipeline. These issues are organized into two primary categories: **Excessive I/O Writes** and **Multiple Database Connections for Single Tasks**.
+This document details the performance bottlenecks, their root causes, and the corresponding optimizations applied to the Pecorino codebase indexing pipeline. These issues are organized into two primary categories: **Excessive I/O Writes** and **Multiple Database Connections for Single Tasks**.
 
 ---
 
@@ -153,7 +153,7 @@ The indexing pipeline follows this sequence:
 | **Commit** | `e9176b8` |
 | **Problem** | The original `graphqlite` backend lacked bulk import capabilities and had limited query performance. |
 | **Solution** | Replaced `graphqlite` with Gorgonzola (a Kùzu-based graph database wrapper). Gorgonzola supports `COPY FROM` bulk CSV loading, Cypher queries, and native graph traversal (`RECURSIVE_REL`). |
-| **Note** | `RECURSIVE_REL` is available in the Gorgonzola API but is **not currently used** by gitstats3. Variable-length path traversals (e.g., transitive impact analysis) use explicit `*1..N` depth syntax in Cypher instead. Global dependency scoring uses `networkx.pagerank()` rather than the graph engine's native recursive relationships. |
+| **Note** | `RECURSIVE_REL` is available in the Gorgonzola API but is **not currently used** by pecorino. Variable-length path traversals (e.g., transitive impact analysis) use explicit `*1..N` depth syntax in Cypher instead. Global dependency scoring uses `networkx.pagerank()` rather than the graph engine's native recursive relationships. |
 
 ---
 

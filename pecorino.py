@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gitstats3 - Git repository statistics generator.
+Pecorino - Git repository statistics generator.
 
 This is the main entry point. All functionality is in the src/ package.
 """
@@ -9,7 +9,7 @@ import sys
 
 # Version check
 if sys.version_info < (3, 6):
-    print("Python 3.6 or higher is required for gitstats", file=sys.stderr)
+    print("Python 3.6 or higher is required for pecorino", file=sys.stderr)
     sys.exit(1)
 
 # Import everything from the src package for backward compatibility

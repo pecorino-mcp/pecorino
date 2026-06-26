@@ -1,5 +1,5 @@
 """
-Hotspot detection module for Gitstats3.
+Hotspot detection module for Pecorino.
 
 Identifies high-risk code areas by combining:
 - Churn frequency (files with frequent modifications)

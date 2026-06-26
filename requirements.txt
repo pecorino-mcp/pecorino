@@ -6,7 +6,7 @@ fastapi
 PyJWT
 prometheus_client
 
--e ./modules/python-sdk
+git+https://github.com/modelcontextprotocol/python-sdk.git@ac36a395aa23f3e39e8bb628db3e07855f8d8c62
 
 pytest>=7.0.0
 pytest-asyncio

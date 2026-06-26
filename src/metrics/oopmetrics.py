@@ -18,7 +18,7 @@ Zone Interpretations:
 - 0.2 <= D <= 0.4: Moderate - May need refactoring
 - D > 0.4: Poor - Design issues (Zone of Pain or Zone of Uselessness)
 
-Author: GitStats3 Enhancement
+Author: Pecorino Enhancement
 Date: 2025
 """
 
