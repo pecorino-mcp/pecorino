@@ -61,12 +61,50 @@ class FunctionDef(ASTNode):
     body_end: int = 0
     cyclomatic_complexity: int = 1
     called_methods: Set[str] = field(default_factory=set)
-    accessed_attributes: Set[str] = field(default_factory=set)
+    read_attributes: Set[str] = field(default_factory=set)
+    mutated_attributes: Set[str] = field(default_factory=set)
+    tainted_attributes: Set[str] = field(default_factory=set)
     parameter_types: List[str] = field(default_factory=list)
+    statements: List['ControlFlowDef'] = field(default_factory=list)
+    lambdas: List['LambdaDef'] = field(default_factory=list)
 
     @property
     def _fields(self) -> tuple:
-        return ('name', 'args', 'decorators')
+        return ('name', 'args', 'decorators', 'statements')
+
+
+@dataclass
+class ControlFlowDef(ASTNode):
+    """Represents a control flow structure (loop, branch)."""
+    name: str = ""
+    type: str = "" # "loop" or "branch"
+    called_methods: Set[str] = field(default_factory=set)
+    read_attributes: Set[str] = field(default_factory=set)
+    mutated_attributes: Set[str] = field(default_factory=set)
+    tainted_attributes: Set[str] = field(default_factory=set)
+    statements: List['ControlFlowDef'] = field(default_factory=list)
+    lambdas: List['LambdaDef'] = field(default_factory=list)
+
+    @property
+    def _fields(self) -> tuple:
+        return ('statements', 'lambdas')
+
+
+@dataclass
+class LambdaDef(ASTNode):
+    """Represents an anonymous function or lambda."""
+    name: str = ""
+    captures: List[str] = field(default_factory=list)
+    called_methods: Set[str] = field(default_factory=set)
+    read_attributes: Set[str] = field(default_factory=set)
+    mutated_attributes: Set[str] = field(default_factory=set)
+    tainted_attributes: Set[str] = field(default_factory=set)
+    statements: List['ControlFlowDef'] = field(default_factory=list)
+    lambdas: List['LambdaDef'] = field(default_factory=list)
+
+    @property
+    def _fields(self) -> tuple:
+        return ('statements', 'lambdas')
 
 
 @dataclass

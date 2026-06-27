@@ -75,6 +75,19 @@ ALLOWED_EXTENSIONS: Set[str] = {
 
 
 # ============================================================================
+# SUPPORTED EXTENSIONS (MCP SERVER / TREE-SITTER)
+# ============================================================================
+# The subset of ALLOWED_EXTENSIONS that are supported by the MCP server's
+# Tree-sitter parser and indexing pipeline. This is the single source of truth
+# used by core.py, index_db.py, and index_pipeline.py.
+
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
+    '.py', '.pyi', '.java', '.scala', '.kt', '.js', '.jsx', '.ts', '.tsx',
+    '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.hxx', '.go', '.rs', '.swift'
+})
+
+
+# ============================================================================
 # LANGUAGE KEYWORDS
 # ============================================================================
 # Keywords for each supported programming language.

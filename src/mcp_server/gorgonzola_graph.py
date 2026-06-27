@@ -11,6 +11,9 @@ _NODE_COLUMNS = {
     "Interface": ["id", "name", "filepath", "start_line", "end_line"],
     "Symbol": ["id", "name"],
     "Module": ["id", "name"],
+    "ControlFlow": ["id", "name", "type"],
+    "Lambda": ["id", "name"],
+    "Variable": ["id", "name"],
 }
 
 # Columns that should default to 0 instead of empty string when missing
@@ -37,13 +40,19 @@ def init_gorgonzola_schema(conn):
             "CREATE NODE TABLE Interface (id STRING, name STRING, filepath STRING, start_line INT64, end_line INT64, PRIMARY KEY (id))",
             "CREATE NODE TABLE Symbol (id STRING, name STRING, PRIMARY KEY (id))",
             "CREATE NODE TABLE Module (id STRING, name STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE ControlFlow (id STRING, name STRING, type STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE Lambda (id STRING, name STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE Variable (id STRING, name STRING, PRIMARY KEY (id))",
 
             # Create relationship tables
-            "CREATE REL TABLE CONTAINS (FROM File TO Class, FROM Class TO Method, FROM Class TO Function, FROM Class TO Class, FROM File TO Interface, FROM Interface TO Method, FROM File TO Function, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class)",
+            "CREATE REL TABLE CONTAINS (FROM File TO Class, FROM Class TO Method, FROM Class TO Function, FROM Class TO Class, FROM File TO Interface, FROM Interface TO Method, FROM File TO Function, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class, FROM Method TO ControlFlow, FROM Function TO ControlFlow, FROM ControlFlow TO ControlFlow)",
+            "CREATE REL TABLE CONTAINS_LAMBDA (FROM Method TO Lambda, FROM Function TO Lambda, FROM ControlFlow TO Lambda, FROM Lambda TO Lambda)",
             "CREATE REL TABLE EXTENDS (FROM Class TO Symbol, FROM Class TO Class)",
             "CREATE REL TABLE IMPLEMENTS (FROM Class TO Symbol, FROM Class TO Interface)",
-            "CREATE REL TABLE CALLS (FROM Method TO Symbol, FROM Method TO Method, FROM Method TO Function, FROM Function TO Symbol, FROM Function TO Method, FROM Function TO Function)",
-            "CREATE REL TABLE DEPENDS_ON (FROM File TO File, FROM File TO Module)"
+            "CREATE REL TABLE CALLS (FROM Method TO Symbol, FROM Method TO Method, FROM Method TO Function, FROM Function TO Symbol, FROM Function TO Method, FROM Function TO Function, FROM ControlFlow TO Symbol, FROM ControlFlow TO Method, FROM ControlFlow TO Function, FROM Lambda TO Symbol, FROM Lambda TO Method, FROM Lambda TO Function, FROM Method TO Lambda, FROM Function TO Lambda)",
+            "CREATE REL TABLE RECURSES_TO (FROM Method TO Method, FROM Function TO Function)",
+            "CREATE REL TABLE DEPENDS_ON (FROM File TO File, FROM File TO Module)",
+            "CREATE REL TABLE ACCESSES_STATE (FROM Method TO Variable, FROM Function TO Variable, FROM ControlFlow TO Variable, FROM Lambda TO Variable, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
         ]
         for q in queries:
             r = conn.execute(q)
@@ -107,7 +116,7 @@ class GorgonzolaGraph:
     def _get_node_label(self, node_id: str, conn) -> str:
         if node_id in self._label_cache:
             return self._label_cache[node_id]
-        tables = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module"]
+        tables = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module", "ControlFlow", "Lambda", "Variable"]
         for t in tables:
             res = conn.execute(f"MATCH (n:{t} {{id: $id}}) RETURN label(n) AS lbl", {"id": node_id})
             lbl = None
@@ -268,20 +277,26 @@ class GorgonzolaGraph:
                 continue
 
             key = (rel_type, src_label, dst_label)
-            groups.setdefault(key, []).append((src_id, dst_id))
+            groups.setdefault(key, []).append((src_id, dst_id, properties))
 
         csv_dir = self._get_csv_dir()
 
-        for (rel_type, src_label, dst_label), pairs in groups.items():
+        for (rel_type, src_label, dst_label), items in groups.items():
             csv_path = os.path.join(csv_dir, f"_bulk_edges_{rel_type}_{src_label}_{dst_label}.csv")
             try:
                 with open(csv_path, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-                    for src_id, dst_id in pairs:
-                        writer.writerow([
+                    for src_id, dst_id, props in items:
+                        row = [
                             str(src_id).replace('\n', ' ').replace('\r', ''),
                             str(dst_id).replace('\n', ' ').replace('\r', '')
-                        ])
+                        ]
+                        if rel_type == "ACCESSES_STATE":
+                            props = props or {}
+                            row.append(str(props.get("is_read", False)).lower())
+                            row.append(str(props.get("is_mutation", False)).lower())
+                            row.append(str(props.get("is_taint", False)).lower())
+                        writer.writerow(row)
 
                 r = conn.execute(
                     f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
