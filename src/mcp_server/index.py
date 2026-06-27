@@ -8,30 +8,26 @@ from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
 def find_repo_root(filepath: str) -> str:
     """Find the root directory of the repository containing the given filepath."""
-    filepath = os.path.abspath(filepath)
-    current_dir = filepath if os.path.isdir(filepath) else os.path.dirname(filepath)
+    path = Path(filepath).resolve()
+    current_dir = path if path.is_dir() else path.parent
 
-    while current_dir and current_dir != '/':
-        if os.path.isdir(os.path.join(current_dir, '.git')):
-            return current_dir
-        parent = os.path.dirname(current_dir)
-        if parent == current_dir:
-            break
-        current_dir = parent
+    for parent in [current_dir] + list(current_dir.parents):
+        if (parent / ".git").is_dir():
+            return str(parent)
 
-    return filepath if os.path.isdir(filepath) else os.path.dirname(filepath)
+    return str(current_dir)
 
 def get_indexes_dir() -> str:
     """Get the centralized indexes directory."""
-    indexes_dir = os.path.expanduser("~/.pecorino/indexes")
-    os.makedirs(indexes_dir, exist_ok=True)
-    return indexes_dir
+    indexes_dir = Path("~/.pecorino/indexes").expanduser()
+    indexes_dir.mkdir(parents=True, exist_ok=True)
+    return str(indexes_dir)
 
 def get_db_path_for_repo(repo_path: str) -> str:
     """Generate a centralized DB path for a specific repository."""
-    repo_path = os.path.abspath(repo_path)
-    hash_str = hashlib.md5(repo_path.encode('utf-8')).hexdigest()
-    return os.path.join(get_indexes_dir(), f"{hash_str}_code_search.duckdb")
+    resolved_repo = Path(repo_path).resolve()
+    hash_str = hashlib.md5(str(resolved_repo).encode('utf-8')).hexdigest()
+    return str(Path(get_indexes_dir()) / f"{hash_str}_code_search.duckdb")
 
 def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     """Formal, versioned migration that runs once per DB."""

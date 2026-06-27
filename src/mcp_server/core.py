@@ -46,8 +46,51 @@ INDEX_TIMEOUT_S = 300  # 5 minutes
 SUSPICIOUS_PATTERNS = ("ignore previous", "system prompt", "you are now",
                        "disregard", "forget your instructions")
 
+import platform
+from src.mcp_server.config import settings
+
 # Dynamically populated set of allowed workspace roots for path safety
 _ALLOWED_WORKSPACE_ROOTS: set[Path] = {workspace_root}
+for d in settings.allowed_external_dirs:
+    _ALLOWED_WORKSPACE_ROOTS.add(d)
+
+
+def register_allowed_root(p: Path):
+    """Add a path to the set of allowed workspace roots."""
+    _ALLOWED_WORKSPACE_ROOTS.add(p)
+
+
+def unregister_allowed_root(p: Path):
+    """Remove a path from the set of allowed workspace roots."""
+    if p in _ALLOWED_WORKSPACE_ROOTS and p != workspace_root:
+        _ALLOWED_WORKSPACE_ROOTS.remove(p)
+
+
+def is_absolute_path(p: str) -> bool:
+    """Check if path is absolute using pathlib and OS-specific checks via match-case."""
+    path = Path(p)
+    sys_name = platform.system()
+    match sys_name:
+        case "Windows":
+            return path.is_absolute() and (path.drive != "" or str(path).startswith(("\\\\", "//")))
+        case "Linux" | "Darwin" | _:
+            return path.is_absolute() and str(path).startswith("/")
+
+
+def has_valid_extension(p: str) -> bool:
+    """Check suffix using Path.suffix and the SUPPORTED set."""
+    path = Path(p)
+    return path.suffix in SUPPORTED
+
+
+def is_safe_path(p: str) -> bool:
+    """Check for traversal attempts using Path.resolve() and comparison."""
+    try:
+        path = Path(p).expanduser().resolve()
+        # Verify if it falls under any allowed roots
+        return any(path.is_relative_to(r) for r in _ALLOWED_WORKSPACE_ROOTS)
+    except Exception:
+        return False
 
 
 def safe_path(p: str) -> Path:
@@ -59,14 +102,14 @@ def safe_path(p: str) -> Path:
     if not path.exists():
         raise ValueError(f"Not found: {path}")
 
-    # Must be within a known workspace root
-    if not any(path.is_relative_to(r) for r in _ALLOWED_WORKSPACE_ROOTS):
+    # Must be safe (no directory traversal out of workspace roots)
+    if not is_safe_path(str(path)):
         raise ValueError(f"Path outside allowed workspace: {path}")
 
     # Block symlink escapes
     if path.is_symlink():
         real = path.resolve()
-        if not any(real.is_relative_to(r) for r in _ALLOWED_WORKSPACE_ROOTS):
+        if not is_safe_path(str(real)):
             raise ValueError("Symlink escape blocked")
 
     return path
@@ -595,6 +638,42 @@ async def handle_list_tools(
                         }
                     }
                 }
+            ),
+            types.Tool(
+                name="add_external_directory",
+                description="Add an external directory path to the allowed workspace roots list for the Pecorino server.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path of the directory to allow."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            ),
+            types.Tool(
+                name="remove_external_directory",
+                description="Remove an external directory path from the allowed workspace roots list.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path of the directory to remove."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            ),
+            types.Tool(
+                name="list_external_directories",
+                description="List all currently allowed external directories.",
+                input_schema={
+                    "type": "object",
+                    "properties": {}
+                }
             )
         ]
     )
@@ -683,6 +762,23 @@ async def handle_call_tool(
                 target=target,
                 ctx=ctx
             )
+        elif name == "add_external_directory":
+            path_val = arguments.get("path")
+            if not isinstance(path_val, str):
+                raise ValueError("path must be a string")
+            _check_suspicious(path_val, "path")
+            res_path = settings.add_external_dir(path_val)
+            res = {"status": "success", "added_directory": res_path}
+        elif name == "remove_external_directory":
+            path_val = arguments.get("path")
+            if not isinstance(path_val, str):
+                raise ValueError("path must be a string")
+            _check_suspicious(path_val, "path")
+            res_path = settings.remove_external_dir(path_val)
+            res = {"status": "success", "removed_directory": res_path}
+        elif name == "list_external_directories":
+            dirs = settings.list_external_dirs()
+            res = {"status": "success", "allowed_external_directories": dirs}
         else:
             raise ValueError(f"Unknown tool: {name}")
 

@@ -127,4 +127,4 @@ For comprehensive CLI flags, transport details, and configuration options, see t
 
 ## 📄 License & Contributing
 
-This project is licensed under the GPL-2.0 License. Contributions, bug reports, and improvements are welcome! Open an issue or submit a pull request with small, focused changes.
+This project is licensed under the GNU Affero General Public License v3 (AGPL-3.0) - see the [LICENSE](LICENSE) file for details. Contributions, bug reports, and improvements are welcome! Open an issue or submit a pull request with small, focused changes.

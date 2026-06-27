@@ -1,21 +1,8 @@
-"""
-GitStats Tree-sitter AST Parser
-
-This module uses tree-sitter to parse source files for multiple languages,
-translating the syntax trees into our standard OOP AST node types:
-ImportDef, ClassDef, InterfaceDef, FunctionDef, AttributeDef.
-
-It extracts method-level details like cyclomatic complexity, called methods,
-accessed attributes, and parameter types.
-"""
-
 from collections import defaultdict
 from typing import Any, List, Optional, Set
 
 import tree_sitter
 
-
-# Lazy imports from pecorino_oopmetrics to avoid circular imports
 def get_ast_classes():
     from src.parsers.ast import (
         AttributeDef,
@@ -44,20 +31,85 @@ def get_language_from_extension(extension: str) -> str:
     return mapping.get(extension.lower(), 'unknown')
 
 
+
+LANGUAGE_QUERIES = {
+    'python': """
+        (class_definition) @class.def
+        (function_definition) @func.def
+        (import_statement) @import.def
+        (import_from_statement) @import.def
+    """,
+    'java': """
+        (class_declaration) @class.def
+        (interface_declaration) @iface.def
+        (method_declaration) @func.def
+        (constructor_declaration) @func.def
+        (import_declaration) @import.def
+        (field_declaration) @attr.def
+    """,
+    'javascript': """
+        (class_declaration) @class.def
+        (function_declaration) @func.def
+        (method_definition) @func.def
+        (import_statement) @import.def
+        (field_definition) @attr.def
+    """,
+    'typescript': """
+        (class_declaration) @class.def
+        (interface_declaration) @iface.def
+        (function_declaration) @func.def
+        (method_definition) @func.def
+        (import_statement) @import.def
+        (public_field_definition) @attr.def
+        (property_signature) @attr.def
+    """,
+    'cpp': """
+        (class_specifier) @class.def
+        (struct_specifier) @class.def
+        (function_definition) @func.def
+        (preproc_include) @import.def
+        (field_declaration) @attr.def
+    """,
+    'go': """
+        (type_spec type: (struct_type)) @class.def
+        (type_spec type: (interface_type)) @iface.def
+        (function_declaration) @func.def
+        (method_declaration) @func.def
+        (import_declaration) @import.def
+    """,
+    'rust': """
+        (struct_item) @class.def
+        (trait_item) @iface.def
+        (function_item) @func.def
+        (impl_item) @class.impl
+        (use_declaration) @import.def
+    """,
+    'swift': """
+        (class_declaration) @class.def
+        (protocol_declaration) @iface.def
+        (function_declaration) @func.def
+        (import_declaration) @import.def
+    """,
+    'ruby': """
+        (class) @class.def
+        (module) @class.def
+        (method) @func.def
+        (call method: (identifier) @m (#match? @m "^(require|require_relative|include|extend)$")) @import.def
+    """
+}
+
 class TreeSitterExtractor:
     """Extracts OOP AST nodes from a tree-sitter parse tree."""
 
-    def __init__(self, source: bytes, language: str):
+    def __init__(self, source: bytes, language: str, lang_obj=None):
         self.source = source
         self.language = language
+        self.lang_obj = lang_obj
 
         # Resolve AST classes lazily
         self.ModuleDef, self.ClassDef, self.InterfaceDef, self.FunctionDef, self.ImportDef, self.AttributeDef = get_ast_classes()
 
         self.module = self.ModuleDef()
-        self.class_stack = []      # List of ClassDef (for nested classes)
-        self.interface_stack = []  # List of InterfaceDef
-
         # Out-of-line method definitions (for Go receivers & Rust impl blocks)
         self.out_of_line_methods = defaultdict(list)
 
@@ -554,6 +606,121 @@ class TreeSitterExtractor:
                     ))
         return attrs
 
+
+    def extract_with_queries(self, root_node):
+        query_string = LANGUAGE_QUERIES.get(self.language)
+        if not query_string or not self.lang_obj:
+            self.finalize()
+            return
+
+        try:
+            query = tree_sitter.Query(self.lang_obj, query_string)
+        except Exception:
+            self.finalize()
+            return
+
+        cursor = tree_sitter.QueryCursor(query)
+        captures = cursor.captures(root_node)
+
+        flat_classes = []
+        flat_interfaces = []
+        flat_functions = []
+        flat_attributes = []
+        rust_impls = []
+
+        # In captures, we get a dict of {capture_name: [nodes]}
+        for capture_name, nodes in captures.items():
+            for node in nodes:
+                if capture_name == "class.def":
+                    flat_classes.append((node, self._parse_class(node)))
+                elif capture_name == "iface.def":
+                    flat_interfaces.append((node, self._parse_interface(node)))
+                elif capture_name == "func.def":
+                    func = self._parse_function(node)
+                    if self.language == 'go' and node.type == 'method_declaration':
+                        receiver = node.child_by_field_name('receiver')
+                        receiver_type = ""
+                        if receiver:
+                            def walk_node(n):
+                                yield n
+                                for c in n.children:
+                                    yield from walk_node(c)
+                            for child in walk_node(receiver):
+                                if child.type == 'type_identifier':
+                                    receiver_type = self._get_text(child)
+                                    break
+                            if not receiver_type:
+                                for child in walk_node(receiver):
+                                    if child.type == 'identifier':
+                                        receiver_type = self._get_text(child)
+                                        break
+                        if receiver_type:
+                            receiver_type = receiver_type.lstrip('*')
+                            self.out_of_line_methods[receiver_type].append(func)
+                        else:
+                            flat_functions.append((node, func))
+                    else:
+                        flat_functions.append((node, func))
+                elif capture_name == "import.def":
+                    for imp in self._parse_import(node):
+                        self.module.imports.append(imp)
+                elif capture_name == "attr.def":
+                    for attr in self._parse_attribute(node):
+                        flat_attributes.append((node, attr))
+                elif capture_name == "class.impl":
+                    type_node = node.child_by_field_name('type')
+                    if type_node:
+                        impl_name = self._get_text(type_node)
+                        if '<' in impl_name:
+                            impl_name = impl_name.split('<')[0].strip()
+                        rust_impls.append((node, impl_name))
+
+        self._reconstruct_hierarchy(flat_classes, flat_interfaces, flat_functions, flat_attributes, rust_impls)
+        self.finalize()
+
+    def _reconstruct_hierarchy(self, flat_classes, flat_interfaces, flat_functions, flat_attributes, rust_impls):
+        containers = []
+        for node, cls in flat_classes:
+            containers.append((node.start_byte, node.end_byte, cls, 'class'))
+        for node, iface in flat_interfaces:
+            containers.append((node.start_byte, node.end_byte, iface, 'iface'))
+        for node, impl_name in rust_impls:
+            containers.append((node.start_byte, node.end_byte, impl_name, 'rust_impl'))
+
+        containers.sort(key=lambda x: x[1] - x[0])
+
+        def get_container(start, end):
+            for c_start, c_end, c_obj, c_type in containers:
+                if c_start <= start and end <= c_end and not (c_start == start and c_end == end):
+                    return c_obj, c_type
+            return None, None
+
+        for node, cls in flat_classes:
+            c_obj, c_type = get_container(node.start_byte, node.end_byte)
+            if c_type == 'class':
+                c_obj.nested_classes.append(cls)
+            else:
+                self.module.classes.append(cls)
+
+        for node, iface in flat_interfaces:
+            self.module.interfaces.append(iface)
+
+        for node, func in flat_functions:
+            c_obj, c_type = get_container(node.start_byte, node.end_byte)
+            if c_type == 'class':
+                c_obj.methods.append(func)
+            elif c_type == 'iface':
+                c_obj.methods.append(func)
+            elif c_type == 'rust_impl':
+                self.out_of_line_methods[c_obj].append(func)
+            else:
+                self.module.functions.append(func)
+
+        for node, attr in flat_attributes:
+            c_obj, c_type = get_container(node.start_byte, node.end_byte)
+            if c_type == 'class':
+                c_obj.attributes.append(attr)
+
     def traverse(self, node):
         node_type = node.type
 
@@ -633,10 +800,19 @@ class TreeSitterExtractor:
                 receiver_type = ""
                 if receiver:
                     # Traversal helper to find type identifier
-                    for child in receiver.walk():
-                        if child.type in ('type_identifier', 'identifier'):
+                    def walk_node(n):
+                        yield n
+                        for c in n.children:
+                            yield from walk_node(c)
+                    for child in walk_node(receiver):
+                        if child.type == 'type_identifier':
                             receiver_type = self._get_text(child)
                             break
+                    if not receiver_type:
+                        for child in walk_node(receiver):
+                            if child.type == 'identifier':
+                                receiver_type = self._get_text(child)
+                                break
                 if receiver_type:
                     receiver_type = receiver_type.lstrip('*')
                     self.out_of_line_methods[receiver_type].append(func)
@@ -647,7 +823,7 @@ class TreeSitterExtractor:
 
         # Check Attribute / Field
         is_attr = False
-        if node_type in ('field_declaration', 'public_fields_definition', 'field_definition', 'property_signature'):
+        if node_type in ('field_declaration', 'public_field_definition', 'field_definition', 'property_signature'):
             is_attr = True
             if self.class_stack:
                 for attr in self._parse_attribute(node):
@@ -741,8 +917,7 @@ def parse_with_tree_sitter(source: str, extension: str) -> Optional[Any]:
     if not tree.root_node:
         return None
 
-    extractor = TreeSitterExtractor(source_bytes, language)
-    extractor.traverse(tree.root_node)
-    extractor.finalize()
+    extractor = TreeSitterExtractor(source_bytes, language, lang_obj=lang_obj)
+    extractor.extract_with_queries(tree.root_node)
 
     return extractor.module
