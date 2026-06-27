@@ -4,34 +4,41 @@ import os
 import duckdb
 from pathlib import Path
 from typing import Any, Dict, List
+from src.core.errors import SecurityValidationError
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
-def find_repo_root(filepath: str) -> str:
+def find_repo_root(filepath: str, max_depth: int = 20) -> str:
     """Find the root directory of the repository containing the given filepath."""
-    filepath = os.path.abspath(filepath)
-    current_dir = filepath if os.path.isdir(filepath) else os.path.dirname(filepath)
+    path = Path(filepath).resolve()
+    current_dir = path if path.is_dir() else path.parent
 
-    while current_dir and current_dir != '/':
-        if os.path.isdir(os.path.join(current_dir, '.git')):
-            return current_dir
-        parent = os.path.dirname(current_dir)
-        if parent == current_dir:
+    visited = set()
+    for parent in [current_dir] + list(current_dir.parents):
+        real_parent = parent.resolve()
+        if real_parent in visited:
+            raise SecurityValidationError(f"Symlink loop detected at {parent}")
+        visited.add(real_parent)
+
+        if (parent / ".git").is_dir():
+            return str(parent)
+            
+        if len(visited) > max_depth:
             break
-        current_dir = parent
 
-    return filepath if os.path.isdir(filepath) else os.path.dirname(filepath)
+    return str(current_dir)
 
 def get_indexes_dir() -> str:
     """Get the centralized indexes directory."""
-    indexes_dir = os.path.expanduser("~/.pecorino/indexes")
-    os.makedirs(indexes_dir, exist_ok=True)
-    return indexes_dir
+    from src.mcp_server.config import settings
+    indexes_dir = settings.index_dir
+    indexes_dir.mkdir(parents=True, exist_ok=True)
+    return str(indexes_dir)
 
 def get_db_path_for_repo(repo_path: str) -> str:
     """Generate a centralized DB path for a specific repository."""
-    repo_path = os.path.abspath(repo_path)
-    hash_str = hashlib.md5(repo_path.encode('utf-8')).hexdigest()
-    return os.path.join(get_indexes_dir(), f"{hash_str}_code_search.duckdb")
+    resolved_repo = Path(repo_path).resolve()
+    hash_str = hashlib.md5(str(resolved_repo).encode('utf-8')).hexdigest()
+    return str(Path(get_indexes_dir()) / f"{hash_str}_code_search.duckdb")
 
 def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     """Formal, versioned migration that runs once per DB."""
@@ -52,6 +59,12 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     except Exception:
         pass
 
+    # Add relationships column
+    try:
+        conn.execute('ALTER TABLE code_nodes ADD COLUMN relationships VARCHAR')
+    except Exception:
+        pass
+
     # Handle existing DBs with metrics_json
     try:
         conn.execute('ALTER TABLE code_nodes DROP COLUMN metrics_json')
@@ -67,6 +80,23 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
             lang VARCHAR
         )
     ''')
+
+    # FTS schema migration: ensure 4-column FTS index (id, name, node_type, filepath)
+    try:
+        conn.execute("INSTALL fts")
+        conn.execute("LOAD fts")
+        # Check if FTS index exists with the expected columns
+        fts_info = conn.execute(
+            "SELECT sql FROM duckdb_indexes() WHERE index_name = 'fts_main_code_nodes'"
+        ).fetchone()
+        if fts_info:
+            fts_sql = fts_info[0] or ""
+            # Old 2-column format won't include 'filepath' — rebuild
+            if 'relationships' not in fts_sql:
+                conn.execute("PRAGMA drop_fts_index('code_nodes')")
+                conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
+    except Exception:
+        pass  # FTS not installed or index doesn't exist yet
 
 def migrate_all():
     """Scan the indexes directory and safely run migrations."""
@@ -88,6 +118,15 @@ class CodeSearchIndex:
         self._conn = duckdb.connect(self.db_path, read_only=read_only)
         if not read_only:
             migrate_codebase(self._conn)
+        else:
+            try:
+                self._conn.execute("LOAD fts")
+            except Exception:
+                try:
+                    self._conn.execute("INSTALL fts")
+                    self._conn.execute("LOAD fts")
+                except Exception:
+                    pass
         self.graph = GorgonzolaGraph(db_path=self.db_path)
 
     def close(self):
@@ -112,7 +151,7 @@ class CodeSearchIndex:
             conn.execute("PRAGMA drop_fts_index('code_nodes')")
         except Exception:
             pass
-        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name')")
+        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
 
     def _lazy_load_body(self, filepath: str, start_line: int, end_line: int) -> str:
         """Lazy-load source code from disk using filepath + line range."""
@@ -135,14 +174,15 @@ class CodeSearchIndex:
                 n['node_type'],
                 n['filepath'],
                 n['start_line'],
-                n['end_line']
+                n['end_line'],
+                n.get('relationships', '')
             ))
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
                 # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?)", data)
+                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?)", data)
                 conn.execute('''
                     INSERT INTO code_nodes
                     SELECT * FROM temp_code_nodes
@@ -151,7 +191,8 @@ class CodeSearchIndex:
                         node_type=excluded.node_type,
                         filepath=excluded.filepath,
                         start_line=excluded.start_line,
-                        end_line=excluded.end_line
+                        end_line=excluded.end_line,
+                        relationships=excluded.relationships
                 ''')
                 conn.execute("DROP TABLE temp_code_nodes")
                 conn.execute("COMMIT")
@@ -295,20 +336,34 @@ class CodeSearchIndex:
         res = conn.execute('SELECT filepath FROM files').fetchall()
         return [row[0] for row in res]
 
-    def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search the DuckDB FTS index for a match."""
+    def search(self, query: str, limit: int = 10, target_path: str = None) -> List[Dict[str, Any]]:
+        """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
         conn = self._conn
-        # Drop query into tokens to make it more FTS-friendly? Just passing query is fine if match_bm25 accepts it.
-        # But wait, match_bm25 may raise if index doesn't exist, though we try to ensure it exists.
         try:
-            res = conn.execute('''
+            # Build path filter clause
+            path_filter = ""
+            params = [query, query]
+            if target_path:
+                # Check if target_path looks like a file (has a code extension)
+                from src.core.constants import SUPPORTED_EXTENSIONS
+                if os.path.splitext(target_path)[1] in SUPPORTED_EXTENSIONS:
+                    path_filter = "AND c.filepath = ?"
+                    params.append(target_path)
+                else:
+                    prefix = target_path if target_path.endswith('/') else f"{target_path}/"
+                    path_filter = "AND c.filepath LIKE ?"
+                    params.append(f"{prefix}%")
+            params.append(limit)
+
+            res = conn.execute(f'''
                 SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line,
                        fts_main_code_nodes.match_bm25(c.id, ?) AS score
                 FROM code_nodes c
                 WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
+                {path_filter}
                 ORDER BY score DESC
                 LIMIT ?
-            ''', (query, query, limit)).fetchall()
+            ''', params).fetchall()
             
             results = []
             for row in res:
@@ -322,8 +377,8 @@ class CodeSearchIndex:
                     'end_line': row[4]
                 })
             return results
-        except Exception:
-            return []
+        except Exception as e:
+            return [{"error": str(e), "type": "fts_query_failed"}]
 
     def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
         """Get all nodes for a specific file."""
