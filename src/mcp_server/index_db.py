@@ -6,20 +6,30 @@ from pathlib import Path
 from typing import Any, Dict, List
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
-def find_repo_root(filepath: str) -> str:
+def find_repo_root(filepath: str, max_depth: int = 20) -> str:
     """Find the root directory of the repository containing the given filepath."""
     path = Path(filepath).resolve()
     current_dir = path if path.is_dir() else path.parent
 
+    visited = set()
     for parent in [current_dir] + list(current_dir.parents):
+        real_parent = parent.resolve()
+        if real_parent in visited:
+            raise RuntimeError(f"Symlink loop detected at {parent}")
+        visited.add(real_parent)
+
         if (parent / ".git").is_dir():
             return str(parent)
+            
+        if len(visited) > max_depth:
+            break
 
     return str(current_dir)
 
 def get_indexes_dir() -> str:
     """Get the centralized indexes directory."""
-    indexes_dir = Path("~/.pecorino/indexes").expanduser()
+    from src.mcp_server.config import settings
+    indexes_dir = settings.index_dir
     indexes_dir.mkdir(parents=True, exist_ok=True)
     return str(indexes_dir)
 
@@ -108,7 +118,7 @@ class CodeSearchIndex:
             conn.execute("PRAGMA drop_fts_index('code_nodes')")
         except Exception:
             pass
-        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name')")
+        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath')")
 
     def _lazy_load_body(self, filepath: str, start_line: int, end_line: int) -> str:
         """Lazy-load source code from disk using filepath + line range."""
@@ -291,20 +301,37 @@ class CodeSearchIndex:
         res = conn.execute('SELECT filepath FROM files').fetchall()
         return [row[0] for row in res]
 
-    def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search the DuckDB FTS index for a match."""
+    def search(self, query: str, limit: int = 10, target_path: str = None) -> List[Dict[str, Any]]:
+        """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
         conn = self._conn
-        # Drop query into tokens to make it more FTS-friendly? Just passing query is fine if match_bm25 accepts it.
-        # But wait, match_bm25 may raise if index doesn't exist, though we try to ensure it exists.
         try:
-            res = conn.execute('''
+            # Build path filter clause
+            path_filter = ""
+            params = [query, query]
+            if target_path:
+                # Check if target_path looks like a file (has a code extension)
+                if os.path.splitext(target_path)[1] in {
+                    '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp',
+                    '.h', '.hpp', '.go', '.rs', '.rb', '.swift', '.kt', '.cs',
+                    '.scala', '.lua', '.r', '.m', '.mm', '.pl', '.pm', '.php',
+                }:
+                    path_filter = "AND c.filepath = ?"
+                    params.append(target_path)
+                else:
+                    prefix = target_path if target_path.endswith('/') else f"{target_path}/"
+                    path_filter = "AND c.filepath LIKE ?"
+                    params.append(f"{prefix}%")
+            params.append(limit)
+
+            res = conn.execute(f'''
                 SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line,
                        fts_main_code_nodes.match_bm25(c.id, ?) AS score
                 FROM code_nodes c
                 WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
+                {path_filter}
                 ORDER BY score DESC
                 LIMIT ?
-            ''', (query, query, limit)).fetchall()
+            ''', params).fetchall()
             
             results = []
             for row in res:
@@ -318,8 +345,8 @@ class CodeSearchIndex:
                     'end_line': row[4]
                 })
             return results
-        except Exception:
-            return []
+        except Exception as e:
+            return [{"error": str(e), "type": "fts_query_failed"}]
 
     def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
         """Get all nodes for a specific file."""

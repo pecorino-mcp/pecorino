@@ -4,7 +4,7 @@ import json
 import asyncio
 from typing import Dict, Any, List
 
-from src.mcp_server.index import CodeSearchIndex, get_db_path_for_repo, find_repo_root
+from src.mcp_server.index_db import CodeSearchIndex, get_db_path_for_repo, find_repo_root
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
 
@@ -446,7 +446,7 @@ class CodebaseIndexer:
         import hashlib
         from concurrent.futures import ThreadPoolExecutor
         
-        path = pathlib.Path(dirpath)
+        path = pathlib.Path(dirpath).resolve()
         SUPPORTED = {'.py','.pyi','.java','.scala','.kt','.js','.jsx','.ts','.tsx',
                      '.cpp','.cc','.cxx','.c','.h','.hpp','.hxx','.go','.rs','.swift'}
         ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules"}
@@ -454,7 +454,7 @@ class CodebaseIndexer:
         for r, d, fnames in os.walk(str(path)):
             d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
             for fname in fnames:
-                fp = pathlib.Path(r) / fname
+                fp = (pathlib.Path(r) / fname).resolve()
                 if fp.suffix in SUPPORTED:
                     files.append(fp)
         
@@ -663,4 +663,29 @@ class CodebaseIndexer:
             "total_files_found": len(files)
         }
 
+def progress_callback(current: int, total: int, file_path: str):
+    print(json.dumps({
+        "current": current,
+        "total": total,
+        "file": file_path
+    }), flush=True)
+
+def main():
+    if len(sys.argv) < 3:
+        sys.stderr.write("Usage: python -m src.mcp_server.index_pipeline <repo_root> <target_path>\n")
+        sys.exit(1)
+        
+    repo_root = sys.argv[1]
+    target_path = sys.argv[2]
+    
+    try:
+        indexer = CodebaseIndexer(repo_path=repo_root)
+        res = indexer.index_directory(target_path, progress_callback=progress_callback)
+        print(json.dumps({"result": res}), flush=True)
+    except Exception as e:
+        sys.stderr.write(f"Error during indexing subprocess: {e}\n")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
 

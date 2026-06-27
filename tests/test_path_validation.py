@@ -10,10 +10,8 @@ from src.mcp_server.core import (
     has_valid_extension,
     is_safe_path,
     safe_path,
-    _ALLOWED_WORKSPACE_ROOTS,
-    register_allowed_root,
-    unregister_allowed_root
 )
+from src.core.errors import TargetNotFoundError, SecurityValidationError
 
 def test_is_absolute_path():
     sys_name = platform.system()
@@ -33,100 +31,132 @@ def test_has_valid_extension():
     assert has_valid_extension("test.txt") is False
     assert has_valid_extension("test.unknown") is False
 
-def test_is_safe_path_and_workspace_roots(tmp_path):
-    allowed_root = tmp_path / "workspace"
-    allowed_root.mkdir()
-    
-    outside_root = tmp_path / "outside"
-    outside_root.mkdir()
-    
-    register_allowed_root(allowed_root)
-    try:
-        file_inside = allowed_root / "test.py"
-        file_inside.touch()
+def test_is_safe_path_within_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    file_inside = workspace / "test.py"
+    file_inside.touch()
+
+    with patch.object(settings, "workspace_root", workspace):
         assert is_safe_path(str(file_inside)) is True
-        
-        file_outside = outside_root / "test.py"
-        file_outside.touch()
+
+def test_is_safe_path_outside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    file_outside = outside / "test.py"
+    file_outside.touch()
+
+    with patch.object(settings, "workspace_root", workspace):
         assert is_safe_path(str(file_outside)) is False
-        
-        traversal = allowed_root / "../outside/test.py"
+
+def test_is_safe_path_traversal_blocked(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    file_outside = outside / "test.py"
+    file_outside.touch()
+
+    with patch.object(settings, "workspace_root", workspace):
+        traversal = workspace / "../outside/test.py"
         assert is_safe_path(str(traversal)) is False
-        
-    finally:
-        unregister_allowed_root(allowed_root)
+
+def test_is_safe_path_allow_external(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    external = tmp_path / "external_repo"
+    external.mkdir()
+    file_external = external / "test.py"
+    file_external.touch()
+
+    with patch.object(settings, "workspace_root", workspace):
+        # Without allow_external, should be blocked
+        assert is_safe_path(str(file_external)) is False
+        # With allow_external, should be allowed
+        assert is_safe_path(str(file_external), allow_external=True) is True
 
 def test_safe_path_function(tmp_path):
-    allowed_root = tmp_path / "workspace"
-    allowed_root.mkdir()
-    register_allowed_root(allowed_root)
-    
-    try:
-        file_inside = allowed_root / "test.py"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with patch.object(settings, "workspace_root", workspace):
+        file_inside = workspace / "test.py"
         file_inside.touch()
-        
+
         resolved = safe_path(str(file_inside))
         assert resolved == file_inside.resolve()
-        
-        with pytest.raises(ValueError, match="Not found"):
-            safe_path(str(allowed_root / "non_existent.py"))
-            
+
+        with pytest.raises(TargetNotFoundError, match="Not found"):
+            safe_path(str(workspace / "non_existent.py"))
+
         outside_file = tmp_path / "outside.py"
         outside_file.touch()
-        with pytest.raises(ValueError, match="Path outside allowed workspace"):
+        with pytest.raises(SecurityValidationError, match="Path outside allowed workspace"):
             safe_path(str(outside_file))
-            
-    finally:
-        unregister_allowed_root(allowed_root)
-
-def test_config_external_dirs(tmp_path):
-    test_dir = tmp_path / "external_repo"
-    test_dir.mkdir()
-    
-    temp_config_file = tmp_path / "config.json"
-    
-    with patch.object(settings, "_config_file", temp_config_file), \
-         patch.object(settings, "_config_dir", tmp_path):
-        
-        settings.allowed_external_dirs = set()
-        
-        added = settings.add_external_dir(str(test_dir))
-        assert Path(added).resolve() == test_dir.resolve()
-        assert test_dir.resolve() in settings.allowed_external_dirs
-        
-        dirs = settings.list_external_dirs()
-        assert len(dirs) == 1
-        assert dirs[0] == str(test_dir.resolve())
-        
-        removed = settings.remove_external_dir(str(test_dir))
-        assert Path(removed).resolve() == test_dir.resolve()
-        assert test_dir.resolve() not in settings.allowed_external_dirs
-        assert len(settings.list_external_dirs()) == 0
 
 
 def test_find_repo_root(tmp_path):
-    from src.mcp_server.index import find_repo_root
-    
+    from src.mcp_server.index_db import find_repo_root
+
     # 1. Create a simulated git repo
     git_repo = tmp_path / "my_git_repo"
     git_repo.mkdir()
     (git_repo / ".git").mkdir()
-    
+
     sub_dir = git_repo / "src" / "subdir"
     sub_dir.mkdir(parents=True)
     test_file = sub_dir / "code.py"
     test_file.touch()
-    
+
     # Root of test_file should be git_repo
     root = find_repo_root(str(test_file))
     assert Path(root).resolve() == git_repo.resolve()
-    
+
     # 2. Create a normal directory with no .git
     normal_dir = tmp_path / "normal_dir"
     normal_dir.mkdir()
     test_file_2 = normal_dir / "plain.py"
     test_file_2.touch()
-    
+
     # Root should fallback to containing directory (normal_dir)
     root_2 = find_repo_root(str(test_file_2))
     assert Path(root_2).resolve() == normal_dir.resolve()
+
+
+def test_ramdisk_index_copy_on_enter(tmp_path):
+    from src.mcp_server.ramdisk import RamdiskIndex
+
+    # 1. Create simulated files on SSD path
+    ssd_db = tmp_path / "index.duckdb"
+    ssd_db.write_text("dummy database content")
+
+    ssd_graph = tmp_path / "index_gorgonzola"
+    ssd_graph.mkdir()
+    (ssd_graph / "graph.db").write_text("dummy graph data")
+
+    # 2. Enter ramdisk context
+    with RamdiskIndex(str(ssd_db)) as ram:
+        # Verify copied over to RAM disk
+        ram_db_path = Path(ram.db_path)
+        ram_graph_path = Path(ram.gorgonzola_path)
+
+        assert ram_db_path.exists()
+        assert ram_db_path.read_text() == "dummy database content"
+
+        assert ram_graph_path.exists()
+        assert (ram_graph_path / "graph.db").exists()
+        assert (ram_graph_path / "graph.db").read_text() == "dummy graph data"
+
+        # Modify the RAM files
+        ram_db_path.write_text("updated database content")
+        (ram_graph_path / "graph.db").write_text("updated graph data")
+
+    # 3. Verify changes synced back to SSD on exit
+    assert ssd_db.read_text() == "updated database content"
+    assert (ssd_graph / "graph.db").read_text() == "updated graph data"

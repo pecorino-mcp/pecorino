@@ -29,7 +29,7 @@ def main():
         settings.port = args.port
 
     # Run global safe startup migration
-    from src.mcp_server.index import migrate_all
+    from src.mcp_server.index_db import migrate_all
     migrate_all()
 
     if settings.transport == "stdio":
