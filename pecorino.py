@@ -3,6 +3,8 @@
 Pecorino - Git repository statistics generator.
 
 This is the main entry point. All functionality is in the src/ package.
+# Test reindexing comment
+
 """
 
 import sys

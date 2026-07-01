@@ -4,6 +4,7 @@ import os
 import duckdb
 from pathlib import Path
 from typing import Any, Dict, List
+from src.core.errors import SecurityValidationError
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
 def find_repo_root(filepath: str, max_depth: int = 20) -> str:
@@ -15,7 +16,7 @@ def find_repo_root(filepath: str, max_depth: int = 20) -> str:
     for parent in [current_dir] + list(current_dir.parents):
         real_parent = parent.resolve()
         if real_parent in visited:
-            raise RuntimeError(f"Symlink loop detected at {parent}")
+            raise SecurityValidationError(f"Symlink loop detected at {parent}")
         visited.add(real_parent)
 
         if (parent / ".git").is_dir():
@@ -58,6 +59,12 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     except Exception:
         pass
 
+    # Add relationships column
+    try:
+        conn.execute('ALTER TABLE code_nodes ADD COLUMN relationships VARCHAR')
+    except Exception:
+        pass
+
     # Handle existing DBs with metrics_json
     try:
         conn.execute('ALTER TABLE code_nodes DROP COLUMN metrics_json')
@@ -73,6 +80,23 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
             lang VARCHAR
         )
     ''')
+
+    # FTS schema migration: ensure 4-column FTS index (id, name, node_type, filepath)
+    try:
+        conn.execute("INSTALL fts")
+        conn.execute("LOAD fts")
+        # Check if FTS index exists with the expected columns
+        fts_info = conn.execute(
+            "SELECT sql FROM duckdb_indexes() WHERE index_name = 'fts_main_code_nodes'"
+        ).fetchone()
+        if fts_info:
+            fts_sql = fts_info[0] or ""
+            # Old 2-column format won't include 'filepath' — rebuild
+            if 'relationships' not in fts_sql:
+                conn.execute("PRAGMA drop_fts_index('code_nodes')")
+                conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
+    except Exception:
+        pass  # FTS not installed or index doesn't exist yet
 
 def migrate_all():
     """Scan the indexes directory and safely run migrations."""
@@ -94,6 +118,15 @@ class CodeSearchIndex:
         self._conn = duckdb.connect(self.db_path, read_only=read_only)
         if not read_only:
             migrate_codebase(self._conn)
+        else:
+            try:
+                self._conn.execute("LOAD fts")
+            except Exception:
+                try:
+                    self._conn.execute("INSTALL fts")
+                    self._conn.execute("LOAD fts")
+                except Exception:
+                    pass
         self.graph = GorgonzolaGraph(db_path=self.db_path)
 
     def close(self):
@@ -118,7 +151,7 @@ class CodeSearchIndex:
             conn.execute("PRAGMA drop_fts_index('code_nodes')")
         except Exception:
             pass
-        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath')")
+        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
 
     def _lazy_load_body(self, filepath: str, start_line: int, end_line: int) -> str:
         """Lazy-load source code from disk using filepath + line range."""
@@ -141,14 +174,15 @@ class CodeSearchIndex:
                 n['node_type'],
                 n['filepath'],
                 n['start_line'],
-                n['end_line']
+                n['end_line'],
+                n.get('relationships', '')
             ))
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
                 # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?)", data)
+                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?)", data)
                 conn.execute('''
                     INSERT INTO code_nodes
                     SELECT * FROM temp_code_nodes
@@ -157,7 +191,8 @@ class CodeSearchIndex:
                         node_type=excluded.node_type,
                         filepath=excluded.filepath,
                         start_line=excluded.start_line,
-                        end_line=excluded.end_line
+                        end_line=excluded.end_line,
+                        relationships=excluded.relationships
                 ''')
                 conn.execute("DROP TABLE temp_code_nodes")
                 conn.execute("COMMIT")
@@ -310,11 +345,8 @@ class CodeSearchIndex:
             params = [query, query]
             if target_path:
                 # Check if target_path looks like a file (has a code extension)
-                if os.path.splitext(target_path)[1] in {
-                    '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp',
-                    '.h', '.hpp', '.go', '.rs', '.rb', '.swift', '.kt', '.cs',
-                    '.scala', '.lua', '.r', '.m', '.mm', '.pl', '.pm', '.php',
-                }:
+                from src.core.constants import SUPPORTED_EXTENSIONS
+                if os.path.splitext(target_path)[1] in SUPPORTED_EXTENSIONS:
                     path_filter = "AND c.filepath = ?"
                     params.append(target_path)
                 else:

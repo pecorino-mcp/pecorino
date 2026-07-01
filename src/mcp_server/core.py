@@ -3,7 +3,6 @@ import collections
 import glob
 import json
 import os
-import platform
 import sys
 import threading
 import time
@@ -25,8 +24,9 @@ from src.metrics.maintainability import (
 from src.metrics.oopmetrics import OOPMetricsAnalyzer, parse
 from src.utils.export import MetricsExporter
 
-SUPPORTED = {'.py','.pyi','.java','.scala','.kt','.js','.jsx','.ts','.tsx',
-             '.cpp','.cc','.cxx','.c','.h','.hpp','.hxx','.go','.rs','.swift'}
+from src.core.constants import SUPPORTED_EXTENSIONS
+
+SUPPORTED = SUPPORTED_EXTENSIONS
 
 # Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
 workspace_root = Path(__file__).resolve().parent.parent.parent
@@ -38,7 +38,7 @@ ALLOWED_OUTPUT = workspace_root / ".mcp_outputs"
 ALLOWED_OUTPUT.mkdir(exist_ok=True)
 MAX_READ_BYTES = 1_000_000  # 1 MB
 ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree", "search",
-                           "callers", "callees", "impact", "pagerank"})
+                           "callers", "callees", "impact", "pagerank", "functional-analysis"})
 ALLOWED_WHAT = frozenset({"oop", "complexity", "hotspots", "all"})
 ALLOWED_API_TYPES = frozenset({"index", "graph"})
 MAX_LIMIT = 100
@@ -58,25 +58,47 @@ from src.core.errors import (
 )
 from src.mcp_server.errors import handle_mcp_error
 
-def is_absolute_path(p: str) -> bool:
-    """Check if path is absolute using pathlib and OS-specific checks via match-case."""
-    path = Path(p)
-    sys_name = platform.system()
-    match sys_name:
-        case "Windows":
-            return path.is_absolute() and (path.drive != "" or str(path).startswith(("\\\\", "//")))
-        case "Linux" | "Darwin" | _:
-            return path.is_absolute() and str(path).startswith("/")
 
 
-def has_valid_extension(p: str) -> bool:
-    """Check suffix using Path.suffix and the SUPPORTED set."""
-    path = Path(p)
-    return path.suffix in SUPPORTED
+def is_project_workspace(path: Path) -> bool:
+    """Check if the path resides inside a project workspace.
+    
+    A project workspace is defined as any directory that contains common project 
+    marker files/folders (like .git, .vscode, package.json, pyproject.toml) in its hierarchy.
+    """
+    try:
+        current = path if path.is_dir() else path.parent
+        visited = set()
+        
+        while current and current != current.parent:
+            current_resolved = current.resolve()
+            if current_resolved in visited:
+                break
+            visited.add(current_resolved)
+            
+            if (current / ".git").is_dir() or (current / ".vscode").is_dir() or (current / ".idea").is_dir():
+                return True
+                
+            for marker in ("pyproject.toml", "package.json", "Cargo.toml", "go.mod", "Makefile", "requirements.txt", "setup.py"):
+                if (current / marker).is_file():
+                    return True
+                    
+            current = current.parent
+            
+        return False
+    except Exception:
+        return False
 
 
 def is_safe_path(p: str, allow_external: bool = False) -> bool:
-    """Validate path safety with optional external access."""
+    """Validate path safety with optional external access.
+    
+    Allows:
+    1. Paths within settings.workspace_root.
+    2. Paths within the current working directory (Path.cwd()).
+    3. Paths inside recognized project workspaces (checked via is_project_workspace).
+    4. Allowlisted external paths if allow_external=True.
+    """
     try:
         target = Path(p).expanduser().resolve()
         
@@ -84,25 +106,29 @@ def is_safe_path(p: str, allow_external: bool = False) -> bool:
         if target.is_relative_to(settings.workspace_root):
             return True
             
-        # 2. External access checks when allow_external=True
-        if allow_external:
-            # Block sensitive system directories
-            SENSITIVE_PATHS = [
-                Path("/etc"), Path("/var"), Path("/usr"),
-                Path("/sys"), Path("/proc"), Path("/dev"),
-                Path.home() / ".ssh", Path.home() / ".config", Path.home() / ".aws"
-            ]
-            import platform
-            if platform.system() == "Windows":
-                SENSITIVE_PATHS.extend([
-                    Path("C:/Windows"), Path("C:/ProgramData")
-                ])
-                
-            for sensitive in SENSITIVE_PATHS:
-                if str(target).startswith(str(sensitive)):
-                    return False
-            
+        # 2. Check if within current working directory (always allowed)
+        try:
+            if target.is_relative_to(Path.cwd().resolve()):
+                return True
+        except (ValueError, RuntimeError):
+            pass
+
+        # 3. Check if inside a project workspace
+        if is_project_workspace(target):
             return True
+
+        # 4. External access checks when allow_external=True
+        if allow_external:
+            # Allowlist model: only roots set via PECORINO_ALLOWED_EXTERNAL_DIRS
+            if not settings.allowed_external_roots:
+                return False
+            for allowed_root in settings.allowed_external_roots:
+                try:
+                    if target.is_relative_to(allowed_root):
+                        return True
+                except ValueError:
+                    continue
+            return False
         
         return False
     except Exception:
@@ -211,15 +237,12 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
     
-    # Lazy Indexing for External Repositories
+    # Require explicit indexing for external repositories
     if allow_external and not os.path.exists(db_path):
-        sys.stderr.write(f"[INFO] External repo not indexed. Triggering auto-indexing for: {repo_root}\n")
-        sys.stderr.flush()
-        try:
-            await do_update_index(target=repo_root, allow_external=True)
-        except Exception as e:
-            sys.stderr.write(f"[ERROR] Auto-indexing failed: {e}\n")
-            sys.stderr.flush()
+        raise IndexNotFoundError(
+            f"External repository at '{repo_root}' has not been indexed yet. "
+            f"Please run the 'update_index' tool with allow_external=True on this target first."
+        )
 
     index = _get_cached_api(repo_root, db_path, "index")
 
@@ -229,7 +252,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
     # Initialize GraphAPI if view is a graph-related view
     api = None
-    if view in ("callers", "callees", "impact", "summary", "deps", "pagerank"):
+    if view in ("callers", "callees", "impact", "summary", "deps", "pagerank", "functional-analysis"):
         api = _get_cached_api(repo_root, db_path, "graph")
 
     if view == "callers":
@@ -254,16 +277,23 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             raise AnalysisError(deps[0]["error"])
         return {"status": "success", "target": path.as_posix(), "dependent_files": deps}
 
+    if view == "functional-analysis":
+        result = await asyncio.to_thread(api.analyze_functional_purity)
+        if result and "error" in result:
+            raise AnalysisError(result["error"])
+        return {"status": "success", "target": path.as_posix(), "functional_analysis": result}
+
     if view == "pagerank":
         try:
-            if api._pagerank_cache is None:
-                pr_scores = await asyncio.to_thread(api.graph.pagerank)
-                api._pagerank_cache = {pr.get("node_id"): pr.get("score", 0.0) for pr in pr_scores}
-            filtered_pr = [
-                {"node_id": node_id, "score": score}
-                for node_id, score in api._pagerank_cache.items()
-                if node_id and node_id.startswith(path.as_posix())
-            ]
+            with api._pagerank_lock:
+                if api._pagerank_cache is None:
+                    pr_scores = await asyncio.to_thread(api.graph.pagerank)
+                    api._pagerank_cache = {pr.get("node_id"): pr.get("score", 0.0) for pr in pr_scores}
+                filtered_pr = [
+                    {"node_id": node_id, "score": score}
+                    for node_id, score in api._pagerank_cache.items()
+                    if node_id and node_id.startswith(path.as_posix())
+                ]
             filtered_pr.sort(key=lambda x: x["score"], reverse=True)
             top_pr = filtered_pr[:limit]
             return {"status": "success", "target": path.as_posix(), "pagerank": top_pr}
@@ -299,7 +329,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         try:
             for root, dirs, fnames in os.walk(str(path)):
                 # Ignore common ignored dirs to match indexer
-                dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules"}]
+                dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}]
                 on_disk_count += len(fnames)
                 if on_disk_count > 1000:
                     on_disk_count = "1000+"
@@ -369,10 +399,33 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             ]
         else: # summary
             classes = sum(1 for n in nodes if n['node_type'] in ('class', 'interface'))
-            functions = sum(1 for n in nodes if n['node_type'] in ('function', 'method'))
+            functions_nodes = [n for n in nodes if n['node_type'] in ('function', 'method')]
+            
+            top_level = 0
+            nested = 0
+            methods = 0
+            
+            for f in functions_nodes:
+                enclosing = [
+                    p for p in nodes
+                    if p != f and p['start_line'] <= f['start_line'] and p['end_line'] >= f['end_line']
+                ]
+                if not enclosing:
+                    top_level += 1
+                else:
+                    innermost = max(enclosing, key=lambda x: x['start_line'])
+                    if innermost['node_type'] in ('function', 'method'):
+                        nested += 1
+                    elif innermost['node_type'] in ('class', 'interface'):
+                        methods += 1
+                    else:
+                        top_level += 1
+
             result["structure"] = {
                 "classes": classes,
-                "functions": functions
+                "top_level_functions": top_level,
+                "nested_functions": nested,
+                "methods": methods,
             }
 
     # Graph database dependency and PageRank retrieval
@@ -501,7 +554,7 @@ async def do_metrics(target: str, what: List[str] = ["all"], output_path: Option
     else:
         if "oop" in what_set or "complexity" in what_set:
             analyzer = OOPMetricsAnalyzer(use_ast=True, repo_path=repo_root)
-            ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
+            ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}
             files = []
             for r, d, fnames in os.walk(str(path)):
                 d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
@@ -550,6 +603,18 @@ async def do_metrics(target: str, what: List[str] = ["all"], output_path: Option
     return result
 
 async def do_update_index(target: str, ctx: ServerRequestContext | None = None, allow_external: bool = False) -> dict:
+    # Invalidate pagerank cache on the existing GraphAPI if cached, before clearing
+    _update_path = Path(target).expanduser().resolve()
+    try:
+        from src.mcp_server.index_db import find_repo_root as _find_repo_root, get_db_path_for_repo as _get_db_path
+        _repo_root = _find_repo_root(str(_update_path))
+        _db_path = _get_db_path(_repo_root)
+        with _API_CACHE_LOCK:
+            cached_graph = _API_CACHE.get((_db_path, "graph"))
+            if cached_graph:
+                cached_graph.invalidate_pagerank_cache()
+    except Exception:
+        pass  # Best-effort invalidation before full cache clear
     clear_api_cache()
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root
@@ -788,9 +853,14 @@ async def handle_call_tool(
         async def _detect_directory(t: Any) -> str:
             """Resolve empty/None/dot targets to a real workspace path."""
             if t is None or (isinstance(t, str) and (not t.strip() or t.strip() == ".")):
-                # Fall back to workspace_root (the pecorino project root, always known)
-                fallback = str(workspace_root)
-                sys.stderr.write(f"[INFO] Using workspace_root fallback: {fallback}\n")
+                # Fall back to workspace_root if configured or if cwd is not a git repository
+                cwd = os.getcwd()
+                from src.mcp_server.index_db import find_repo_root
+                fallback = find_repo_root(cwd)
+                # If resolved fallback doesn't look like a git repo/project but workspace_root does, use workspace_root
+                if not (Path(fallback) / ".git").is_dir() and (settings.workspace_root / ".git").is_dir():
+                    fallback = str(settings.workspace_root)
+                sys.stderr.write(f"[INFO] Using repo_root fallback: {fallback}\n")
                 sys.stderr.flush()
                 return fallback
             return str(t) if not isinstance(t, str) else t

@@ -30,5 +30,14 @@ class Config:
         else:
             self.index_dir = Path("~/.pecorino/indexes").expanduser()
 
+        # Allowed external roots (allowlist model for allow_external=True)
+        # Set via colon-separated absolute paths, e.g.:
+        #   PECORINO_ALLOWED_EXTERNAL_DIRS=/home/user/repos:/opt/projects
+        self.allowed_external_roots: set[Path] = set()
+        env_roots = os.getenv("PECORINO_ALLOWED_EXTERNAL_DIRS", "")
+        for r in env_roots.split(":"):
+            if r.strip():
+                self.allowed_external_roots.add(Path(r.strip()).expanduser().resolve())
+
 # Global singleton configuration
 settings = Config()

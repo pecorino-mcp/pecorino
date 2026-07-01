@@ -20,6 +20,73 @@ class CodebaseIndexer:
         self.search_index = CodeSearchIndex(db_path)
         self.search_index.graph = self.graph
 
+    def _build_relationships_text(self, node) -> str:
+        rels = []
+        if getattr(node, 'called_methods', None):
+            rels.append(f"CALLS: {', '.join(node.called_methods)}")
+        accesses = []
+        if getattr(node, 'read_attributes', None):
+            accesses.append(f"READS: {', '.join(node.read_attributes)}")
+        if getattr(node, 'mutated_attributes', None):
+            accesses.append(f"MUTATES: {', '.join(node.mutated_attributes)}")
+        if getattr(node, 'tainted_attributes', None):
+            accesses.append(f"TAINTS: {', '.join(node.tainted_attributes)}")
+        if accesses:
+            rels.append(" ".join(accesses))
+        if getattr(node, 'bases', None):
+            rels.append(f"EXTENDS: {', '.join(node.bases)}")
+        if getattr(node, 'interfaces', None):
+            rels.append(f"IMPLEMENTS: {', '.join(node.interfaces)}")
+        if getattr(node, 'extends', None):
+            rels.append(f"EXTENDS: {', '.join(node.extends)}")
+        return " ".join(rels)
+
+    def _add_state_accesses(self, node, parent_id, class_name, graph_nodes_dict, graph_edges):
+        for attr in getattr(node, 'read_attributes', set()):
+            var_id = f"Variable::{class_name}.{attr}"
+            graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
+            graph_edges.append((parent_id, var_id, {"is_read": True, "is_mutation": False, "is_taint": False}, "ACCESSES_STATE"))
+
+        for attr in getattr(node, 'mutated_attributes', set()):
+            var_id = f"Variable::{class_name}.{attr}"
+            graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
+            graph_edges.append((parent_id, var_id, {"is_read": False, "is_mutation": True, "is_taint": False}, "ACCESSES_STATE"))
+
+        for attr in getattr(node, 'tainted_attributes', set()):
+            var_id = f"Variable::{class_name}.{attr}"
+            graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
+            graph_edges.append((parent_id, var_id, {"is_read": False, "is_mutation": False, "is_taint": True}, "ACCESSES_STATE"))
+
+    def _add_lambdas(self, node, parent_id, filepath, class_name, graph_nodes_dict, graph_edges):
+        for lmd in getattr(node, 'lambdas', []):
+            lmd_id = f"Lambda::{lmd.name}"
+            graph_nodes_dict[lmd_id] = (lmd_id, {"name": lmd.name}, "Lambda")
+            graph_edges.append((parent_id, lmd_id, {}, "CONTAINS_LAMBDA"))
+            
+            for call in getattr(lmd, 'called_methods', set()):
+                symbol_id = f"Symbol::{call}"
+                graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
+                graph_edges.append((lmd_id, symbol_id, {}, "CALLS"))
+                
+            self._add_state_accesses(lmd, lmd_id, class_name, graph_nodes_dict, graph_edges)
+            self._add_lambdas(lmd, lmd_id, filepath, class_name, graph_nodes_dict, graph_edges)
+
+    def _add_statement_to_graph(self, statement, parent_id, filepath, class_name, graph_nodes_dict, graph_edges):
+        stmt_id = f"{filepath}::{statement.name}::{statement.lineno}:{statement.col_offset}"
+        graph_nodes_dict[stmt_id] = (stmt_id, {"name": statement.name, "type": statement.type}, "ControlFlow")
+        graph_edges.append((parent_id, stmt_id, {}, "CONTAINS"))
+        
+        for call in getattr(statement, 'called_methods', set()):
+            symbol_id = f"Symbol::{call}"
+            graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
+            graph_edges.append((stmt_id, symbol_id, {}, "CALLS"))
+            
+        self._add_state_accesses(statement, stmt_id, class_name, graph_nodes_dict, graph_edges)
+        self._add_lambdas(statement, stmt_id, filepath, class_name, graph_nodes_dict, graph_edges)
+            
+        for child_stmt in getattr(statement, 'statements', []):
+            self._add_statement_to_graph(child_stmt, stmt_id, filepath, class_name, graph_nodes_dict, graph_edges)
+
     def _resolve_dependency(self, dep_string: str, source_filepath: str, file_extension: str) -> str:
         """Enhanced language-specific dependency file resolution."""
         # 1. JS/TS: Relative paths or modules
@@ -130,7 +197,8 @@ class CodebaseIndexer:
                     'filepath': filepath,
                     'start_line': node.lineno,
                     'end_line': node.end_lineno,
-                    'metrics': metrics
+                    'metrics': metrics,
+                    'relationships': self._build_relationships_text(node)
                 })
                 
                 class_id = f"{filepath}::{node.name}"
@@ -160,7 +228,8 @@ class CodebaseIndexer:
                         'filepath': filepath,
                         'start_line': m.lineno,
                         'end_line': m.end_lineno,
-                        'metrics': method_metrics
+                        'metrics': method_metrics,
+                        'relationships': self._build_relationships_text(m)
                     })
                     method_id = f"{class_id}::{m.name}"
                     graph_nodes_dict[method_id] = (method_id, {
@@ -176,6 +245,13 @@ class CodebaseIndexer:
                         symbol_id = f"Symbol::{call}"
                         graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                         graph_edges.append((method_id, symbol_id, {}, "CALLS"))
+
+                    self._add_state_accesses(m, method_id, node.name, graph_nodes_dict, graph_edges)
+                    self._add_lambdas(m, method_id, filepath, node.name, graph_nodes_dict, graph_edges)
+
+                    for stmt in getattr(m, 'statements', []):
+                        self._add_statement_to_graph(stmt, method_id, filepath, node.name, graph_nodes_dict, graph_edges)
+
             elif isinstance(node, InterfaceDef):
                 nodes_to_index.append({
                     'name': node.name,
@@ -183,7 +259,8 @@ class CodebaseIndexer:
                     'filepath': filepath,
                     'start_line': node.lineno,
                     'end_line': node.end_lineno,
-                    'metrics': {}
+                    'metrics': {},
+                    'relationships': self._build_relationships_text(node)
                 })
                 class_id = f"{filepath}::{node.name}"
                 graph_nodes_dict[class_id] = (class_id, {
@@ -202,7 +279,8 @@ class CodebaseIndexer:
                         'filepath': filepath,
                         'start_line': m.lineno,
                         'end_line': m.end_lineno,
-                        'metrics': method_metrics
+                        'metrics': method_metrics,
+                        'relationships': self._build_relationships_text(m)
                     })
                     method_id = f"{class_id}::{m.name}"
                     graph_nodes_dict[method_id] = (method_id, {
@@ -226,7 +304,8 @@ class CodebaseIndexer:
                 'filepath': filepath,
                 'start_line': func.lineno,
                 'end_line': func.end_lineno,
-                'metrics': func_metrics
+                'metrics': func_metrics,
+                'relationships': self._build_relationships_text(func)
             })
             func_id = f"{filepath}::{func.name}"
             graph_nodes_dict[func_id] = (func_id, {
@@ -242,6 +321,13 @@ class CodebaseIndexer:
                 symbol_id = f"Symbol::{call}"
                 graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                 graph_edges.append((func_id, symbol_id, {}, "CALLS"))
+                
+            self._add_state_accesses(func, func_id, "Global", graph_nodes_dict, graph_edges)
+            self._add_lambdas(func, func_id, filepath, "Global", graph_nodes_dict, graph_edges)
+                
+            for stmt in getattr(func, 'statements', []):
+                self._add_statement_to_graph(stmt, func_id, filepath, "Global", graph_nodes_dict, graph_edges)
+
         # Add dependencies to graph
         for dep in dependencies:
             resolved_dep = self._resolve_dependency(dep, filepath, file_extension)
@@ -441,15 +527,28 @@ class CodebaseIndexer:
             print(f"Warning: Failed to parse {file_str}: {e}", file=sys.stderr)
             return None
 
+    def _post_process_recursion(self):
+        """Find recursive self-calls and add RECURSES_TO relationships."""
+        queries = [
+            "MATCH (m:Method)-[:CALLS]->(m) MERGE (m)-[:RECURSES_TO]->(m)",
+            "MATCH (f:Function)-[:CALLS]->(f) MERGE (f)-[:RECURSES_TO]->(f)"
+        ]
+        try:
+            with self.graph:
+                self.graph.query_batch(queries)
+        except Exception as e:
+            import sys
+            print(f"Warning: Failed to post-process recursion: {e}", file=sys.stderr)
+
     def index_directory(self, dirpath: str, progress_callback=None) -> dict:
         import pathlib
         import hashlib
         from concurrent.futures import ThreadPoolExecutor
         
         path = pathlib.Path(dirpath).resolve()
-        SUPPORTED = {'.py','.pyi','.java','.scala','.kt','.js','.jsx','.ts','.tsx',
-                     '.cpp','.cc','.cxx','.c','.h','.hpp','.hxx','.go','.rs','.swift'}
-        ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules"}
+        from src.core.constants import SUPPORTED_EXTENSIONS
+        SUPPORTED = SUPPORTED_EXTENSIONS
+        ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}
         files = []
         for r, d, fnames in os.walk(str(path)):
             d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
@@ -640,6 +739,8 @@ class CodebaseIndexer:
                 progress_callback(len(files), len(files), f"Removing {stale_count} stale files...")
             with self.graph:
                 self.search_index.clear_files_bulk(stale_files)
+                
+        self._post_process_recursion()
          
         if progress_callback:
             progress_callback(len(files), len(files), "Resolving symbols")

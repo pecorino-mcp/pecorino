@@ -1,4 +1,5 @@
 import os
+import threading
 from typing import List, Dict, Any
 from src.mcp_server.index_db import get_db_path_for_repo, find_repo_root
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
@@ -9,9 +10,11 @@ class GraphAPI:
         self.db_path = get_db_path_for_repo(self.repo_path)
         self.graph = GorgonzolaGraph(db_path=self.db_path)
         self._pagerank_cache = None
+        self._pagerank_lock = threading.Lock()
 
     def invalidate_pagerank_cache(self):
-        self._pagerank_cache = None
+        with self._pagerank_lock:
+            self._pagerank_cache = None
 
     def get_file_dependencies(self, filepath: str) -> Dict[str, Any]:
         """Query incoming and outgoing file dependencies and PageRank score."""
@@ -40,10 +43,11 @@ class GraphAPI:
 
         if graph_status == "ok":
             try:
-                if self._pagerank_cache is None:
-                    pr_scores = self.graph.pagerank()
-                    self._pagerank_cache = {pr.get("node_id"): pr.get("score", 0.0) for pr in pr_scores}
-                pagerank_score = self._pagerank_cache.get(filepath, 0.0)
+                with self._pagerank_lock:
+                    if self._pagerank_cache is None:
+                        pr_scores = self.graph.pagerank()
+                        self._pagerank_cache = {pr.get("node_id"): pr.get("score", 0.0) for pr in pr_scores}
+                    pagerank_score = self._pagerank_cache.get(filepath, 0.0)
             except Exception as e:
                 graph_status = "unavailable"
                 error_msg = str(e)
@@ -156,3 +160,53 @@ class GraphAPI:
         ]
         
         self.graph.query_batch(queries)
+
+    def analyze_functional_purity(self) -> Dict[str, Any]:
+        """Aggregate functional purity metrics: Lambda density, State mutations, Recursive loops."""
+        result = {
+            "lambda_density": [],
+            "state_mutation_hotspots": [],
+            "recursive_loops": []
+        }
+        try:
+            # 1. Lambda Density
+            q_lambdas = '''
+            MATCH (f:File)-[:CONTAINS*1..3]->(m)-[:CONTAINS_LAMBDA]->(l:Lambda)
+            RETURN f.name AS file, COUNT(l) AS lambda_count
+            ORDER BY lambda_count DESC LIMIT 20
+            '''
+            for row in self.graph.query(q_lambdas):
+                result["lambda_density"].append({
+                    "file": row.get("file"),
+                    "count": row.get("lambda_count")
+                })
+            
+            # 2. State Mutation Hotspots
+            q_mutations = '''
+            MATCH (m)-[a:ACCESSES_STATE]->(v:Variable)
+            WHERE a.is_mutation = true OR a.is_taint = true
+            RETURN m.name AS function_name, COUNT(v) AS mutation_count
+            ORDER BY mutation_count DESC LIMIT 20
+            '''
+            for row in self.graph.query(q_mutations):
+                result["state_mutation_hotspots"].append({
+                    "function": row.get("function_name"),
+                    "mutation_count": row.get("mutation_count")
+                })
+                
+            # 3. Recursive Loops
+            q_recursion = '''
+            MATCH (m)-[:RECURSES_TO]->(m)
+            RETURN m.name AS recursive_function, m.filepath AS filepath
+            LIMIT 50
+            '''
+            for row in self.graph.query(q_recursion):
+                result["recursive_loops"].append({
+                    "function": row.get("recursive_function"),
+                    "filepath": row.get("filepath")
+                })
+                
+        except Exception as e:
+            result["error"] = str(e)
+            
+        return result

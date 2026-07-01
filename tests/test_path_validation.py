@@ -6,30 +6,10 @@ from unittest.mock import patch
 
 from src.mcp_server.config import settings
 from src.mcp_server.core import (
-    is_absolute_path,
-    has_valid_extension,
     is_safe_path,
     safe_path,
 )
 from src.core.errors import TargetNotFoundError, SecurityValidationError
-
-def test_is_absolute_path():
-    sys_name = platform.system()
-    if sys_name == "Windows":
-        assert is_absolute_path("C:\\Users\\test") is True
-        assert is_absolute_path("\\\\server\\share\\path") is True
-        assert is_absolute_path("relative\\path") is False
-    else:
-        assert is_absolute_path("/home/user/test") is True
-        assert is_absolute_path("relative/path") is False
-        assert is_absolute_path("./relative/path") is False
-
-def test_has_valid_extension():
-    assert has_valid_extension("test.py") is True
-    assert has_valid_extension("test.js") is True
-    assert has_valid_extension("test.java") is True
-    assert has_valid_extension("test.txt") is False
-    assert has_valid_extension("test.unknown") is False
 
 def test_is_safe_path_within_workspace(tmp_path):
     workspace = tmp_path / "workspace"
@@ -75,11 +55,40 @@ def test_is_safe_path_allow_external(tmp_path):
     file_external = external / "test.py"
     file_external.touch()
 
-    with patch.object(settings, "workspace_root", workspace):
+    with patch.object(settings, "workspace_root", workspace), \
+         patch.object(settings, "allowed_external_roots", {external}):
         # Without allow_external, should be blocked
         assert is_safe_path(str(file_external)) is False
-        # With allow_external, should be allowed
+        # With allow_external and target under allowed root, should be allowed
         assert is_safe_path(str(file_external), allow_external=True) is True
+
+def test_is_safe_path_allow_external_without_allowlist(tmp_path):
+    """allow_external=True with empty allowlist should block everything."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external_repo"
+    external.mkdir()
+    file_external = external / "test.py"
+    file_external.touch()
+
+    with patch.object(settings, "workspace_root", workspace), \
+         patch.object(settings, "allowed_external_roots", set()):
+        assert is_safe_path(str(file_external), allow_external=True) is False
+
+def test_is_safe_path_allow_external_wrong_root(tmp_path):
+    """allow_external=True should block paths not under any allowed root."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = tmp_path / "allowed_repo"
+    allowed.mkdir()
+    other = tmp_path / "other_repo"
+    other.mkdir()
+    file_other = other / "test.py"
+    file_other.touch()
+
+    with patch.object(settings, "workspace_root", workspace), \
+         patch.object(settings, "allowed_external_roots", {allowed}):
+        assert is_safe_path(str(file_other), allow_external=True) is False
 
 def test_safe_path_function(tmp_path):
     workspace = tmp_path / "workspace"
@@ -99,6 +108,39 @@ def test_safe_path_function(tmp_path):
         outside_file.touch()
         with pytest.raises(SecurityValidationError, match="Path outside allowed workspace"):
             safe_path(str(outside_file))
+
+
+def test_is_safe_path_project_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    other_project = tmp_path / "other_project"
+    other_project.mkdir()
+    (other_project / ".git").mkdir()
+    
+    file_in_other = other_project / "src" / "test.py"
+    file_in_other.parent.mkdir()
+    file_in_other.touch()
+    
+    with patch.object(settings, "workspace_root", workspace):
+        # File is outside workspace_root and no allow_external, but it's inside a project workspace (.git)
+        assert is_safe_path(str(file_in_other)) is True
+
+
+def test_is_safe_path_cwd(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    cwd_dir = tmp_path / "my_cwd"
+    cwd_dir.mkdir()
+    
+    file_in_cwd = cwd_dir / "test.py"
+    file_in_cwd.touch()
+    
+    with patch.object(settings, "workspace_root", workspace):
+        with patch("pathlib.Path.cwd", return_value=cwd_dir):
+            assert is_safe_path(str(file_in_cwd)) is True
+
 
 
 def test_find_repo_root(tmp_path):

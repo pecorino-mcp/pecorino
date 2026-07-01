@@ -11,8 +11,9 @@ def get_ast_classes():
         ImportDef,
         InterfaceDef,
         ModuleDef,
+        ControlFlowDef,
     )
-    return ModuleDef, ClassDef, InterfaceDef, FunctionDef, ImportDef, AttributeDef
+    return ModuleDef, ClassDef, InterfaceDef, FunctionDef, ImportDef, AttributeDef, ControlFlowDef
 
 def get_language_from_extension(extension: str) -> str:
     """Map file extension to language name."""
@@ -38,6 +39,10 @@ LANGUAGE_QUERIES = {
         (function_definition) @func.def
         (import_statement) @import.def
         (import_from_statement) @import.def
+        (for_statement) @loop.def
+        (while_statement) @loop.def
+        (if_statement) @branch.def
+        (lambda) @lambda.def
     """,
     'java': """
         (class_declaration) @class.def
@@ -46,6 +51,13 @@ LANGUAGE_QUERIES = {
         (constructor_declaration) @func.def
         (import_declaration) @import.def
         (field_declaration) @attr.def
+        (for_statement) @loop.def
+        (enhanced_for_statement) @loop.def
+        (while_statement) @loop.def
+        (do_statement) @loop.def
+        (if_statement) @branch.def
+        (switch_expression) @branch.def
+        (lambda_expression) @lambda.def
     """,
     'javascript': """
         (class_declaration) @class.def
@@ -53,6 +65,13 @@ LANGUAGE_QUERIES = {
         (method_definition) @func.def
         (import_statement) @import.def
         (field_definition) @attr.def
+        (for_statement) @loop.def
+        (for_in_statement) @loop.def
+        (while_statement) @loop.def
+        (do_statement) @loop.def
+        (if_statement) @branch.def
+        (switch_statement) @branch.def
+        (arrow_function) @lambda.def
     """,
     'typescript': """
         (class_declaration) @class.def
@@ -62,6 +81,13 @@ LANGUAGE_QUERIES = {
         (import_statement) @import.def
         (public_field_definition) @attr.def
         (property_signature) @attr.def
+        (for_statement) @loop.def
+        (for_in_statement) @loop.def
+        (while_statement) @loop.def
+        (do_statement) @loop.def
+        (if_statement) @branch.def
+        (switch_statement) @branch.def
+        (arrow_function) @lambda.def
     """,
     'cpp': """
         (class_specifier) @class.def
@@ -69,6 +95,12 @@ LANGUAGE_QUERIES = {
         (function_definition) @func.def
         (preproc_include) @import.def
         (field_declaration) @attr.def
+        (for_statement) @loop.def
+        (while_statement) @loop.def
+        (do_statement) @loop.def
+        (if_statement) @branch.def
+        (switch_statement) @branch.def
+        (lambda_expression) @lambda.def
     """,
     'go': """
         (type_spec type: (struct_type)) @class.def
@@ -76,6 +108,12 @@ LANGUAGE_QUERIES = {
         (function_declaration) @func.def
         (method_declaration) @func.def
         (import_declaration) @import.def
+        (for_statement) @loop.def
+        (if_statement) @branch.def
+        (expression_switch_statement) @branch.def
+        (type_switch_statement) @branch.def
+        (select_statement) @branch.def
+        (func_literal) @lambda.def
     """,
     'rust': """
         (struct_item) @class.def
@@ -83,18 +121,38 @@ LANGUAGE_QUERIES = {
         (function_item) @func.def
         (impl_item) @class.impl
         (use_declaration) @import.def
+        (for_expression) @loop.def
+        (while_expression) @loop.def
+        (loop_expression) @loop.def
+        (if_expression) @branch.def
+        (match_expression) @branch.def
+        (closure_expression) @lambda.def
     """,
     'swift': """
         (class_declaration) @class.def
         (protocol_declaration) @iface.def
         (function_declaration) @func.def
         (import_declaration) @import.def
+        (for_statement) @loop.def
+        (while_statement) @loop.def
+        (repeat_while_statement) @loop.def
+        (if_statement) @branch.def
+        (switch_statement) @branch.def
+        (guard_statement) @branch.def
+        (closure_expression) @lambda.def
     """,
     'ruby': """
         (class) @class.def
         (module) @class.def
         (method) @func.def
         (call method: (identifier) @m (#match? @m "^(require|require_relative|include|extend)$")) @import.def
+        (for) @loop.def
+        (while) @loop.def
+        (until) @loop.def
+        (if) @branch.def
+        (unless) @branch.def
+        (case) @branch.def
+        (lambda) @lambda.def
     """
 }
 
@@ -107,7 +165,7 @@ class TreeSitterExtractor:
         self.lang_obj = lang_obj
 
         # Resolve AST classes lazily
-        self.ModuleDef, self.ClassDef, self.InterfaceDef, self.FunctionDef, self.ImportDef, self.AttributeDef = get_ast_classes()
+        self.ModuleDef, self.ClassDef, self.InterfaceDef, self.FunctionDef, self.ImportDef, self.AttributeDef, self.ControlFlowDef = get_ast_classes()
 
         self.module = self.ModuleDef()
         # Out-of-line method definitions (for Go receivers & Rust impl blocks)
@@ -346,7 +404,7 @@ class TreeSitterExtractor:
 
         complexity = 1 + self._count_complexity(node)
         called_methods = self._find_called_methods(node)
-        accessed_attributes = self._find_accessed_attributes(node)
+        reads, mutations, taints = self._find_state_accesses(node)
 
         return self.FunctionDef(
             name=name,
@@ -359,7 +417,9 @@ class TreeSitterExtractor:
             body_end=node.end_point[0] + 1,
             cyclomatic_complexity=complexity,
             called_methods=called_methods,
-            accessed_attributes=accessed_attributes,
+            read_attributes=reads,
+            mutated_attributes=mutations,
+            tainted_attributes=taints,
             parameter_types=parameter_types,
             lineno=node.start_point[0] + 1,
             col_offset=node.start_point[1],
@@ -441,10 +501,32 @@ class TreeSitterExtractor:
 
         return called
 
-    def _find_accessed_attributes(self, node) -> Set[str]:
-        attrs = set()
+    def _find_state_accesses(self, node):
+        reads = set()
+        mutations = set()
+        taints = set()
 
-        def visit(n):
+        def visit(n, context="read"):
+            child_context = context
+            if n.type in ('assignment', 'assignment_expression', 'assignment_statement'):
+                left = n.child_by_field_name('left')
+                if left:
+                    visit(left, context="mutate")
+                right = n.child_by_field_name('right')
+                if right:
+                    visit(right, context="read")
+                return
+            elif n.type in ('update_expression', 'inc_statement', 'dec_statement'):
+                child_context = "mutate"
+            elif n.type in ('call_expression', 'call', 'method_invocation'):
+                args = n.child_by_field_name('arguments') or n.child_by_field_name('argument_list')
+                if args:
+                    visit(args, context="taint")
+                func = n.child_by_field_name('function') or n.child_by_field_name('method')
+                if func:
+                    visit(func, context="read")
+                return
+
             if n.type in ('member_expression', 'attribute', 'field_expression', 'selector_expression', 'field_access'):
                 obj_node = n.child_by_field_name('object') or n.child_by_field_name('argument') or n.child_by_field_name('operand')
                 prop_node = n.child_by_field_name('property') or n.child_by_field_name('field') or n.child_by_field_name('attribute')
@@ -457,10 +539,15 @@ class TreeSitterExtractor:
                     obj_text = self._get_text(obj_node)
                     prop_text = self._get_text(prop_node)
                     if obj_text in ('self', 'this'):
-                        attrs.add(prop_text)
+                        if context == "mutate":
+                            mutations.add(prop_text)
+                        elif context == "taint":
+                            taints.add(prop_text)
+                        else:
+                            reads.add(prop_text)
 
             for child in n.children:
-                visit(child)
+                visit(child, child_context)
 
         body_node = node.child_by_field_name('body')
         if body_node:
@@ -470,7 +557,7 @@ class TreeSitterExtractor:
                 if child.type not in ('identifier', 'type_identifier', 'formal_parameters', 'parameters', 'modifiers'):
                     visit(child)
 
-        return attrs
+        return reads, mutations, taints
 
     def _parse_import(self, node) -> List[Any]:
         imports = []
@@ -626,6 +713,8 @@ class TreeSitterExtractor:
         flat_interfaces = []
         flat_functions = []
         flat_attributes = []
+        flat_statements = []
+        flat_lambdas = []
         rust_impls = []
 
         # In captures, we get a dict of {capture_name: [nodes]}
@@ -674,16 +763,61 @@ class TreeSitterExtractor:
                         if '<' in impl_name:
                             impl_name = impl_name.split('<')[0].strip()
                         rust_impls.append((node, impl_name))
+                elif capture_name in ("loop.def", "branch.def"):
+                    stmt = self._parse_control_flow(node, capture_name)
+                    flat_statements.append((node, stmt))
+                elif capture_name == "lambda.def":
+                    flat_lambdas.append((node, node)) # Just store node for now, parse during hierarchy to get parent
 
-        self._reconstruct_hierarchy(flat_classes, flat_interfaces, flat_functions, flat_attributes, rust_impls)
+        self._reconstruct_hierarchy(flat_classes, flat_interfaces, flat_functions, flat_attributes, flat_statements, flat_lambdas, rust_impls)
         self.finalize()
 
-    def _reconstruct_hierarchy(self, flat_classes, flat_interfaces, flat_functions, flat_attributes, rust_impls):
+    def _parse_control_flow(self, node, capture_name) -> Any:
+        stmt = self.ControlFlowDef(
+            name=node.type,
+            type="loop" if capture_name == "loop.def" else "branch",
+            lineno=node.start_point[0] + 1,
+            col_offset=node.start_point[1],
+            end_lineno=node.end_point[0] + 1,
+            end_col_offset=node.end_point[1]
+        )
+        stmt.called_methods = self._find_called_methods(node)
+        reads, mutations, taints = self._find_state_accesses(node)
+        stmt.read_attributes = reads
+        stmt.mutated_attributes = mutations
+        stmt.tainted_attributes = taints
+        return stmt
+
+    def _parse_lambda(self, node, parent_name) -> Any:
+        name = f"{parent_name}$lambda_{node.start_point[0] + 1}_{node.start_point[1]}"
+        reads, mutations, taints = self._find_state_accesses(node)
+        
+        from src.parsers.ast import LambdaDef
+        lmd = LambdaDef(
+            name=name,
+            called_methods=self._find_called_methods(node),
+            read_attributes=reads,
+            mutated_attributes=mutations,
+            tainted_attributes=taints,
+            lineno=node.start_point[0] + 1,
+            col_offset=node.start_point[1],
+            end_lineno=node.end_point[0] + 1,
+            end_col_offset=node.end_point[1]
+        )
+        return lmd
+
+    def _reconstruct_hierarchy(self, flat_classes, flat_interfaces, flat_functions, flat_attributes, flat_statements, flat_lambdas, rust_impls):
         containers = []
         for node, cls in flat_classes:
             containers.append((node.start_byte, node.end_byte, cls, 'class'))
         for node, iface in flat_interfaces:
             containers.append((node.start_byte, node.end_byte, iface, 'iface'))
+        for node, func in flat_functions:
+            containers.append((node.start_byte, node.end_byte, func, 'function'))
+        for node, stmt in flat_statements:
+            containers.append((node.start_byte, node.end_byte, stmt, 'statement'))
+        for node, _ in flat_lambdas:
+            containers.append((node.start_byte, node.end_byte, node, 'lambda_node'))
         for node, impl_name in rust_impls:
             containers.append((node.start_byte, node.end_byte, impl_name, 'rust_impl'))
 
@@ -720,6 +854,31 @@ class TreeSitterExtractor:
             c_obj, c_type = get_container(node.start_byte, node.end_byte)
             if c_type == 'class':
                 c_obj.attributes.append(attr)
+
+        for node, stmt in flat_statements:
+            c_obj, c_type = get_container(node.start_byte, node.end_byte)
+            if c_type in ('function', 'statement', 'lambda'):
+                c_obj.statements.append(stmt)
+                
+        # Now process lambdas since they need their parent function name
+        # We process from smallest to largest to handle nested lambdas correctly?
+        # Actually just find container
+        for node, _ in flat_lambdas:
+            c_obj, c_type = get_container(node.start_byte, node.end_byte)
+            parent_name = "global"
+            if c_obj and hasattr(c_obj, "name"):
+                parent_name = c_obj.name
+            
+            lmd = self._parse_lambda(node, parent_name)
+            
+            # Replace the node in containers with the actual LambdaDef object so nested things can find it
+            for i, (cs, ce, co, ct) in enumerate(containers):
+                if ct == 'lambda_node' and cs == node.start_byte and ce == node.end_byte:
+                    containers[i] = (cs, ce, lmd, 'lambda')
+                    break
+                    
+            if c_type in ('function', 'statement', 'lambda'):
+                c_obj.lambdas.append(lmd)
 
     def traverse(self, node):
         node_type = node.type
