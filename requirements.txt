@@ -14,10 +14,17 @@ pydantic
 fastapi
 PyJWT
 prometheus_client
-git+https://github.com/modelcontextprotocol/python-sdk.git@ac36a395aa23f3e39e8bb628db3e07855f8d8c62
+-e ./modules/python-sdk
+-e ./modules/python-sdk/src/mcp-types
+
 pytest>=7.0.0
 pytest-asyncio
 mypy>=1.0.0
 ruff>=0.1.0
 gorgonzola
 duckdb
+docker
+httpx2
+-e ./modules/pecorino-utils
+
+# trigger update

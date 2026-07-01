@@ -1,3 +1,4 @@
+import os
 from collections import defaultdict
 from typing import Any, List, Optional, Set
 
@@ -171,6 +172,18 @@ class TreeSitterExtractor:
         # Out-of-line method definitions (for Go receivers & Rust impl blocks)
         self.out_of_line_methods = defaultdict(list)
 
+        # Load metrics query
+        self.metrics_query = None
+        if self.lang_obj:
+            query_path = os.path.join(os.path.dirname(__file__), 'queries', f'{self.language}.scm')
+            if os.path.exists(query_path):
+                try:
+                    with open(query_path, 'r', encoding='utf-8') as f:
+                        query_str = f.read()
+                    self.metrics_query = tree_sitter.Query(self.lang_obj, query_str)
+                except Exception:
+                    pass
+
     def _get_text(self, node) -> str:
         if not node:
             return ""
@@ -186,50 +199,31 @@ class TreeSitterExtractor:
         return [c for c in node.children if c.type == type_name]
 
     def _extract_types(self, node) -> List[str]:
-        if not node:
+        if not node or getattr(self, 'metrics_query', None) is None:
             return []
+            
         types = []
-
-        # Compound identifier/type types that we want as a single string
-        COMPOUND_TYPES = ('member_expression', 'qualified_identifier', 'nested_identifier', 'attribute')
-        # Leaf identifier/type types
-        LEAF_TYPES = ('type_identifier', 'user_type', 'identifier')
-        # Container/wrapper types where we only want to extract the base name/value
-        BASE_ONLY_TYPES = ('subscript', 'generic_type', 'template_type')
-        # Types that represent generic parameters/arguments that we want to skip completely
-        SKIP_TYPES = ('type_arguments', 'type_parameters', 'type_parameter_list', 'template_argument_list', 'keyword_argument')
-
-        def collect(n):
-            if n.type in SKIP_TYPES:
-                return
-
-            if n.type in COMPOUND_TYPES:
-                types.append(self._get_text(n))
-                return
-
-            if n.type in BASE_ONLY_TYPES:
-                # Only collect from the value/name part of the generic/subscript/template
-                value_node = n.child_by_field_name('value') or n.child_by_field_name('name')
-                if not value_node and n.children:
-                    value_node = n.children[0]
-                if value_node:
-                    collect(value_node)
-                return
-
-            if n.type in LEAF_TYPES:
-                # Check if it has any child nodes that are also identifiers or compound types
-                has_child_identifier = any(
-                    c.type in LEAF_TYPES or c.type in COMPOUND_TYPES or c.type in BASE_ONLY_TYPES
-                    for c in n.children
-                )
-                if not has_child_identifier:
-                    types.append(self._get_text(n))
-                    return
-
-            for child in n.children:
-                collect(child)
-
-        collect(node)
+        try:
+            cursor = tree_sitter.QueryCursor(self.metrics_query)
+            captures = cursor.captures(node)
+            
+            compound_nodes = captures.get("type.compound", [])
+            leaf_nodes = captures.get("type.leaf", [])
+            
+            for c_node in compound_nodes:
+                types.append(self._get_text(c_node))
+                
+            for leaf in leaf_nodes:
+                is_inside = False
+                for c_node in compound_nodes:
+                    if leaf.start_byte >= c_node.start_byte and leaf.end_byte <= c_node.end_byte:
+                        is_inside = True
+                        break
+                if not is_inside:
+                    types.append(self._get_text(leaf))
+        except Exception:
+            pass
+            
         return types
 
     def _parse_class(self, node) -> Any:
@@ -428,37 +422,14 @@ class TreeSitterExtractor:
         )
 
     def _count_complexity(self, node) -> int:
-        complexity = 0
-        COMPLEXITY_NODES = {
-            # Statements
-            'if_statement', 'while_statement', 'for_statement', 'for_in_statement',
-            'enhanced_for_statement', 'do_statement', 'repeat_while_statement',
-            'switch_statement', 'switch_case', 'case_statement', 'default_case',
-            'match_pattern', 'alternative', 'guard_statement',
-            'select_statement', 'communication_case', 'expression_case',
-
-            # Expressions (Rust, Ruby, JS, Swift)
-            'if_expression', 'for_expression', 'while_expression', 'loop_expression',
-            'match_expression', 'match_arm', 'ternary_expression',
-            'conditional_expression',
-
-            # Ruby / Python constructs
-            'if', 'unless', 'while', 'until', 'case', 'when', 'except_clause',
-            'except_handler', 'catch_clause'
-        }
-
-        if node.type in COMPLEXITY_NODES:
-            if len(node.children) > 0 or node.type not in ('if', 'while', 'for', 'unless', 'until', 'case', 'when', 'catch', 'except'):
-                complexity += 1
-        elif node.type == 'binary_expression':
-            op_node = node.child_by_field_name('operator')
-            if op_node and op_node.type in ('&&', '||', 'and', 'or'):
-                complexity += 1
-
-        for child in node.children:
-            complexity += self._count_complexity(child)
-
-        return complexity
+        if getattr(self, 'metrics_query', None) is None:
+            return 0
+        try:
+            cursor = tree_sitter.QueryCursor(self.metrics_query)
+            captures = cursor.captures(node)
+            return len(captures.get("complexity", []))
+        except Exception:
+            return 0
 
     def _find_called_methods(self, node) -> Set[str]:
         called = set()
@@ -1080,3 +1051,28 @@ def parse_with_tree_sitter(source: str, extension: str) -> Optional[Any]:
     extractor.extract_with_queries(tree.root_node)
 
     return extractor.module
+
+def get_raw_tree_sitter_tree(source: str, extension: str) -> Optional[Any]:
+    """Returns the raw tree-sitter Tree object, used for Halstead metrics."""
+    global _grammar_manager
+
+    language = get_language_from_extension(extension)
+    if language == 'unknown':
+        return None
+
+    with _parser_lock:
+        if _grammar_manager is None:
+            from src.parsers.tsgm import TreeSitterGrammarManager
+            _grammar_manager = TreeSitterGrammarManager()
+        try:
+            lang_obj = _grammar_manager.get_language(language)
+        except Exception:
+            try:
+                _grammar_manager.install(language)
+                _grammar_manager.build_all()
+                lang_obj = _grammar_manager.get_language(language)
+            except Exception:
+                return None
+
+    parser = tree_sitter.Parser(lang_obj)
+    return parser.parse(source.encode('utf-8'))

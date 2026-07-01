@@ -2,13 +2,20 @@
 	path = modules/python-sdk
 	url = https://github.com/modelcontextprotocol/python-sdk
 	branch = main
+	ignore = dirty
 [submodule "tree-sitter"]
 	path = modules/tree-sitter
 	url = https://github.com/tree-sitter/tree-sitter
 	branch = master
+	ignore = dirty
 [submodule "modules/gorgonzola"]
 	path = modules/gorgonzola
 	url = https://github.com/lechibang-1512/gorgonzola
+	ignore = dirty
 [submodule "modules/py-tree-sitter"]
 	path = modules/py-tree-sitter
 	url = https://github.com/tree-sitter/py-tree-sitter
+	ignore = dirty
+[submodule "modules/pecorino-utils"]
+	path = modules/pecorino-utils
+	url = https://github.com/pecorino-mcp/pecorino-utils.git
