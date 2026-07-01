@@ -8,7 +8,7 @@ Pecorino allows Large Language Models (LLMs) and dev tools (such as Claude Deskt
 
 ## ✨ Features
 
-- 🔌 **Model Context Protocol (MCP)**: Exposes 4 unified tools (`browse`, `metrics`, `report`, `update_index`) to your AI assistant.
+- 🔌 **Model Context Protocol (MCP)**: Exposes 3 unified tools (`browse`, `metrics`, `update_index`) to your AI assistant.
 - 📊 **Git History Analytics**: Commits, LOC growth, author contributions, activity patterns, and team performance tracking.
 - 📐 **Object-Oriented Design Metrics**: Afferent/efferent coupling (Ca/Ce), instability (I), abstractness (A), and Distance-from-Main-Sequence (D) analysis.
 - 🚨 **Risk Hotspot Detection**: Combines code churn (revision frequency) and complexity to pinpoint high-risk source files.
@@ -24,7 +24,7 @@ Clone the repository recursively (to fetch the MCP SDK submodule) and set up the
 
 ```bash
 # Clone recursively
-git clone --recursive https://github.com/lechibang-1512/pecorino.git
+git clone --recursive https://github.com/pecorino-mcp/pecorino.git
 cd pecorino
 
 # Create and activate virtual environment
@@ -67,9 +67,14 @@ Once connected, your AI assistant can use the following tools:
 ### 1. `/browse`
 Inspects directories, files, or performs a semantic FTS search on the indexed codebase.
 - **Parameters**:
-  - `target` *(string, required)*: Absolute path to the file or directory.
-  - `view` *(string, optional)*: `"summary"` (default), `"classes"`, `"functions"`, `"deps"` (imports), `"tree"` (directory tree), or `"search"` (semantic search).
-  - `query` *(string, optional)*: The search term (required if `view` is `"search"`).
+  - `target` *(string, optional)*: Absolute path to the file or directory. Defaults to the current workspace root.
+  - `view` *(string, optional)*: One of:
+    - **Structure**: `"summary"` (default), `"classes"`, `"functions"`, `"deps"` (imports), `"tree"` (AST/directory tree)
+    - **Search**: `"search"` (semantic FTS), `"code"` (source code retrieval)
+    - **Graph**: `"callers"`, `"callees"`, `"impact"`, `"pagerank"`, `"functional-analysis"`
+  - `query` *(string, optional)*: The search term (required for `search`, `callers`, `callees`, and `code` on directories).
+  - `limit` *(integer, optional)*: Maximum results to return (default: 10).
+  - `offset` *(integer, optional)*: Offset for pagination (default: 0).
 
 ### 2. `/metrics`
 Computes design metrics, cyclomatic complexity, Halstead metrics, or risk hotspots.
@@ -77,13 +82,7 @@ Computes design metrics, cyclomatic complexity, Halstead metrics, or risk hotspo
   - `target` *(string, required)*: Absolute path to the file or folder.
   - `what` *(array of strings, optional)*: Metrics to run (`"oop"`, `"complexity"`, `"hotspots"`, or `"all"`).
 
-### 3. `/report`
-Runs a full repository scan and exports a structured JSON report directly to `<repo_name>_report/pecorino_metrics.json` inside your specified output directory.
-- **Parameters**:
-  - `repo_path` *(string, required)*: Absolute path to the Git repository.
-  - `output_path` *(string, required)*: Absolute path to the output directory.
-
-### 4. `/update_index`
+### 3. `/update_index`
 Performs tree-sitter AST analysis and populates the DuckDB codebase index for fast semantic searching.
 - **Parameters**:
   - `target` *(string, required)*: Absolute path to the file or folder to index.
@@ -96,12 +95,15 @@ Performs tree-sitter AST analysis and populates the DuckDB codebase index for fa
 - `src/core/` — Core metrics collector and configuration.
 - `src/git/` — Git history and commit log parsers.
 - `src/mcp_server/` — MCP server endpoints and core logic.
-  - `src/mcp_server/index.py` — DuckDB Full-Text Search (FTS) codebase index.
+  - `src/mcp_server/index_pipeline.py` — Unified AST extraction and indexing pipeline.
+  - `src/mcp_server/index_db.py` — DuckDB Full-Text Search (FTS) codebase index.
   - `src/mcp_server/gorgonzola_graph.py` — Gorgonzola graph database adapter.
+  - `src/mcp_server/ramdisk.py` — `/dev/shm` RAM-disk staging for bulk indexing.
 - `src/metrics/` — Maintainability index and Object-Oriented design metrics analyzers.
 - `src/parsers/` — AST parsing (using Tree-sitter).
 - `src/transports/` — MCP Adapters (stdio, fastAPI).
 - `src/utils/` — Export formats and helper utilities.
+- `modules/docs/` — Architecture and pipeline documentation.
 - `tests/` — Automated test suites.
 
 ---
@@ -121,7 +123,7 @@ pecorino-mcp --transport sse --host 127.0.0.1 --port 8000
 python pecorino.py /path/to/repo /path/to/output_dir
 ```
 
-For comprehensive CLI flags, transport details, and configuration options, see the [Local Server Deployment Guide](docs/local_server_deployment.md).
+For comprehensive CLI flags, transport details, and configuration options, see the [Local Server Deployment Guide](https://github.com/pecorino-mcp/pecorino-docs/blob/main/local_server_deployment.md).
 
 ---
 

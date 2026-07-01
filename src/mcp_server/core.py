@@ -7,6 +7,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+_fts_rebuild_lock = threading.Lock()
+_auto_sync_lock = threading.Lock()
 from typing import Any, List, Optional
 
 import mcp_types as types
@@ -38,15 +41,17 @@ ALLOWED_OUTPUT = workspace_root / ".mcp_outputs"
 ALLOWED_OUTPUT.mkdir(exist_ok=True)
 MAX_READ_BYTES = 1_000_000  # 1 MB
 ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree", "search",
-                           "callers", "callees", "impact", "pagerank", "functional-analysis"})
+                           "callers", "callees", "impact", "pagerank", "functional-analysis", "code"})
 ALLOWED_WHAT = frozenset({"oop", "complexity", "hotspots", "all"})
 ALLOWED_API_TYPES = frozenset({"index", "graph"})
 MAX_LIMIT = 100
 MAX_DEPTH = 10
 MAX_QUERY_LEN = 200
+MAX_CODE_LINES = 300  # Max lines of source code returned per result in 'code' view
 INDEX_TIMEOUT_S = 300  # 5 minutes
 SUSPICIOUS_PATTERNS = ("ignore previous", "system prompt", "you are now",
                        "disregard", "forget your instructions")
+STRICT_INJECTION_CHECK = os.getenv("PECORINO_STRICT_INJECTION_CHECK", "").lower() in ("true", "1", "yes")
 
 from src.mcp_server.config import settings
 from src.core.errors import (
@@ -144,24 +149,27 @@ def safe_path(p: str, allow_external: bool = False) -> Path:
     if not path.exists():
         raise TargetNotFoundError(f"Not found: {path}")
 
-    # Must be safe (no directory traversal out of workspace roots)
+    # Must be safe (no directory traversal out of workspace roots).
+    # Note: resolve() above already followed any symlinks, so the
+    # validated path is the final real path — no separate symlink check needed.
     if not is_safe_path(str(path), allow_external):
         raise SecurityValidationError(f"Path outside allowed workspace: {path}")
-
-    # Block symlink escapes
-    if path.is_symlink():
-        real = path.resolve()
-        if not is_safe_path(str(real), allow_external):
-            raise SecurityValidationError("Symlink escape blocked")
 
     return path
 
 
 def safe_output_path(p: str) -> Path:
-    """Restrict output writes to ALLOWED_OUTPUT directory, using basename only."""
-    out = (ALLOWED_OUTPUT / Path(p).name).resolve()
+    """Validate output path — must be a relative filename (placed in ALLOWED_OUTPUT)
+    or an absolute path already under ALLOWED_OUTPUT."""
+    if Path(p).is_absolute():
+        out = Path(p).resolve()
+    else:
+        out = (ALLOWED_OUTPUT / Path(p).name).resolve()
     if not out.is_relative_to(ALLOWED_OUTPUT):
-        raise SecurityValidationError("Invalid output location")
+        raise SecurityValidationError(
+            f"output_file must be a relative filename (written to {ALLOWED_OUTPUT}) "
+            f"or an absolute path under {ALLOWED_OUTPUT}. Got: {p}"
+        )
     return out
 
 
@@ -220,17 +228,100 @@ def clear_api_cache():
                 except Exception:
                     pass
 
+def clear_index_cache():
+    """Clear only CodeSearchIndex (DuckDB) cache entries, preserving GraphAPI.
+
+    This avoids destroying the GraphAPI's PageRank cache on every auto-sync,
+    which would force expensive recomputation on the next pagerank view.
+    """
+    with _API_CACHE_LOCK:
+        keys_to_remove = [k for k in _API_CACHE if k[1] == "index"]
+        for k in keys_to_remove:
+            api = _API_CACHE.pop(k)
+            if hasattr(api, 'close'):
+                try:
+                    api.close()
+                except Exception:
+                    pass
+        # Invalidate pagerank cache on any remaining GraphAPI instances
+        for k, api in _API_CACHE.items():
+            if k[1] == "graph" and hasattr(api, 'invalidate_pagerank_cache'):
+                api.invalidate_pagerank_cache()
+
 # Core implementation of tools (without decorators)
-async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False) -> dict:
+
+async def _auto_sync_stale(repo_root: str, db_path: str, scope_path: str):
+    """Detect and re-index files whose on-disk mtime is newer than indexed mtime.
+
+    Runs inline before browse queries to ensure the index reflects current disk state.
+    Protected by a lock to prevent concurrent reindexing of the same files.
+    """
+    import hashlib
+    from src.mcp_server.index_db import CodeSearchIndex
+
+    def _sync():
+        with _auto_sync_lock:
+            check_index = CodeSearchIndex(db_path=db_path, read_only=True)
+            try:
+                stale_files = check_index.get_stale_files(scope_path)
+            finally:
+                check_index.close()
+
+            if not stale_files:
+                return 0
+
+            sys.stderr.write(f"[INFO] Auto-sync: {len(stale_files)} stale file(s) detected, re-indexing...\n")
+            sys.stderr.flush()
+
+            from src.mcp_server.index_pipeline import CodebaseIndexer
+
+            # Must close cached read-only connections before opening a write connection —
+            # DuckDB doesn't allow mixing read_only and read_write to the same file.
+            clear_index_cache()
+
+            indexer = CodebaseIndexer(repo_path=repo_root)
+            try:
+                for filepath in stale_files:
+                    try:
+                        content = Path(filepath).read_text(encoding='utf-8', errors='ignore')
+                        ext = os.path.splitext(filepath)[1]
+                        indexer.index_file(filepath, content, ext, rebuild_fts=False)
+                        mtime = os.path.getmtime(filepath)
+                        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                        lang = ext.lstrip('.')
+                        indexer.search_index.upsert_file_hash(filepath, content_hash, mtime, lang)
+                    except Exception as e:
+                        sys.stderr.write(f"[WARNING] Auto-sync failed for {filepath}: {e}\n")
+                        sys.stderr.flush()
+            finally:
+                indexer.close()
+
+            return len(stale_files)
+
+    synced = await asyncio.to_thread(_sync)
+    if synced:
+        # Clear cached read-only DuckDB connections so they pick up the new data.
+        # Preserves GraphAPI (and its PageRank cache) — only invalidates pagerank scores.
+        clear_index_cache()
+
+async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False) -> dict:
     # --- Input validation ---
+    view = view.strip().lower()
     if view not in ALLOWED_VIEWS:
         raise SecurityValidationError(f"Invalid view: {view}")
     limit = max(1, min(int(limit), MAX_LIMIT))
+    offset = max(0, int(offset))
     max_depth = max(1, min(int(max_depth), MAX_DEPTH))
     if query:
         query = query.strip()[:MAX_QUERY_LEN]
         if any(c in query for c in "\x00\n\r"):
             raise SecurityValidationError("Invalid characters in query")
+        # Reject query for views that don't use it
+        if view not in ("search", "code", "callers", "callees"):
+            raise SecurityValidationError(
+                f"Query parameter is not supported for view '{view}'. "
+                f"Use view='search', 'code', 'callers', or 'callees' with a query."
+            )
 
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
@@ -244,11 +335,15 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             f"Please run the 'update_index' tool with allow_external=True on this target first."
         )
 
-    index = _get_cached_api(repo_root, db_path, "index")
+    # Auto-sync stale files before serving search-oriented views.
+    # Skip for structure-only views (summary, tree, classes, functions, deps)
+    # which don't suffer from the stale-index trap and are also called
+    # internally by do_update_index after fresh indexing.
+    _SYNC_VIEWS = frozenset({"search", "code", "callers", "callees", "impact", "pagerank", "functional-analysis"})
+    if view in _SYNC_VIEWS:
+        await _auto_sync_stale(repo_root, db_path, str(path))
 
-    # Auto-switch to search when query is provided with default summary view
-    if query and view == "summary":
-        view = "search"
+    index = _get_cached_api(repo_root, db_path, "index")
 
     # Initialize GraphAPI if view is a graph-related view
     api = None
@@ -259,28 +354,20 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         if not query:
             raise SecurityValidationError("Query (function/method name) is required for callers view")
         callers = await asyncio.to_thread(api.find_callers, query)
-        if callers and "error" in callers[0]:
-            raise AnalysisError(callers[0]["error"])
         return {"status": "success", "target": query, "callers": callers}
 
     if view == "callees":
         if not query:
             raise SecurityValidationError("Query (function/method name) is required for callees view")
         callees = await asyncio.to_thread(api.find_callees, query)
-        if callees and "error" in callees[0]:
-            raise AnalysisError(callees[0]["error"])
         return {"status": "success", "target": query, "callees": callees}
 
     if view == "impact":
         deps = await asyncio.to_thread(api.impact_analysis, path.as_posix(), max_depth)
-        if deps and "error" in deps[0]:
-            raise AnalysisError(deps[0]["error"])
         return {"status": "success", "target": path.as_posix(), "dependent_files": deps}
 
     if view == "functional-analysis":
         result = await asyncio.to_thread(api.analyze_functional_purity)
-        if result and "error" in result:
-            raise AnalysisError(result["error"])
         return {"status": "success", "target": path.as_posix(), "functional_analysis": result}
 
     if view == "pagerank":
@@ -303,12 +390,41 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     if view == "search":
         if not query:
             raise SecurityValidationError("Query is required for search view")
+            
+        # Lazy FTS rebuild if stale, protected by lock to avoid write contention
+        if not index.has_fts_index() or index.is_fts_dirty():
+            from src.mcp_server.index_db import CodeSearchIndex
+
+            def _rebuild_fts():
+                write_index = CodeSearchIndex(db_path=db_path, read_only=False)
+                try:
+                    write_index.ensure_fts()
+                finally:
+                    write_index.close()
+
+            with _fts_rebuild_lock:
+                # Double-check after acquiring lock
+                if not index.has_fts_index() or index.is_fts_dirty():
+                    sys.stderr.write(f"[INFO] Lazy FTS rebuild triggered for {db_path}\n")
+                    sys.stderr.flush()
+                    # Must close read-only connections before opening a write connection —
+                    # DuckDB doesn't allow mixing read_only and read_write to the same file.
+                    clear_index_cache()
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(_rebuild_fts),
+                            timeout=INDEX_TIMEOUT_S
+                        )
+                    except asyncio.TimeoutError:
+                        raise AnalysisError(
+                            f"FTS rebuild timed out after {INDEX_TIMEOUT_S}s. "
+                            f"Run 'update_index' manually to rebuild."
+                        )
+                    # Refresh the cached read-only connection
+                    clear_index_cache()
+                    index = _get_cached_api(repo_root, db_path, "index")
+                    
         results = await asyncio.to_thread(index.search, query, limit, path.as_posix())
-        if results and "error" in results[0]:
-            err_str = results[0]["error"]
-            if "fts_main_code_nodes" in err_str or "Catalog Error" in err_str:
-                raise IndexNotFoundError(f"Full-text search index has not been built yet. Error details: {err_str}")
-            raise AnalysisError(err_str)
 
         if not output_file:
             # Strip body_text from inline results to prevent token explosion
@@ -316,110 +432,194 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 r.pop("body_text", None)
         return {"query": query, "results": results, "search_status": "ok"}
 
+    if view == "code":
+        def _cap_body(body: str) -> str:
+            """Truncate body_text to MAX_CODE_LINES lines."""
+            lines = body.split('\n')
+            if len(lines) > MAX_CODE_LINES:
+                return '\n'.join(lines[:MAX_CODE_LINES]) + f"\n... (truncated at {MAX_CODE_LINES} lines)"
+            return body
 
-    if path.is_dir():
-        if view not in ["summary", "search", "callers", "callees", "pagerank"]:
-            raise SecurityValidationError(f"View '{view}' is only supported for specific files, not directories.")
+        if path.is_file():
+            nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
+            if query:
+                q_lower = query.lower()
+                nodes = [n for n in nodes if q_lower in n['name'].lower()]
+            for n in nodes[:limit]:
+                n['body_text'] = _cap_body(n.get('body_text', ''))
+            results = nodes[:limit]
+        elif path.is_dir():
+            if not query:
+                raise SecurityValidationError("Query is required for code view on directories")
+            results = await asyncio.to_thread(index.search, query, limit, path.as_posix())
+            for r in results:
+                r['body_text'] = _cap_body(r.get('body_text', ''))
+        else:
+            raise SecurityValidationError(f"Target not found: {path}")
+        return {"query": query, "results": results, "code_status": "ok"}
 
-        nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
-        indexed_files = len(set(n['filepath'] for n in nodes))
 
-        # Capped on-disk scan
-        on_disk_count = 0
-        try:
-            for root, dirs, fnames in os.walk(str(path)):
-                # Ignore common ignored dirs to match indexer
-                dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}]
-                on_disk_count += len(fnames)
-                if on_disk_count > 1000:
-                    on_disk_count = "1000+"
-                    break
-        except Exception:
-            on_disk_count = "unknown"
+    # ── Structural views: classes, functions, deps, tree, summary ──
+    # Unified handling for both files and directories.
+    is_dir = path.is_dir()
+    is_file = path.is_file()
 
-        # Language breakdown and total files from the database files table
-        try:
+    if not is_dir and not is_file:
+        raise SecurityValidationError(f"Target not found: {path}")
+
+    if is_file and path.suffix not in SUPPORTED:
+        raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
+
+    result: dict[str, Any] = {"target": path.as_posix(), "type": "directory" if is_dir else "file"}
+
+    if view == "tree":
+        if is_file:
+            import tree_sitter
+
+            from src.parsers.tree_sitter_parser import get_language_from_extension
+            from src.parsers.tsgm import TreeSitterGrammarManager
+            content = await asyncio.to_thread(read_limited, path)
+            lang = TreeSitterGrammarManager().get_language(get_language_from_extension(path.suffix))
+            parser = tree_sitter.Parser(lang)
+            ts_tree = parser.parse(content.encode())
+            tree_str = str(ts_tree.root_node)
+            if not output_file and len(tree_str) > 10000:
+                tree_str = tree_str[:10000] + "\n... (truncated for preview, use output_file parameter to save full AST)"
+            result["structure"] = {"tree": tree_str}
+        else:
+            # Directory: indexed file listing grouped by language
+            try:
+                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
+                db_res = index._conn.execute('''
+                    SELECT filepath, lang
+                    FROM files
+                    WHERE filepath LIKE ?
+                    ORDER BY filepath
+                ''', (f"{prefix}%",)).fetchall()
+                file_entries = [{"path": row[0][len(prefix):], "lang": row[1]} for row in db_res]
+            except Exception:
+                file_entries = []
+            result["structure"] = {"file_tree": file_entries, "total_indexed_files": len(file_entries)}
+
+    elif view == "deps":
+        if is_file:
+            content = await asyncio.to_thread(read_limited, path)
+            tree = await asyncio.to_thread(parse, content, path.suffix)
+            result["structure"] = [{"module": i.module, "names": i.names} for i in tree.imports]
+        else:
+            # Directory: aggregate outgoing dependencies from the graph
             prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
-            db_res = index._conn.execute('''
-                SELECT lang, count(*)
-                FROM files
-                WHERE filepath LIKE ?
-                GROUP BY lang
-            ''', (f"{prefix}%",)).fetchall()
-            lang_breakdown = {row[0]: row[1] for row in db_res}
-        except Exception:
-            lang_breakdown = {}
+            try:
+                db_res = index._conn.execute('''
+                    SELECT filepath FROM files WHERE filepath LIKE ?
+                ''', (f"{prefix}%",)).fetchall()
+                dir_files = [row[0] for row in db_res]
+            except Exception:
+                dir_files = []
 
-        node_preview = [n['name'] for n in nodes[:20]]
+            all_deps: dict[str, list] = {}
+            for fp in dir_files:
+                try:
+                    file_deps = await asyncio.to_thread(api.get_file_dependencies, fp)
+                    for dep in file_deps.get("outgoing_dependencies", []):
+                        dep_id = dep["id"] if isinstance(dep, dict) else dep
+                        if dep_id not in all_deps:
+                            all_deps[dep_id] = []
+                        if fp not in all_deps[dep_id]:
+                            all_deps[dep_id].append(fp)
+                except Exception:
+                    continue
 
-        return {
-            "target": path.as_posix(),
-            "type": "directory",
-            "structure": {
+            result["structure"] = [
+                {"dependency": dep_id, "depended_by": sources}
+                for dep_id, sources in sorted(all_deps.items())
+            ]
+
+    elif view in ("classes", "functions"):
+        if is_dir:
+            nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
+        else:
+            nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
+
+        if view == "classes":
+            type_filter = ('class', 'interface')
+        else:
+            type_filter = ('function', 'method')
+
+        filtered = [
+            {"name": n['name'], "filepath": n['filepath'], "line": n['start_line']}
+            for n in nodes if n['node_type'] in type_filter
+        ]
+        result["structure"] = filtered
+
+    else:  # summary
+        if is_dir:
+            nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
+            indexed_files = len(set(n['filepath'] for n in nodes))
+
+            # Capped on-disk scan
+            on_disk_count = 0
+            try:
+                for root, dirs, fnames in os.walk(str(path)):
+                    # Ignore common ignored dirs to match indexer
+                    dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}]
+                    on_disk_count += len(fnames)
+                    if on_disk_count > 1000:
+                        on_disk_count = "1000+"
+                        break
+            except Exception:
+                on_disk_count = "unknown"
+
+            # Language breakdown and total files from the database files table
+            try:
+                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
+                db_res = index._conn.execute('''
+                    SELECT lang, count(*)
+                    FROM files
+                    WHERE filepath LIKE ?
+                    GROUP BY lang
+                ''', (f"{prefix}%",)).fetchall()
+                lang_breakdown = {row[0]: row[1] for row in db_res}
+            except Exception:
+                lang_breakdown = {}
+
+            node_preview = [n['name'] for n in nodes[:20]]
+
+            result["structure"] = {
                 "indexed_files_count": indexed_files,
                 "total_files_on_disk": on_disk_count,
                 "language_breakdown": lang_breakdown,
                 "top_level_symbols_preview": node_preview
             }
-        }
-
-    if path.suffix not in SUPPORTED:
-        raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
-
-    result: dict[str, Any] = {"target": path.as_posix(), "type": "file"}
-
-    if view == "tree":
-        import tree_sitter
-
-        from src.parsers.tree_sitter_parser import get_language_from_extension
-        from src.parsers.tsgm import TreeSitterGrammarManager
-        content = await asyncio.to_thread(read_limited, path)
-        lang = TreeSitterGrammarManager().get_language(get_language_from_extension(path.suffix))
-        parser = tree_sitter.Parser(lang)
-        ts_tree = parser.parse(content.encode())
-        tree_str = str(ts_tree.root_node)
-        if not output_file and len(tree_str) > 10000:
-            tree_str = tree_str[:10000] + "\n... (truncated for preview, use output_file parameter to save full AST)"
-        result["structure"] = {"tree": tree_str}
-    elif view == "deps":
-        content = await asyncio.to_thread(read_limited, path)
-        tree = await asyncio.to_thread(parse, content, path.suffix)
-        result["structure"] = [{"module": i.module, "names": i.names} for i in tree.imports]
-    else:
-        nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
-        if view == "classes":
-            result["structure"] = [
-                {"name": n['name'], "line": n['start_line']}
-                for n in nodes if n['node_type'] in ('class', 'interface')
-            ]
-        elif view == "functions":
-            result["structure"] = [
-                {"name": n['name'], "line": n['start_line']}
-                for n in nodes if n['node_type'] in ('function', 'method')
-            ]
-        else: # summary
+        else:
+            nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
             classes = sum(1 for n in nodes if n['node_type'] in ('class', 'interface'))
             functions_nodes = [n for n in nodes if n['node_type'] in ('function', 'method')]
-            
+
             top_level = 0
             nested = 0
             methods = 0
-            
-            for f in functions_nodes:
-                enclosing = [
-                    p for p in nodes
-                    if p != f and p['start_line'] <= f['start_line'] and p['end_line'] >= f['end_line']
-                ]
-                if not enclosing:
-                    top_level += 1
-                else:
-                    innermost = max(enclosing, key=lambda x: x['start_line'])
-                    if innermost['node_type'] in ('function', 'method'):
-                        nested += 1
-                    elif innermost['node_type'] in ('class', 'interface'):
-                        methods += 1
-                    else:
+
+            # O(n log n) nesting detection: sort by (start_line, -end_line) to enable
+            # single-pass scope tracking with a stack.
+            sorted_nodes = sorted(nodes, key=lambda n: (n['start_line'], -n['end_line']))
+            scope_stack = []
+            for node in sorted_nodes:
+                # Pop scopes that ended before this node starts
+                while scope_stack and scope_stack[-1]['end_line'] < node['start_line']:
+                    scope_stack.pop()
+                if node['node_type'] in ('function', 'method'):
+                    if not scope_stack:
                         top_level += 1
+                    else:
+                        innermost = scope_stack[-1]
+                        if innermost['node_type'] in ('function', 'method'):
+                            nested += 1
+                        elif innermost['node_type'] in ('class', 'interface'):
+                            methods += 1
+                        else:
+                            top_level += 1
+                scope_stack.append(node)
 
             result["structure"] = {
                 "classes": classes,
@@ -428,14 +628,14 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 "methods": methods,
             }
 
-    # Graph database dependency and PageRank retrieval
-    if view in ("summary", "deps"):
+    # Graph database dependency and PageRank retrieval (file-level only)
+    if view in ("summary", "deps") and is_file:
         try:
             graph_metrics = await asyncio.to_thread(api.get_file_dependencies, path.as_posix())
             if view == "summary":
                 if "structure" in result and isinstance(result["structure"], dict):
                     result["structure"]["graph_metrics"] = graph_metrics
-            else: # view == "deps"
+            else:  # view == "deps"
                 result["graph_metrics"] = graph_metrics
         except Exception as e:
             sys.stderr.write(f"[WARNING] Graph database query failed: {e}\n")
@@ -488,7 +688,33 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
         return summary_result
 
-    return result
+    # Truncate lists to the specified limit to prevent token explosion if not writing to file
+    def truncate_lists(obj):
+        if isinstance(obj, dict):
+            return {k: truncate_lists(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            if len(obj) > limit:
+                truncated_list = [truncate_lists(v) for v in obj[:limit]]
+                truncated_list.append(f"... (truncated {len(obj) - limit} more items, use output_file parameter to view full results)")
+                return truncated_list
+            return [truncate_lists(v) for v in obj]
+        return obj
+
+    # Signal staleness for structure views that skipped auto-sync,
+    # so the LLM can decide whether to call update_index first.
+    _SYNC_VIEWS_SET = frozenset({"search", "code", "callers", "callees", "impact", "pagerank", "functional-analysis"})
+    if view not in _SYNC_VIEWS_SET:
+        try:
+            stale_count = len(index.get_stale_files(str(path)))
+            if stale_count > 0:
+                result["index_staleness"] = {
+                    "stale_file_count": stale_count,
+                    "hint": "Run update_index to refresh. Search/graph views auto-sync."
+                }
+        except Exception:
+            pass
+
+    return truncate_lists(result)
 
 
 async def do_metrics(target: str, what: List[str] = ["all"], output_path: Optional[str] = None, allow_external: bool = False) -> dict:
@@ -616,6 +842,12 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     except Exception:
         pass  # Best-effort invalidation before full cache clear
     clear_api_cache()
+    # Force garbage collection to release any lingering __del__ DuckDB connections
+    # that may hold write locks and block the indexing subprocess.
+    # TODO: Audit whether this is still needed now that CodebaseIndexer uses a
+    # context manager. Keep as a safety net for other potential leaked connections.
+    import gc
+    gc.collect()
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root
     from src.mcp_server.index_pipeline import CodebaseIndexer
@@ -706,6 +938,11 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
             raise AnalysisError(f"Index subprocess failed with exit code {proc.returncode}")
 
         final_res["target"] = path.as_posix()
+
+        # Surface FTS errors from the subprocess
+        if final_res.get("status") == "partial" and final_res.get("fts_error"):
+            sys.stderr.write(f"[WARNING] FTS index rebuild failed: {final_res['fts_error']}\n")
+            sys.stderr.flush()
         try:
             summary_res = await do_browse(target=path.as_posix(), view="summary")
             final_res["summary"] = summary_res.get("structure", summary_res)
@@ -721,8 +958,8 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     content = await asyncio.to_thread(read_limited, path)
 
     def _index_file():
-        indexer = CodebaseIndexer(repo_path=repo_root)
-        indexer.index_file(str(path), content, path.suffix, rebuild_fts=True)
+        with CodebaseIndexer(repo_path=repo_root) as indexer:
+            indexer.index_file(str(path), content, path.suffix, rebuild_fts=False)
 
     await asyncio.to_thread(_index_file)
     res = {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
@@ -745,7 +982,7 @@ async def handle_list_tools(
         tools=[
             types.Tool(
                 name="browse",
-                description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank.",
+                description="Browse codebase structure, perform semantic search, retrieve source code, or run graph and dependency analysis.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -753,12 +990,29 @@ async def handle_list_tools(
                             "type": "string",
                             "description": "Absolute path to the target directory or file. Optional. Defaults to the current workspace root."
                         },
-                        "view": {"type": "string", "default": "summary"},
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer", "default": 10},
+                        "view": {
+                            "type": "string",
+                            "default": "summary",
+                            "enum": ["summary", "classes", "functions", "deps", "tree", "search", "callers", "callees", "impact", "pagerank", "code", "functional-analysis"],
+                            "description": "The type of view to return."
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "The search query, function name, or symbol to look for. Required for search, callers, callees, and code (on directories) views."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 10,
+                            "description": "Maximum number of results to return. Use smaller limits to preserve context window."
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "default": 0,
+                            "description": "Offset for paginated results. Use with limit to page through large result sets."
+                        },
                         "output_file": {
                             "type": "string",
-                            "description": "Optional absolute path to a file where the full detailed JSON result should be saved. If provided, the tool response will be a compact summary to save tokens."
+                            "description": "Optional relative filename to save full JSON results to .mcp_outputs/. Highly recommended for large codebases or tree/deps views."
                         },
                         "max_depth": {
                             "type": "integer",
@@ -775,7 +1029,7 @@ async def handle_list_tools(
             ),
             types.Tool(
                 name="metrics",
-                description="Calculate OOP, complexity, or hotspot metrics, with an optional report output path.",
+                description="Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -802,7 +1056,7 @@ async def handle_list_tools(
             ),
             types.Tool(
                 name="update_index",
-                description="Update the codebase Gorgonzola index via AST browsing and return a structural summary.",
+                description="Update the AST index for the codebase and return a structural summary.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -866,7 +1120,11 @@ async def handle_call_tool(
             return str(t) if not isinstance(t, str) else t
 
         def _check_suspicious(value: str, param_name: str) -> None:
-            """Reject values containing patterns that look like prompt injection."""
+            """Reject values containing patterns that look like prompt injection.
+            Gated behind PECORINO_STRICT_INJECTION_CHECK env var (disabled by default).
+            The output wrapping instruction is the primary mitigation."""
+            if not STRICT_INJECTION_CHECK:
+                return
             if isinstance(value, str) and any(s in value.lower() for s in SUSPICIOUS_PATTERNS):
                 raise SecurityValidationError(f"Potential prompt injection detected in {param_name}")
 
@@ -883,6 +1141,7 @@ async def handle_call_tool(
                 view=arguments.get("view", "summary"),
                 query=query,
                 limit=arguments.get("limit", 10),
+                offset=arguments.get("offset", 0),
                 max_depth=arguments.get("max_depth", 3),
                 output_file=arguments.get("output_file"),
                 allow_external=arguments.get("allow_external", False)
@@ -941,7 +1200,7 @@ async def handle_list_prompts(
         prompts=[
             types.Prompt(
                 name="browse",
-                description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank.",
+                description="Browse the codebase (structure, semantic search, graph, or code retrieval). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank, functional-analysis. For code retrieval, view='code' fetches source code of matched symbols.",
                 arguments=[
                     types.PromptArgument(name="target", description="Target path to browse", required=False),
                     types.PromptArgument(name="view", description="View type (summary, classes, search, graph views, etc.)", required=False)
@@ -977,7 +1236,7 @@ async def handle_get_prompt(
         target = arguments.get("target", "")
         view = arguments.get("view", "summary")
         return types.GetPromptResult(
-            description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank.",
+            description="Browse the codebase (structure, semantic search, graph, or code retrieval). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank. For code retrieval, view='code' fetches source code of matched symbols.",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the browse tool on target '{target}' with view '{view}'."))]
         )
     elif name == "metrics":
@@ -1008,30 +1267,34 @@ async def handle_completion(
     context = params.context
     result = None
     if isinstance(ref, types.PromptReference):
+        def _complete_target_path(val: str, filter_supported: bool = True) -> types.Completion:
+            """Shared helper for target-path tab completion across all prompts."""
+            if ".." in val or "\x00" in val:
+                return types.Completion(values=[], has_more=False)
+            matches = glob.glob(val + "*") + glob.glob(val + "**/*", recursive=True)
+            files = []
+            for m in matches:
+                if os.path.isfile(m):
+                    if filter_supported:
+                        ext = os.path.splitext(m)[1].lower()
+                        if ext not in SUPPORTED:
+                            continue
+                    files.append(m)
+                elif os.path.isdir(m):
+                    files.append(m)
+                if len(files) >= 50:
+                    break
+            return types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
+
         if ref.name == "browse":
             if argument.name == "view":
-                views = ["summary", "classes", "functions", "deps", "tree", "search", "callers", "callees", "impact", "pagerank"]
+                views = ["summary", "classes", "functions", "deps", "tree", "search", "code", "callers", "callees", "impact", "pagerank", "functional-analysis"]
                 result = types.Completion(
                     values=[v for v in views if v.startswith(argument.value.lower())],
                     has_more=False
                 )
             elif argument.name == "target":
-                val = argument.value or ""
-                if ".." in val or "\x00" in val:
-                    result = types.Completion(values=[], has_more=False)
-                else:
-                    matches = glob.glob(val + "*") + glob.glob(val + "**/*", recursive=True)
-                    files = []
-                    for m in matches:
-                        if os.path.isfile(m):
-                            ext = os.path.splitext(m)[1].lower()
-                            if ext in SUPPORTED:
-                                files.append(m)
-                        elif os.path.isdir(m):
-                            files.append(m)
-                        if len(files) >= 50:
-                            break
-                    result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
+                result = _complete_target_path(argument.value or "")
 
         elif ref.name == "metrics":
             if argument.name == "what":
@@ -1041,34 +1304,13 @@ async def handle_completion(
                     has_more=False
                 )
             elif argument.name == "target":
-                val = argument.value or ""
-                if ".." in val or "\x00" in val:
-                    result = types.Completion(values=[], has_more=False)
-                else:
-                    matches = glob.glob(val + "*")
-                    paths = sorted(matches)[:20]
-                    result = types.Completion(values=paths, has_more=len(matches) > 20)
+                result = _complete_target_path(argument.value or "", filter_supported=False)
 
 
 
         elif ref.name == "update_index":
             if argument.name == "target":
-                val = argument.value or ""
-                if ".." in val or "\x00" in val:
-                    result = types.Completion(values=[], has_more=False)
-                else:
-                    matches = glob.glob(val + "*") + glob.glob(val + "**/*", recursive=True)
-                    files = []
-                    for m in matches:
-                        if os.path.isfile(m):
-                            ext = os.path.splitext(m)[1].lower()
-                            if ext in SUPPORTED:
-                                files.append(m)
-                        elif os.path.isdir(m):
-                            files.append(m)
-                        if len(files) >= 50:
-                            break
-                    result = types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
+                result = _complete_target_path(argument.value or "")
 
     return types.CompleteResult(
         completion=result if result is not None else types.Completion(values=[], total=None, has_more=None)

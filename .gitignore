@@ -84,3 +84,10 @@ test_metrics.json
 git
 test_db
 output.log
+
+# Transient data & caches
+.gitstats3_data/
+.mcp_outputs/
+/output/
+/examples/
+.ruff_cache/

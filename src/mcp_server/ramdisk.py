@@ -19,6 +19,7 @@ import sys
 import shutil
 import uuid
 import time
+from filelock import FileLock
 
 
 _SHM_ROOT = "/dev/shm"
@@ -144,66 +145,70 @@ class RamdiskIndex:
         if os.path.exists(self.db_path):
             ssd_dir = os.path.dirname(self.ssd_db_path)
             os.makedirs(ssd_dir, exist_ok=True)
-            # Copy to a temp name first, then atomic rename
-            tmp_ssd = self.ssd_db_path + ".tmp"
-            shutil.copy2(self.db_path, tmp_ssd)
-            os.replace(tmp_ssd, self.ssd_db_path)
+            
+            with FileLock(self.ssd_db_path + ".lock"):
+                # Copy to a temp name first, then atomic rename
+                tmp_ssd = self.ssd_db_path + ".tmp"
+                shutil.copy2(self.db_path, tmp_ssd)
+                os.replace(tmp_ssd, self.ssd_db_path)
+                
+                # Also copy any DuckDB WAL files (.duckdb.wal)
+                wal_path = self.db_path + ".wal"
+                if os.path.exists(wal_path):
+                    ssd_wal = self.ssd_db_path + ".wal"
+                    tmp_wal = ssd_wal + ".tmp"
+                    shutil.copy2(wal_path, tmp_wal)
+                    os.replace(tmp_wal, ssd_wal)
+                else:
+                    # Remove stale WAL on SSD if ramdisk has none
+                    ssd_wal = self.ssd_db_path + ".wal"
+                    if os.path.exists(ssd_wal):
+                        os.remove(ssd_wal)
+
             db_size = os.path.getsize(self.ssd_db_path)
             print(f"[ramdisk] Synced DuckDB to SSD: "
                   f"{db_size / 1024 / 1024:.2f} MB",
                   file=sys.stderr, flush=True)
 
-        # Also copy any DuckDB WAL files (.duckdb.wal)
-        wal_path = self.db_path + ".wal"
-        if os.path.exists(wal_path):
-            ssd_wal = self.ssd_db_path + ".wal"
-            tmp_wal = ssd_wal + ".tmp"
-            shutil.copy2(wal_path, tmp_wal)
-            os.replace(tmp_wal, ssd_wal)
-        else:
-            # Remove stale WAL on SSD if ramdisk has none
-            ssd_wal = self.ssd_db_path + ".wal"
-            if os.path.exists(ssd_wal):
-                os.remove(ssd_wal)
-
         # 2. Sync Gorgonzola file (single file, not a directory)
-        if os.path.isfile(self.gorgonzola_path):
+        if os.path.exists(self.gorgonzola_path):
             ssd_parent = os.path.dirname(self.ssd_gorgonzola_path)
             os.makedirs(ssd_parent, exist_ok=True)
-            tmp_gorgonzola = self.ssd_gorgonzola_path + ".tmp"
-            shutil.copy2(self.gorgonzola_path, tmp_gorgonzola)
-            os.replace(tmp_gorgonzola, self.ssd_gorgonzola_path)
-            gorg_size = os.path.getsize(self.ssd_gorgonzola_path)
-            print(f"[ramdisk] Synced Gorgonzola to SSD: "
-                  f"{gorg_size / 1024 / 1024:.2f} MB",
-                  file=sys.stderr, flush=True)
-        elif os.path.isdir(self.gorgonzola_path):
-            # Fallback: if it's a directory (future Kuzu versions)
-            ssd_parent = os.path.dirname(self.ssd_gorgonzola_path)
-            os.makedirs(ssd_parent, exist_ok=True)
-            tmp_gorgonzola = self.ssd_gorgonzola_path + ".tmp"
-            if os.path.exists(tmp_gorgonzola):
-                shutil.rmtree(tmp_gorgonzola)
-            shutil.copytree(self.gorgonzola_path, tmp_gorgonzola)
-            if os.path.exists(self.ssd_gorgonzola_path):
-                shutil.rmtree(self.ssd_gorgonzola_path)
-            os.rename(tmp_gorgonzola, self.ssd_gorgonzola_path)
-            gorg_size = self._dir_size(self.ssd_gorgonzola_path)
-            print(f"[ramdisk] Synced Gorgonzola dir to SSD: "
-                  f"{gorg_size / 1024 / 1024:.2f} MB",
-                  file=sys.stderr, flush=True)
+            
+            with FileLock(self.ssd_gorgonzola_path + ".lock"):
+                if os.path.isfile(self.gorgonzola_path):
+                    tmp_gorgonzola = self.ssd_gorgonzola_path + ".tmp"
+                    shutil.copy2(self.gorgonzola_path, tmp_gorgonzola)
+                    os.replace(tmp_gorgonzola, self.ssd_gorgonzola_path)
+                    gorg_size = os.path.getsize(self.ssd_gorgonzola_path)
+                    print(f"[ramdisk] Synced Gorgonzola to SSD: "
+                          f"{gorg_size / 1024 / 1024:.2f} MB",
+                          file=sys.stderr, flush=True)
+                elif os.path.isdir(self.gorgonzola_path):
+                    # Fallback: if it's a directory (future Kuzu versions)
+                    tmp_gorgonzola = self.ssd_gorgonzola_path + ".tmp"
+                    if os.path.exists(tmp_gorgonzola):
+                        shutil.rmtree(tmp_gorgonzola)
+                    shutil.copytree(self.gorgonzola_path, tmp_gorgonzola)
+                    if os.path.exists(self.ssd_gorgonzola_path):
+                        shutil.rmtree(self.ssd_gorgonzola_path)
+                    os.rename(tmp_gorgonzola, self.ssd_gorgonzola_path)
+                    gorg_size = self._dir_size(self.ssd_gorgonzola_path)
+                    print(f"[ramdisk] Synced Gorgonzola dir to SSD: "
+                          f"{gorg_size / 1024 / 1024:.2f} MB",
+                          file=sys.stderr, flush=True)
 
-        # Also sync any Gorgonzola WAL
-        gorg_wal = self.gorgonzola_path + ".wal"
-        if os.path.exists(gorg_wal):
-            ssd_gwal = self.ssd_gorgonzola_path + ".wal"
-            tmp_gwal = ssd_gwal + ".tmp"
-            shutil.copy2(gorg_wal, tmp_gwal)
-            os.replace(tmp_gwal, ssd_gwal)
-        else:
-            ssd_gwal = self.ssd_gorgonzola_path + ".wal"
-            if os.path.exists(ssd_gwal):
-                os.remove(ssd_gwal)
+                # Also sync any Gorgonzola WAL
+                gorg_wal = self.gorgonzola_path + ".wal"
+                if os.path.exists(gorg_wal):
+                    ssd_gwal = self.ssd_gorgonzola_path + ".wal"
+                    tmp_gwal = ssd_gwal + ".tmp"
+                    shutil.copy2(gorg_wal, tmp_gwal)
+                    os.replace(tmp_gwal, ssd_gwal)
+                else:
+                    ssd_gwal = self.ssd_gorgonzola_path + ".wal"
+                    if os.path.exists(ssd_gwal):
+                        os.remove(ssd_gwal)
 
         elapsed = time.monotonic() - t0
         total_bytes = self.get_usage_bytes()

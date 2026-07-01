@@ -28,9 +28,8 @@ def main():
     if args.port:
         settings.port = args.port
 
-    # Run global safe startup migration
-    from src.mcp_server.index_db import migrate_all
-    migrate_all()
+    # Removed global safe startup migration to prevent blocking MCP server startup.
+    # Individual databases are migrated lazily in CodeSearchIndex.__init__().
 
     if settings.transport == "stdio":
         from src.transports.stdio_adapter import run_stdio
