@@ -20,6 +20,19 @@ class CodebaseIndexer:
         self.search_index = CodeSearchIndex(db_path)
         self.search_index.graph = self.graph
 
+    def close(self):
+        """Release the underlying DuckDB connection."""
+        if self.search_index is not None:
+            self.search_index.close()
+            self.search_index = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def _build_relationships_text(self, node) -> str:
         rels = []
         if getattr(node, 'called_methods', None):
@@ -357,6 +370,8 @@ class CodebaseIndexer:
             except Exception as e:
                 import sys
                 print(f"Warning: Failed to rebuild FTS index for {filepath}: {e}", file=sys.stderr)
+        else:
+            self.search_index.mark_fts_dirty()
 
 
     def _parse_file_task(self, fp: Any, file_str: str, content_hash: str, mtime: float):
@@ -621,13 +636,26 @@ class CodebaseIndexer:
                     progress_callback(len(files), len(files), f"Removing {stale_count} stale files...")
                 with self.graph:
                     self.search_index.clear_files_bulk(stale_files)
-            return {
-                "status": "success",
+
+            # Rebuild FTS if it doesn't exist or is dirty (may have failed on a previous run)
+            fts_error = None
+            if not self.search_index.has_fts_index() or self.search_index.is_fts_dirty():
+                try:
+                    self.search_index.rebuild_fts()
+                except Exception as e:
+                    fts_error = str(e)
+                    print(f"Warning: Failed to rebuild FTS index: {fts_error}", file=sys.stderr)
+
+            result = {
+                "status": "success" if not fts_error else "partial",
                 "indexed_files": 0,
                 "skipped_files": skipped_count,
                 "stale_files_removed": stale_count,
                 "total_files_found": len(files)
             }
+            if fts_error:
+                result["fts_error"] = fts_error
+            return result
 
         # 3. Build the index in RAM (/dev/shm), then sync to SSD
         ssd_db_path = self.search_index.db_path
@@ -724,8 +752,9 @@ class CodebaseIndexer:
             # Close RAM DB connections before sync
             ram_search.close()
 
+        # ── Phase 2: Finalization ──
         # After ramdisk context exits, files are on SSD.
-        # Re-open the SSD-backed connections for cleanup work.
+        # Re-open the SSD-backed DB with a fresh write connection.
         self.search_index.close()
         self.search_index = CodeSearchIndex(ssd_db_path)
         self.graph = self.search_index.graph
@@ -751,18 +780,26 @@ class CodebaseIndexer:
         graph_api.resolve_symbols()
         
         # Rebuild the FTS index for the whole directory once
+        fts_error = None
         try:
             self.search_index.rebuild_fts()
         except Exception as e:
-            print(f"Warning: Failed to rebuild FTS index for directory: {e}", file=sys.stderr)
+            fts_error = str(e)
+            print(f"Warning: Failed to rebuild FTS index: {fts_error}", file=sys.stderr)
         
-        return {
-            "status": "success", 
+        # Close all connections at end of Phase 2
+        self.search_index.close()
+
+        result = {
+            "status": "success" if not fts_error else "partial",
             "indexed_files": indexed_count, 
             "skipped_files": skipped_count,
             "stale_files_removed": stale_count,
             "total_files_found": len(files)
         }
+        if fts_error:
+            result["fts_error"] = fts_error
+        return result
 
 def progress_callback(current: int, total: int, file_path: str):
     print(json.dumps({

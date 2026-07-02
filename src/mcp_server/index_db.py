@@ -81,6 +81,15 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         )
     ''')
 
+    # Meta table for FTS tracking and other state
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS _meta (
+            key VARCHAR PRIMARY KEY,
+            value VARCHAR NOT NULL,
+            updated_at TIMESTAMP DEFAULT current_timestamp
+        )
+    ''')
+
     # FTS schema migration: ensure 4-column FTS index (id, name, node_type, filepath)
     try:
         conn.execute("INSTALL fts")
@@ -152,6 +161,59 @@ class CodeSearchIndex:
         except Exception:
             pass
         conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
+        try:
+            self.clear_fts_dirty()
+        except Exception as e:
+            import sys
+            print(f"Warning: FTS rebuilt but failed to clear dirty flag: {e}", file=sys.stderr)
+
+    def mark_fts_dirty(self):
+        """Mark the FTS index as stale (data changed since last rebuild)."""
+        try:
+            self._conn.execute("""
+                INSERT INTO _meta (key, value) VALUES ('fts_dirty', 'true')
+                ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = now()
+            """)
+        except Exception:
+            pass # Best effort
+
+    def is_fts_dirty(self) -> bool:
+        """Check if the FTS index needs rebuilding."""
+        try:
+            res = self._conn.execute(
+                "SELECT value FROM _meta WHERE key = 'fts_dirty'"
+            ).fetchone()
+            return res is not None and res[0] == 'true'
+        except Exception:
+            return True  # If we can't tell, assume dirty (defensive, handles migration edge cases)
+
+    def clear_fts_dirty(self):
+        """Clear the FTS dirty flag after a successful rebuild."""
+        self._conn.execute("""
+            INSERT INTO _meta (key, value) VALUES ('fts_dirty', 'false')
+            ON CONFLICT(key) DO UPDATE SET value = 'false', updated_at = now()
+        """)
+
+    def ensure_fts(self):
+        """Rebuild FTS if dirty or missing. Called before search queries."""
+        if not self.has_fts_index() or self.is_fts_dirty():
+            self.rebuild_fts()
+
+    def has_fts_index(self) -> bool:
+        """Check whether the FTS index exists on code_nodes.
+
+        DuckDB's FTS pragma creates internal tables (docs, terms, dict, etc.)
+        rather than a regular index visible in duckdb_indexes(). We detect FTS
+        by checking for the 'docs' table which is always created.
+        """
+        try:
+            self._conn.execute("LOAD fts")
+            res = self._conn.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = 'docs'"
+            ).fetchone()
+            return res is not None
+        except (duckdb.CatalogException, duckdb.ParserException, duckdb.IOException):
+            return False
 
     def _lazy_load_body(self, filepath: str, start_line: int, end_line: int) -> str:
         """Lazy-load source code from disk using filepath + line range."""

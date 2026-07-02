@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+_fts_rebuild_lock = threading.Lock()
 from typing import Any, List, Optional
 
 import mcp_types as types
@@ -38,12 +40,13 @@ ALLOWED_OUTPUT = workspace_root / ".mcp_outputs"
 ALLOWED_OUTPUT.mkdir(exist_ok=True)
 MAX_READ_BYTES = 1_000_000  # 1 MB
 ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree", "search",
-                           "callers", "callees", "impact", "pagerank", "functional-analysis"})
+                           "callers", "callees", "impact", "pagerank", "functional-analysis", "code"})
 ALLOWED_WHAT = frozenset({"oop", "complexity", "hotspots", "all"})
 ALLOWED_API_TYPES = frozenset({"index", "graph"})
 MAX_LIMIT = 100
 MAX_DEPTH = 10
 MAX_QUERY_LEN = 200
+MAX_CODE_LINES = 300  # Max lines of source code returned per result in 'code' view
 INDEX_TIMEOUT_S = 300  # 5 minutes
 SUSPICIOUS_PATTERNS = ("ignore previous", "system prompt", "you are now",
                        "disregard", "forget your instructions")
@@ -303,6 +306,26 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     if view == "search":
         if not query:
             raise SecurityValidationError("Query is required for search view")
+            
+        # Lazy FTS rebuild if stale, protected by lock to avoid write contention
+        if not index.has_fts_index() or index.is_fts_dirty():
+            from src.mcp_server.index_db import CodeSearchIndex
+            with _fts_rebuild_lock:
+                # Double-check after acquiring lock
+                if not index.has_fts_index() or index.is_fts_dirty():
+                    sys.stderr.write(f"[INFO] Lazy FTS rebuild triggered for {db_path}\n")
+                    sys.stderr.flush()
+                    write_index = CodeSearchIndex(db_path=db_path, read_only=False)
+                    try:
+                        write_index.ensure_fts()
+                    except Exception as e:
+                        raise AnalysisError(f"Failed to rebuild FTS index: {e}") from e
+                    finally:
+                        write_index.close()
+                    # Refresh the cached read-only connection
+                    clear_api_cache()
+                    index = _get_cached_api(repo_root, db_path, "index")
+                    
         results = await asyncio.to_thread(index.search, query, limit, path.as_posix())
         if results and "error" in results[0]:
             err_str = results[0]["error"]
@@ -315,6 +338,37 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             for r in results:
                 r.pop("body_text", None)
         return {"query": query, "results": results, "search_status": "ok"}
+
+    if view == "code":
+        def _cap_body(body: str) -> str:
+            """Truncate body_text to MAX_CODE_LINES lines."""
+            lines = body.split('\n')
+            if len(lines) > MAX_CODE_LINES:
+                return '\n'.join(lines[:MAX_CODE_LINES]) + f"\n... (truncated at {MAX_CODE_LINES} lines)"
+            return body
+
+        if path.is_file():
+            nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
+            if query:
+                q_lower = query.lower()
+                nodes = [n for n in nodes if q_lower in n['name'].lower()]
+            for n in nodes[:limit]:
+                n['body_text'] = _cap_body(n.get('body_text', ''))
+            results = nodes[:limit]
+        elif path.is_dir():
+            if not query:
+                raise SecurityValidationError("Query is required for code view on directories")
+            results = await asyncio.to_thread(index.search, query, limit, path.as_posix())
+            if results and "error" in results[0]:
+                err_str = results[0]["error"]
+                if "fts_main_code_nodes" in err_str or "Catalog Error" in err_str:
+                    raise IndexNotFoundError(f"Full-text search index has not been built yet. Error details: {err_str}")
+                raise AnalysisError(err_str)
+            for r in results:
+                r['body_text'] = _cap_body(r.get('body_text', ''))
+        else:
+            raise SecurityValidationError(f"Target not found: {path}")
+        return {"query": query, "results": results, "code_status": "ok"}
 
 
     if path.is_dir():
@@ -616,6 +670,12 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     except Exception:
         pass  # Best-effort invalidation before full cache clear
     clear_api_cache()
+    # Force garbage collection to release any lingering __del__ DuckDB connections
+    # that may hold write locks and block the indexing subprocess.
+    # TODO: Audit whether this is still needed now that CodebaseIndexer uses a
+    # context manager. Keep as a safety net for other potential leaked connections.
+    import gc
+    gc.collect()
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root
     from src.mcp_server.index_pipeline import CodebaseIndexer
@@ -706,6 +766,11 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
             raise AnalysisError(f"Index subprocess failed with exit code {proc.returncode}")
 
         final_res["target"] = path.as_posix()
+
+        # Surface FTS errors from the subprocess
+        if final_res.get("status") == "partial" and final_res.get("fts_error"):
+            sys.stderr.write(f"[WARNING] FTS index rebuild failed: {final_res['fts_error']}\n")
+            sys.stderr.flush()
         try:
             summary_res = await do_browse(target=path.as_posix(), view="summary")
             final_res["summary"] = summary_res.get("structure", summary_res)
@@ -721,8 +786,8 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     content = await asyncio.to_thread(read_limited, path)
 
     def _index_file():
-        indexer = CodebaseIndexer(repo_path=repo_root)
-        indexer.index_file(str(path), content, path.suffix, rebuild_fts=True)
+        with CodebaseIndexer(repo_path=repo_root) as indexer:
+            indexer.index_file(str(path), content, path.suffix, rebuild_fts=False)
 
     await asyncio.to_thread(_index_file)
     res = {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
@@ -745,7 +810,7 @@ async def handle_list_tools(
         tools=[
             types.Tool(
                 name="browse",
-                description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank.",
+                description="Browse the codebase (structure, semantic search, graph, or code retrieval). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank. For code retrieval, view='code' fetches source code of matched symbols (use query to filter by name; requires query for directories).",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -941,7 +1006,7 @@ async def handle_list_prompts(
         prompts=[
             types.Prompt(
                 name="browse",
-                description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank.",
+                description="Browse the codebase (structure, semantic search, graph, or code retrieval). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank. For code retrieval, view='code' fetches source code of matched symbols.",
                 arguments=[
                     types.PromptArgument(name="target", description="Target path to browse", required=False),
                     types.PromptArgument(name="view", description="View type (summary, classes, search, graph views, etc.)", required=False)
@@ -977,7 +1042,7 @@ async def handle_get_prompt(
         target = arguments.get("target", "")
         view = arguments.get("view", "summary")
         return types.GetPromptResult(
-            description="Browse the codebase (structure, semantic search, or graph). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank.",
+            description="Browse the codebase (structure, semantic search, graph, or code retrieval). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank. For code retrieval, view='code' fetches source code of matched symbols.",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the browse tool on target '{target}' with view '{view}'."))]
         )
     elif name == "metrics":
@@ -1010,7 +1075,7 @@ async def handle_completion(
     if isinstance(ref, types.PromptReference):
         if ref.name == "browse":
             if argument.name == "view":
-                views = ["summary", "classes", "functions", "deps", "tree", "search", "callers", "callees", "impact", "pagerank"]
+                views = ["summary", "classes", "functions", "deps", "tree", "search", "code", "callers", "callees", "impact", "pagerank"]
                 result = types.Completion(
                     values=[v for v in views if v.startswith(argument.value.lower())],
                     has_more=False
