@@ -40,6 +40,12 @@ def get_db_path_for_repo(repo_path: str) -> str:
     hash_str = hashlib.md5(str(resolved_repo).encode('utf-8')).hexdigest()
     return str(Path(get_indexes_dir()) / f"{hash_str}_code_search.duckdb")
 
+def get_graph_path_for_repo(duckdb_path: str) -> str:
+    """Convert a duckdb file path to the corresponding kuzu directory path."""
+    p = Path(duckdb_path)
+    graph_dir_name = p.stem.replace("_code_search", "_gorgonzola")
+    return str(p.parent / graph_dir_name)
+
 def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     """Formal, versioned migration that runs once per DB."""
     conn.execute('''
@@ -100,9 +106,11 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         ).fetchone()
         if fts_info:
             fts_sql = fts_info[0] or ""
-            # Old 2-column format won't include 'filepath' — rebuild
             if 'relationships' not in fts_sql:
-                conn.execute("PRAGMA drop_fts_index('code_nodes')")
+                try:
+                    conn.execute("PRAGMA drop_fts_index('code_nodes')")
+                except Exception:
+                    conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
                 conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
     except Exception:
         pass  # FTS not installed or index doesn't exist yet
@@ -113,18 +121,38 @@ def migrate_all():
     for fname in os.listdir(indexes_dir):
         if fname.endswith(".duckdb"):
             db_path = Path(indexes_dir) / fname
-            with duckdb.connect(str(db_path)) as conn:
-                migrate_codebase(conn)
+            try:
+                with duckdb.connect(str(db_path)) as conn:
+                    migrate_codebase(conn)
+            except Exception as e:
+                import sys
+                print(f"Warning: Failed to migrate {fname}: {e}", file=sys.stderr)
 
 class CodeSearchIndex:
     """DuckDB-backed Semantic Code Search Index."""
 
     def __init__(self, db_path: str = None, read_only: bool = False):
+        self._conn = None
+        self.graph = None
         if db_path is None:
             repo_path = find_repo_root(os.getcwd())
             db_path = get_db_path_for_repo(repo_path)
         self.db_path = db_path
-        self._conn = duckdb.connect(self.db_path, read_only=read_only)
+        
+        try:
+            self._conn = duckdb.connect(self.db_path, read_only=read_only)
+        except duckdb.IOException as e:
+            if not read_only and "not a valid DuckDB database file" in str(e):
+                import sys
+                print(f"Warning: Corrupted DuckDB file detected, removing and recreating: {e}", file=sys.stderr)
+                try:
+                    os.remove(self.db_path)
+                except OSError:
+                    pass
+                self._conn = duckdb.connect(self.db_path, read_only=read_only)
+            else:
+                raise e
+
         if not read_only:
             migrate_codebase(self._conn)
         else:
@@ -136,16 +164,23 @@ class CodeSearchIndex:
                     self._conn.execute("LOAD fts")
                 except Exception:
                     pass
-        self.graph = GorgonzolaGraph(db_path=self.db_path)
+        self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
 
     def close(self):
-        """Close the persistent DuckDB connection."""
+        """Close the underlying database connections."""
         if self._conn:
             try:
                 self._conn.close()
             except Exception:
                 pass
             self._conn = None
+            
+        if getattr(self, 'graph', None):
+            try:
+                self.graph.close()
+            except Exception:
+                pass
+            self.graph = None
 
     def __del__(self):
         self.close()
@@ -159,7 +194,7 @@ class CodeSearchIndex:
         try:
             conn.execute("PRAGMA drop_fts_index('code_nodes')")
         except Exception:
-            pass
+            conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
         conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
         try:
             self.clear_fts_dirty()
@@ -174,8 +209,9 @@ class CodeSearchIndex:
                 INSERT INTO _meta (key, value) VALUES ('fts_dirty', 'true')
                 ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = now()
             """)
-        except Exception:
-            pass # Best effort
+        except Exception as e:
+            import sys
+            print(f"Warning: Failed to mark FTS dirty (is conn read-only?): {e}", file=sys.stderr)
 
     def is_fts_dirty(self) -> bool:
         """Check if the FTS index needs rebuilding."""
@@ -327,32 +363,35 @@ class CodeSearchIndex:
             conn.execute("ROLLBACK")
             raise e
             
-        queries = []
-        params = {}
-        for i, (filepath, content_hash, mtime, lang) in enumerate(files_data):
-            name = os.path.basename(filepath)
-            ext = os.path.splitext(filepath)[1]
-            q = f"""
-                MERGE (f:File {{id: $id_{i}}})
-                ON CREATE SET f.name = $name_{i}, f.path = $id_{i}, f.extension = $ext_{i}, f.content_hash = $content_hash_{i}, f.mtime = $mtime_{i}, f.lang = $lang_{i}
-                ON MATCH SET f.content_hash = $content_hash_{i}, f.mtime = $mtime_{i}, f.lang = $lang_{i}
-            """
-            queries.append(q)
-            params.update({
-                f"id_{i}": filepath,
-                f"name_{i}": name,
-                f"ext_{i}": ext,
-                f"content_hash_{i}": content_hash,
-                f"mtime_{i}": float(mtime),
-                f"lang_{i}": lang
-            })
-            
-        if queries:
-            try:
-                with self.graph:
-                    self.graph.query_batch(queries, params)
-            except Exception:
-                pass
+        chunk_size = 500
+        for i in range(0, len(files_data), chunk_size):
+            chunk = files_data[i:i+chunk_size]
+            queries = []
+            params = {}
+            for j, (filepath, content_hash, mtime, lang) in enumerate(chunk):
+                name = os.path.basename(filepath)
+                ext = os.path.splitext(filepath)[1]
+                q = f"""
+                    MERGE (f:File {{id: $id_{j}}})
+                    ON CREATE SET f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    ON MATCH SET f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                """
+                queries.append(q)
+                params.update({
+                    f"id_{j}": filepath,
+                    f"name_{j}": name,
+                    f"ext_{j}": ext,
+                    f"content_hash_{j}": content_hash,
+                    f"mtime_{j}": float(mtime),
+                    f"lang_{j}": lang
+                })
+                
+            if queries:
+                try:
+                    with self.graph:
+                        self.graph.query_batch(queries, params)
+                except Exception:
+                    pass
 
     def upsert_file_hash(self, filepath: str, content_hash: str, mtime: float, lang: str):
         """Upsert a file's hash and metadata for incremental indexing."""
@@ -398,6 +437,32 @@ class CodeSearchIndex:
         res = conn.execute('SELECT filepath FROM files').fetchall()
         return [row[0] for row in res]
 
+    def get_stale_files(self, dirpath: str = None) -> List[str]:
+        """Return filepaths where on-disk mtime is newer than indexed mtime.
+
+        Optionally scoped to a directory prefix. This is a cheap stat()-based
+        check that avoids content hashing until re-index time.
+        """
+        conn = self._conn
+        if dirpath:
+            prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
+            rows = conn.execute(
+                'SELECT filepath, mtime FROM files WHERE filepath LIKE ?',
+                (f"{prefix}%",)
+            ).fetchall()
+        else:
+            rows = conn.execute('SELECT filepath, mtime FROM files').fetchall()
+
+        stale = []
+        for filepath, indexed_mtime in rows:
+            try:
+                disk_mtime = os.path.getmtime(filepath)
+                if disk_mtime > indexed_mtime + 0.01:  # small epsilon for float comparison
+                    stale.append(filepath)
+            except OSError:
+                pass  # File deleted or inaccessible — stale removal handled elsewhere
+        return stale
+
     def search(self, query: str, limit: int = 10, target_path: str = None) -> List[Dict[str, Any]]:
         """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
         conn = self._conn
@@ -417,6 +482,8 @@ class CodeSearchIndex:
                     params.append(f"{prefix}%")
             params.append(limit)
 
+            # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the 
+            # WHERE clause for filtering and in the SELECT clause to retrieve the score.
             res = conn.execute(f'''
                 SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line,
                        fts_main_code_nodes.match_bm25(c.id, ?) AS score

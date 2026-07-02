@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 _fts_rebuild_lock = threading.Lock()
+_auto_sync_lock = threading.Lock()
 from typing import Any, List, Optional
 
 import mcp_types as types
@@ -224,6 +225,56 @@ def clear_api_cache():
                     pass
 
 # Core implementation of tools (without decorators)
+
+async def _auto_sync_stale(repo_root: str, db_path: str, scope_path: str):
+    """Detect and re-index files whose on-disk mtime is newer than indexed mtime.
+
+    Runs inline before browse queries to ensure the index reflects current disk state.
+    Protected by a lock to prevent concurrent reindexing of the same files.
+    """
+    import hashlib
+    from src.mcp_server.index_db import CodeSearchIndex
+
+    def _sync():
+        with _auto_sync_lock:
+            check_index = CodeSearchIndex(db_path=db_path, read_only=True)
+            try:
+                stale_files = check_index.get_stale_files(scope_path)
+            finally:
+                check_index.close()
+
+            if not stale_files:
+                return 0
+
+            sys.stderr.write(f"[INFO] Auto-sync: {len(stale_files)} stale file(s) detected, re-indexing...\n")
+            sys.stderr.flush()
+
+            from src.mcp_server.index_pipeline import CodebaseIndexer
+
+            indexer = CodebaseIndexer(repo_path=repo_root)
+            try:
+                for filepath in stale_files:
+                    try:
+                        content = Path(filepath).read_text(encoding='utf-8', errors='ignore')
+                        ext = os.path.splitext(filepath)[1]
+                        indexer.index_file(filepath, content, ext, rebuild_fts=False)
+                        mtime = os.path.getmtime(filepath)
+                        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                        lang = ext.lstrip('.')
+                        indexer.search_index.upsert_file_hash(filepath, content_hash, mtime, lang)
+                    except Exception as e:
+                        sys.stderr.write(f"[WARNING] Auto-sync failed for {filepath}: {e}\n")
+                        sys.stderr.flush()
+            finally:
+                indexer.close()
+
+            return len(stale_files)
+
+    synced = await asyncio.to_thread(_sync)
+    if synced:
+        # Clear cached read-only connections so they pick up the new data
+        clear_api_cache()
+
 async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False) -> dict:
     # --- Input validation ---
     if view not in ALLOWED_VIEWS:
@@ -246,6 +297,14 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             f"External repository at '{repo_root}' has not been indexed yet. "
             f"Please run the 'update_index' tool with allow_external=True on this target first."
         )
+
+    # Auto-sync stale files before serving search-oriented views.
+    # Skip for structure-only views (summary, tree, classes, functions, deps)
+    # which don't suffer from the stale-index trap and are also called
+    # internally by do_update_index after fresh indexing.
+    _SYNC_VIEWS = frozenset({"search", "code", "callers", "callees", "impact", "pagerank", "functional-analysis"})
+    if view in _SYNC_VIEWS:
+        await _auto_sync_stale(repo_root, db_path, str(path))
 
     index = _get_cached_api(repo_root, db_path, "index")
 
@@ -542,7 +601,19 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
         return summary_result
 
-    return result
+    # Truncate lists to the specified limit to prevent token explosion if not writing to file
+    def truncate_lists(obj):
+        if isinstance(obj, dict):
+            return {k: truncate_lists(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            if len(obj) > limit:
+                truncated_list = [truncate_lists(v) for v in obj[:limit]]
+                truncated_list.append(f"... (truncated {len(obj) - limit} more items, use output_file parameter to view full results)")
+                return truncated_list
+            return [truncate_lists(v) for v in obj]
+        return obj
+
+    return truncate_lists(result)
 
 
 async def do_metrics(target: str, what: List[str] = ["all"], output_path: Optional[str] = None, allow_external: bool = False) -> dict:
@@ -818,12 +889,23 @@ async def handle_list_tools(
                             "type": "string",
                             "description": "Absolute path to the target directory or file. Optional. Defaults to the current workspace root."
                         },
-                        "view": {"type": "string", "default": "summary"},
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer", "default": 10},
+                        "view": {
+                            "type": "string",
+                            "default": "summary",
+                            "description": "The type of view to return. Valid options are: summary, classes, functions, deps, tree, search, callers, callees, impact, pagerank, code, functional-analysis."
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "The search query, function name, or symbol to look for. Required for search, callers, and callees views."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 10,
+                            "description": "Maximum number of results to return. Use smaller limits to preserve context window."
+                        },
                         "output_file": {
                             "type": "string",
-                            "description": "Optional absolute path to a file where the full detailed JSON result should be saved. If provided, the tool response will be a compact summary to save tokens."
+                            "description": "Optional absolute path to a file where the full detailed JSON result should be saved. If provided, the tool response will be a compact summary to save tokens. Highly recommended for large codebases or tree/deps views."
                         },
                         "max_depth": {
                             "type": "integer",
@@ -1006,7 +1088,7 @@ async def handle_list_prompts(
         prompts=[
             types.Prompt(
                 name="browse",
-                description="Browse the codebase (structure, semantic search, graph, or code retrieval). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank. For code retrieval, view='code' fetches source code of matched symbols.",
+                description="Browse the codebase (structure, semantic search, graph, or code retrieval). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank, functional-analysis. For code retrieval, view='code' fetches source code of matched symbols.",
                 arguments=[
                     types.PromptArgument(name="target", description="Target path to browse", required=False),
                     types.PromptArgument(name="view", description="View type (summary, classes, search, graph views, etc.)", required=False)

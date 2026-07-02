@@ -8,7 +8,7 @@ Pecorino allows Large Language Models (LLMs) and dev tools (such as Claude Deskt
 
 ## ✨ Features
 
-- 🔌 **Model Context Protocol (MCP)**: Exposes 4 unified tools (`browse`, `metrics`, `report`, `update_index`) to your AI assistant.
+- 🔌 **Model Context Protocol (MCP)**: Exposes 3 unified tools (`browse`, `metrics`, `update_index`) to your AI assistant.
 - 📊 **Git History Analytics**: Commits, LOC growth, author contributions, activity patterns, and team performance tracking.
 - 📐 **Object-Oriented Design Metrics**: Afferent/efferent coupling (Ca/Ce), instability (I), abstractness (A), and Distance-from-Main-Sequence (D) analysis.
 - 🚨 **Risk Hotspot Detection**: Combines code churn (revision frequency) and complexity to pinpoint high-risk source files.
@@ -77,13 +77,7 @@ Computes design metrics, cyclomatic complexity, Halstead metrics, or risk hotspo
   - `target` *(string, required)*: Absolute path to the file or folder.
   - `what` *(array of strings, optional)*: Metrics to run (`"oop"`, `"complexity"`, `"hotspots"`, or `"all"`).
 
-### 3. `/report`
-Runs a full repository scan and exports a structured JSON report directly to `<repo_name>_report/pecorino_metrics.json` inside your specified output directory.
-- **Parameters**:
-  - `repo_path` *(string, required)*: Absolute path to the Git repository.
-  - `output_path` *(string, required)*: Absolute path to the output directory.
-
-### 4. `/update_index`
+### 3. `/update_index`
 Performs tree-sitter AST analysis and populates the DuckDB codebase index for fast semantic searching.
 - **Parameters**:
   - `target` *(string, required)*: Absolute path to the file or folder to index.
@@ -121,7 +115,7 @@ pecorino-mcp --transport sse --host 127.0.0.1 --port 8000
 python pecorino.py /path/to/repo /path/to/output_dir
 ```
 
-For comprehensive CLI flags, transport details, and configuration options, see the [Local Server Deployment Guide](docs/local_server_deployment.md).
+For comprehensive CLI flags, transport details, and configuration options, see the [Local Server Deployment Guide](https://github.com/pecorino-mcp/pecorino-docs/blob/main/local_server_deployment.md).
 
 ---
 
