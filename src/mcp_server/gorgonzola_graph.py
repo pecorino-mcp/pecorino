@@ -1,7 +1,11 @@
+import logging
 import csv
 import os
 import sys
 import threading
+
+logger = logging.getLogger(__name__)
+
 
 # Column orders for each node table (matching CREATE statements, used for CSV COPY)
 _NODE_COLUMNS = {
@@ -227,7 +231,7 @@ class GorgonzolaGraph:
             columns = _NODE_COLUMNS.get(label)
             if columns is None:
                 # Fallback: skip unknown labels
-                print(f"[WARNING] Unknown node label: {label}, skipping", file=sys.stderr)
+                logger.warning("[WARNING] Unknown node label: {label}, skipping")
                 continue
 
             csv_path = os.path.join(csv_dir, f"_bulk_nodes_{label}.csv")
@@ -315,7 +319,7 @@ class GorgonzolaGraph:
                 copy_query = f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
                 self._write_and_copy_csv(conn, csv_path, rows, copy_query)
             except Exception as e:
-                print(
+                logger.info(
                     f"[ERROR] Failed to COPY edges {src_label}-[:{rel_type}]->{dst_label}: {e}",
                     file=sys.stderr,
                 )

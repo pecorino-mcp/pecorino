@@ -1,11 +1,14 @@
 import hashlib
 import json
+import logging
 import os
 import duckdb
 from pathlib import Path
 from typing import Any, Dict, List
 from src.core.errors import SecurityValidationError
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
+
+logger = logging.getLogger(__name__)
 
 def find_repo_root(filepath: str, max_depth: int = 20) -> str:
     """Find the root directory of the repository containing the given filepath."""
@@ -119,8 +122,7 @@ def migrate_all():
                 with duckdb.connect(str(db_path)) as conn:
                     migrate_codebase(conn)
             except Exception as e:
-                import sys
-                print(f"Warning: Failed to migrate {fname}: {e}", file=sys.stderr)
+                logger.warning("Failed to migrate %s: %s", fname, e)
 
 class CodeSearchIndex:
     """DuckDB-backed Semantic Code Search Index."""
@@ -138,8 +140,7 @@ class CodeSearchIndex:
             self._conn = duckdb.connect(self.db_path, read_only=read_only)
         except duckdb.IOException as e:
             if not read_only and "not a valid DuckDB database file" in str(e):
-                import sys
-                print(f"Warning: Corrupted DuckDB file detected, removing and recreating: {e}", file=sys.stderr)
+                logger.warning("Corrupted DuckDB file detected, removing and recreating: %s", e)
                 try:
                     os.remove(self.db_path)
                 except OSError:
@@ -189,30 +190,57 @@ class CodeSearchIndex:
         self.close()
 
     def rebuild_fts(self):
-        """Rebuild the index."""
+        """Rebuild the FTS index, forcefully cleaning up all stale artifacts first."""
+        import logging
+        logger = logging.getLogger(__name__)
+
         conn = self._conn
         conn.execute("INSTALL fts")
         conn.execute("LOAD fts")
-        # Drop the index if it exists to rebuild.
-        # CASCADE schema drop is tried first because it handles stale internal
-        # FTS tables (e.g. stopwords) that can cause the pragma to fail.
-        dropped = False
-        for drop_strategy in [
-            lambda: conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE"),
-            lambda: conn.execute("PRAGMA drop_fts_index('code_nodes')"),
-        ]:
-            try:
-                drop_strategy()
-                dropped = True
-                break
-            except Exception:
-                pass
+
+        # --- Phase 1: Drop via pragma (cleanest path) ---
+        try:
+            conn.execute("PRAGMA drop_fts_index('code_nodes')")
+        except Exception:
+            pass
+
+        # --- Phase 2: Force-drop the FTS schema and all its internal tables ---
+        try:
+            conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
+        except Exception:
+            pass
+
+        # --- Phase 3: Hunt and destroy orphaned FTS internal tables ---
+        # DuckDB's FTS extension creates internal tables (stopwords, docs, fields,
+        # etc.) inside its schema. If the schema drop partially fails or the DB
+        # was corrupted, these can linger and block the next create_fts_index.
+        try:
+            orphans = conn.execute("""
+                SELECT table_name, schema_name
+                FROM information_schema.tables
+                WHERE schema_name LIKE 'fts_main_code_nodes%'
+            """).fetchall()
+            for table_name, schema_name in orphans:
+                try:
+                    conn.execute(f'DROP TABLE IF EXISTS "{schema_name}"."{table_name}" CASCADE')
+                except Exception:
+                    pass
+            # Final attempt to drop the schema if orphans existed
+            if orphans:
+                try:
+                    conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
+                except Exception:
+                    pass
+        except Exception:
+            pass  # information_schema query itself failed — DB is very fresh, nothing to clean
+
+        # --- Phase 4: Create fresh index ---
         conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
+
         try:
             self.clear_fts_dirty()
         except Exception as e:
-            import sys
-            print(f"Warning: FTS rebuilt but failed to clear dirty flag: {e}", file=sys.stderr)
+            logger.warning("FTS rebuilt but failed to clear dirty flag: %s", e)
 
     def mark_fts_dirty(self):
         """Mark the FTS index as stale (data changed since last rebuild)."""
@@ -222,8 +250,7 @@ class CodeSearchIndex:
                 ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = now()
             """)
         except Exception as e:
-            import sys
-            print(f"Warning: Failed to mark FTS dirty (is conn read-only?): {e}", file=sys.stderr)
+            logger.warning("Failed to mark FTS dirty (is conn read-only?): %s", e)
 
     def is_fts_dirty(self) -> bool:
         """Check if the FTS index needs rebuilding."""

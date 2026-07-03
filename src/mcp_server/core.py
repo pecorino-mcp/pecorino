@@ -4,6 +4,8 @@ import glob
 import json
 import os
 import sys
+import logging
+from mcp.server.subscriptions import ListenHandler, InMemorySubscriptionBus, ToolsListChanged
 import threading
 import time
 from pathlib import Path
@@ -13,6 +15,9 @@ _auto_sync_lock = threading.Lock()
 from typing import Any, List, Optional
 
 import mcp_types as types
+
+logger = logging.getLogger(__name__)
+bus = InMemorySubscriptionBus()
 from mcp.server import Server, ServerRequestContext
 
 from src.core.gitdatacollector import GitDataCollector
@@ -354,21 +359,21 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         if not query:
             raise SecurityValidationError("Query (function/method name) is required for callers view")
         callers = await asyncio.to_thread(api.find_callers, query)
-        return {"status": "success", "target": query, "callers": callers}
+        return {"status": "success", "target": query, "view": view, "callers": callers}
 
     if view == "callees":
         if not query:
             raise SecurityValidationError("Query (function/method name) is required for callees view")
         callees = await asyncio.to_thread(api.find_callees, query)
-        return {"status": "success", "target": query, "callees": callees}
+        return {"status": "success", "target": query, "view": view, "callees": callees}
 
     if view == "impact":
         deps = await asyncio.to_thread(api.impact_analysis, path.as_posix(), max_depth)
-        return {"status": "success", "target": path.as_posix(), "dependent_files": deps}
+        return {"status": "success", "target": path.as_posix(), "view": view, "dependent_files": deps}
 
     if view == "functional-analysis":
         result = await asyncio.to_thread(api.analyze_functional_purity)
-        return {"status": "success", "target": path.as_posix(), "functional_analysis": result}
+        return {"status": "success", "target": path.as_posix(), "view": view, "functional_analysis": result}
 
     if view == "pagerank":
         try:
@@ -383,7 +388,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 ]
             filtered_pr.sort(key=lambda x: x["score"], reverse=True)
             top_pr = filtered_pr[:limit]
-            return {"status": "success", "target": path.as_posix(), "pagerank": top_pr}
+            return {"status": "success", "target": path.as_posix(), "view": view, "pagerank": top_pr}
         except Exception as e:
             raise AnalysisError(f"PageRank calculation failed: {e}")
 
@@ -430,7 +435,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             # Strip body_text from inline results to prevent token explosion
             for r in results:
                 r.pop("body_text", None)
-        return {"query": query, "results": results, "search_status": "ok"}
+        return {"query": query, "view": view, "results": results, "search_status": "ok"}
 
     if view == "code":
         def _cap_body(body: str) -> str:
@@ -456,7 +461,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 r['body_text'] = _cap_body(r.get('body_text', ''))
         else:
             raise SecurityValidationError(f"Target not found: {path}")
-        return {"query": query, "results": results, "code_status": "ok"}
+        return {"query": query, "view": view, "results": results, "code_status": "ok"}
 
 
     # ── Structural views: classes, functions, deps, tree, summary ──
@@ -470,7 +475,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     if is_file and path.suffix not in SUPPORTED:
         raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
 
-    result: dict[str, Any] = {"target": path.as_posix(), "type": "directory" if is_dir else "file"}
+    result: dict[str, Any] = {"target": path.as_posix(), "type": "directory" if is_dir else "file", "view": view}
 
     if view == "tree":
         if is_file:
@@ -974,62 +979,105 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
 
 # Low-level Handlers
 
+
+class RoleMiddleware:
+    async def __call__(self, ctx: ServerRequestContext, call_next):
+        role = os.environ.get("MCP_USER_ROLE", "admin")
+        if not hasattr(ctx, "lifespan_context") or ctx.lifespan_context is None:
+            ctx.lifespan_context = {}
+        ctx.lifespan_context["user_role"] = role
+        return await call_next(ctx)
+
 async def handle_list_tools(
     ctx: ServerRequestContext,
     params: types.PaginatedRequestParams | None = None
 ) -> types.ListToolsResult:
-    return types.ListToolsResult(
-        tools=[
-            types.Tool(
-                name="browse",
-                description="Browse codebase structure, perform semantic search, retrieve source code, or run graph and dependency analysis.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "target": {
-                            "type": "string",
-                            "description": "Absolute path to the target directory or file. Optional. Defaults to the current workspace root."
-                        },
-                        "view": {
-                            "type": "string",
-                            "default": "summary",
-                            "enum": ["summary", "classes", "functions", "deps", "tree", "search", "callers", "callees", "impact", "pagerank", "code", "functional-analysis"],
-                            "description": "The type of view to return."
-                        },
-                        "query": {
-                            "type": "string",
-                            "description": "The search query, function name, or symbol to look for. Required for search, callers, callees, and code (on directories) views."
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "default": 10,
-                            "description": "Maximum number of results to return. Use smaller limits to preserve context window."
-                        },
-                        "offset": {
-                            "type": "integer",
-                            "default": 0,
-                            "description": "Offset for paginated results. Use with limit to page through large result sets."
-                        },
-                        "output_file": {
-                            "type": "string",
-                            "description": "Optional relative filename to save full JSON results to .mcp_outputs/. Highly recommended for large codebases or tree/deps views."
-                        },
-                        "max_depth": {
-                            "type": "integer",
-                            "default": 3,
-                            "description": "Max depth for impact analysis (only applicable if view is 'impact')."
-                        },
-                        "allow_external": {
-                            "type": "boolean",
-                            "default": False,
-                            "description": "If True, allows accessing relative paths outside the standard workspace root."
-                        }
+    role = getattr(ctx, "lifespan_context", {}).get("user_role", "admin")
+    
+    tools = [
+        types.Tool(
+            name="browse",
+            description="Browse codebase structure, perform semantic search, retrieve source code, or run graph and dependency analysis.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute path to the target directory or file. Optional. Defaults to the current workspace root."
+                    },
+                    "view": {
+                        "type": "string",
+                        "default": "summary",
+                        "enum": ["summary", "classes", "functions", "deps", "tree", "search", "callers", "callees", "impact", "pagerank", "code", "functional-analysis"],
+                        "description": "The type of view to return."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "The search query, function name, or symbol to look for. Required for search, callers, callees, and code (on directories) views."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Maximum number of results to return. Use smaller limits to preserve context window."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Offset for paginated results. Use with limit to page through large result sets."
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Optional relative filename to save full JSON results to .mcp_outputs/. Highly recommended for large codebases or tree/deps views."
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "default": 3,
+                        "description": "Max depth for impact analysis (only applicable if view is 'impact')."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If True, allows accessing relative paths outside the standard workspace root."
                     }
                 }
-            ),
+            }
+        ),
+        types.Tool(
+            name="update_index",
+            description="Update the AST index for the codebase and return a structural summary.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute path to the target directory or file. Optional. Defaults to the current workspace root."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If True, allows accessing relative paths outside the standard workspace root."
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="set_role",
+            description="Change your role to test dynamic tool lists (e.g. 'admin' vs 'viewer').",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string", "description": "The role name to switch to (e.g. 'admin', 'viewer')."}
+                },
+                "required": ["role"]
+            }
+        )
+    ]
+    
+    if role == "admin":
+        tools.append(
             types.Tool(
                 name="metrics",
-                description="Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis.",
+                description="Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis. (Admin only)",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -1040,7 +1088,8 @@ async def handle_list_tools(
                         "what": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "default": ["all"]
+                            "default": ["all"],
+                            "description": "Which analyses to run: 'oop', 'complexity', 'hotspots', or 'all'."
                         },
                         "output_path": {
                             "type": "string",
@@ -1053,27 +1102,11 @@ async def handle_list_tools(
                         }
                     }
                 }
-            ),
-            types.Tool(
-                name="update_index",
-                description="Update the AST index for the codebase and return a structural summary.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "target": {
-                            "type": "string",
-                            "description": "Absolute path to the target directory or file. Optional. Defaults to the current workspace root."
-                        },
-                        "allow_external": {
-                            "type": "boolean",
-                            "default": False,
-                            "description": "If True, allows accessing relative paths outside the standard workspace root."
-                        }
-                    }
-                }
             )
-        ]
-    )
+        )
+        
+    return types.ListToolsResult(tools=tools)
+
 
 async def handle_call_tool(
     ctx: ServerRequestContext,
@@ -1085,10 +1118,17 @@ async def handle_call_tool(
 
     safe_args = json.dumps(arguments, ensure_ascii=True)[:2000]
     safe_name = str(name).replace('\n', '').replace('\r', '')[:50]
-    sys.stderr.write(f"[INFO] Tool={safe_name} args={safe_args}\n")
-    sys.stderr.flush()
+    logger.info(f'Tool={safe_name} args={safe_args}')
 
     TOOL_CALLS.labels(tool=name).inc()
+
+    if name == "set_role":
+        new_role = arguments.get("role", "admin")
+        os.environ["MCP_USER_ROLE"] = new_role
+        await bus.publish(ToolsListChanged())
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=f"Role changed to {new_role}. Dynamic tool list updated!")]
+        )
 
     try:
         def _normalize_target(t: Any) -> Any:
@@ -1324,6 +1364,9 @@ server = Server(
     on_list_prompts=handle_list_prompts,
     on_get_prompt=handle_get_prompt,
     on_completion=handle_completion,
+    on_subscriptions_listen=ListenHandler(bus),
 )
+server.middleware.append(RoleMiddleware())
+
 
 

@@ -1,3 +1,4 @@
+import logging
 import sys
 import asyncio
 import argparse
@@ -11,6 +12,9 @@ if str(workspace_root) not in sys.path:
 
 from src.mcp_server.config import settings
 from src.mcp_server.core import server as mcp_server
+
+logger = logging.getLogger(__name__)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run OOP Metrics Analyzer Server")
@@ -39,7 +43,7 @@ def main():
             import uvicorn  # noqa: F401
             import fastapi  # noqa: F401
         except ImportError:
-            print("Error: fastapi and uvicorn must be installed to use SSE transport.", file=sys.stderr)
+            logger.warning("Error: fastapi and uvicorn must be installed to use SSE transport.")
             sys.exit(1)
         from src.transports.fastapi_adapter import run_sse
         asyncio.run(run_sse(mcp_server))
@@ -48,7 +52,7 @@ def main():
             import uvicorn  # noqa: F401
             import fastapi  # noqa: F401
         except ImportError:
-            print("Error: fastapi and uvicorn must be installed to use streamable-http transport.", file=sys.stderr)
+            logger.warning("Error: fastapi and uvicorn must be installed to use streamable-http transport.")
             sys.exit(1)
         from src.transports.fastapi_adapter import run_streamable_http
         asyncio.run(run_streamable_http(mcp_server))

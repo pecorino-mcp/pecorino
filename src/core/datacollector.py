@@ -1,3 +1,4 @@
+import logging
 """
 Data collector module for Pecorino.
 
@@ -18,6 +19,9 @@ from src.git.commands import getpipeoutput
 from src.utils.helpers import should_include_file
 from src.metrics.oopmetrics import OOPMetricsAnalyzer
 from src.core.constants import get_language_for_extension
+
+logger = logging.getLogger(__name__)
+
 
 
 class LRUCache(OrderedDict):
@@ -678,7 +682,7 @@ class DataCollector:
 	def loadCache(self, cachefile):
 		if not os.path.exists(cachefile):
 			return
-		print('Loading cache...')
+		logger.info('Loading cache...')
 		try:
 			with open(cachefile, 'rb') as f:
 				try:
@@ -689,13 +693,13 @@ class DataCollector:
 						f.seek(0)
 						self.cache = pickle.load(f)
 					except (pickle.PickleError, EOFError) as e2:
-						print(f'Warning: Failed to load cache file {cachefile}: {e2}')
+						logger.info(f'Warning: Failed to load cache file {cachefile}: {e2}')
 						self.cache = {}
 				except Exception as e:
-					print(f'Warning: Unexpected error loading cache file {cachefile}: {e}')
+					logger.info(f'Warning: Unexpected error loading cache file {cachefile}: {e}')
 					self.cache = {}
 		except OSError as e:
-			print(f'Warning: Could not open cache file {cachefile}: {e}')
+			logger.info(f'Warning: Could not open cache file {cachefile}: {e}')
 			self.cache = {}
 
 	##
@@ -845,7 +849,7 @@ class DataCollector:
 	##
 	# Save cacheable data
 	def saveCache(self, cachefile):
-		print('Saving cache...')
+		logger.info('Saving cache...')
 		tempfile = cachefile + '.tmp'
 		try:
 			# Optimize cache before saving - remove old/stale entries
@@ -863,10 +867,10 @@ class DataCollector:
 
 			if conf['verbose']:
 				cache_size_mb = os.path.getsize(cachefile) / (1024 * 1024)
-				print(f'Cache saved: {cache_size_mb:.2f} MB')
+				logger.info(f'Cache saved: {cache_size_mb:.2f} MB')
 
 		except OSError as e:
-			print(f'Warning: Could not save cache file {cachefile}: {e}')
+			logger.info(f'Warning: Could not save cache file {cachefile}: {e}')
 			# Clean up temp file if it exists
 			try:
 				os.remove(tempfile)
@@ -891,7 +895,7 @@ class DataCollector:
 					sorted_items = sorted(cache_data.items())[-10000:]
 					optimized[key] = dict(sorted_items)
 					if conf['verbose']:
-						print(f'Optimized {key} cache: {len(cache_data)} -> {len(optimized[key])} entries')
+						logger.info(f'Optimized {key} cache: {len(cache_data)} -> {len(optimized[key])} entries')
 				else:
 					optimized[key] = cache_data
 
@@ -937,7 +941,7 @@ class DataCollector:
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Failed to calculate metrics for {filepath}: {e}')
+				logger.info(f'Warning: Failed to calculate metrics for {filepath}: {e}')
 			return None
 
 	def _calculate_loc_metrics(self, content, file_extension):
@@ -1310,10 +1314,10 @@ class DataCollector:
 
 		except (ValueError, OverflowError, ZeroDivisionError) as e:
 			if conf['debug']:
-				print(f'Warning: Maintainability Index calculation failed: {e}')
-				print(f'  Input values - loc_metrics: {loc_metrics}')
-				print(f'  Input values - halstead_metrics: {halstead_metrics}')
-				print(f'  Input values - mccabe_metrics: {mccabe_metrics}')
+				logger.info(f'Warning: Maintainability Index calculation failed: {e}')
+				logger.info(f'  Input values - loc_metrics: {loc_metrics}')
+				logger.info(f'  Input values - halstead_metrics: {halstead_metrics}')
+				logger.info(f'  Input values - mccabe_metrics: {mccabe_metrics}')
 			return {
 				'mi': 0.0,
 				'mi_woc': 0.0,
@@ -1359,7 +1363,7 @@ class DataCollector:
 			return metrics
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: OOP metrics calculation failed for {filepath}: {e}')
+				logger.info(f'Warning: OOP metrics calculation failed for {filepath}: {e}')
 			return {
 				'classes_defined': 0,
 				'abstract_classes': 0,
@@ -1389,18 +1393,18 @@ class DataCollector:
 			try:
 				os.chdir(repository_path)
 			except OSError as e:
-				print(f'Warning: Could not change to repository path {repository_path}: {e}')
+				logger.info(f'Warning: Could not change to repository path {repository_path}: {e}')
 				return []
 
 		try:
 			files_output = getpipeoutput(['git ls-files'])
 			if not files_output.strip():
-				print(f'    No files found in repository: {repository_path or os.getcwd()}')
+				logger.info(f'    No files found in repository: {repository_path or os.getcwd()}')
 				return []
 
 			source_files = []
-			print(f'  📁 Scanning repository: {repository_path or os.getcwd()}')
-			print('  🔍 Files matching allowed extensions:')
+			logger.info(f'  📁 Scanning repository: {repository_path or os.getcwd()}')
+			logger.info('  🔍 Files matching allowed extensions:')
 
 			for filepath in files_output.strip().split('\n'):
 				if filepath.strip():
@@ -1411,13 +1415,13 @@ class DataCollector:
 							source_files.append(filepath)
 							# Output the found files to CLI as requested
 							ext = os.path.splitext(filename)[1] or 'no-ext'
-							print(f'      ✓ {filepath} ({ext})')
+							logger.info(f'      ✓ {filepath} ({ext})')
 
-			print(f'  📊 Found {len(source_files)} files for MI analysis')
+			logger.info(f'  📊 Found {len(source_files)} files for MI analysis')
 			return source_files
 
 		except Exception as e:
-			print(f'Warning: Failed to get repository files: {e}')
+			logger.info(f'Warning: Failed to get repository files: {e}')
 			return []
 		finally:
 			if repository_path and original_cwd:
@@ -1435,15 +1439,15 @@ class DataCollector:
 		Returns:
 			dict: MI analysis results for the repository
 		"""
-		print('\n🧮 Calculating Maintainability Index (MI) for repository...')
+		logger.info('\n🧮 Calculating Maintainability Index (MI) for repository...')
 
 		original_cwd = os.getcwd() if repository_path else None
 		if repository_path:
 			try:
 				os.chdir(repository_path)
-				print(f'  📁 Repository: {repository_path}')
+				logger.info(f'  📁 Repository: {repository_path}')
 			except OSError as e:
-				print(f'Error: Could not access repository {repository_path}: {e}')
+				logger.info(f'Error: Could not access repository {repository_path}: {e}')
 				return None
 
 		try:
@@ -1451,7 +1455,7 @@ class DataCollector:
 			source_files = self.get_repository_files_for_mi(repository_path)
 
 			if not source_files:
-				print('    ⚠️  No source files found with allowed extensions')
+				logger.info('    ⚠️  No source files found with allowed extensions')
 				return {
 					'repository_path': repository_path or os.getcwd(),
 					'files_analyzed': 0,
@@ -1463,7 +1467,7 @@ class DataCollector:
 			mi_results = []
 			successful_calculations = 0
 
-			print(f'\n  🔬 Calculating MI for {len(source_files)} files...')
+			logger.info(f'\n  🔬 Calculating MI for {len(source_files)} files...')
 			from src.utils.helpers import print_progress_bar
 
 			for i, filepath in enumerate(source_files):
@@ -1492,11 +1496,11 @@ class DataCollector:
 
 						# Output MI result to CLI for small projects
 						if len(source_files) <= 10:
-							print(f'      📄 {filepath}: MI = {mi_data["mi"]:.1f} ({mi_data["interpretation"]})')
+							logger.info(f'      📄 {filepath}: MI = {mi_data["mi"]:.1f} ({mi_data["interpretation"]})')
 
 				except Exception as e:
 					if len(source_files) <= 10 or conf.get('debug', False):
-						print(f'      ⚠️  Failed to calculate MI for {filepath}: {e}')
+						logger.info(f'      ⚠️  Failed to calculate MI for {filepath}: {e}')
 
 			print_progress_bar(
 				len(source_files),
@@ -1517,12 +1521,12 @@ class DataCollector:
 					interp = result['interpretation']
 					interpretation_counts[interp] = interpretation_counts.get(interp, 0) + 1
 
-				print('\n  📊 MI Analysis Summary:')
-				print(f'      Files analyzed: {len(mi_results)}')
-				print(f'      Average MI: {avg_mi:.1f}')
-				print('      Distribution:')
+				logger.info('\n  📊 MI Analysis Summary:')
+				logger.info(f'      Files analyzed: {len(mi_results)}')
+				logger.info(f'      Average MI: {avg_mi:.1f}')
+				logger.info('      Distribution:')
 				for interp, count in interpretation_counts.items():
-					print(f'        - {interp}: {count} files')
+					logger.info(f'        - {interp}: {count} files')
 
 				return {
 					'repository_path': repository_path or os.getcwd(),
@@ -1537,7 +1541,7 @@ class DataCollector:
 					}
 				}
 			else:
-				print('    ⚠️  No successful MI calculations')
+				logger.info('    ⚠️  No successful MI calculations')
 				return {
 					'repository_path': repository_path or os.getcwd(),
 					'files_analyzed': 0,
@@ -1546,7 +1550,7 @@ class DataCollector:
 				}
 
 		except Exception as e:
-			print(f'Error during MI calculation: {e}')
+			logger.info(f'Error during MI calculation: {e}')
 			return None
 		finally:
 			if repository_path and original_cwd:
@@ -1557,8 +1561,8 @@ class DataCollector:
 
 	def calculate_mccabe_for_repository(self, repository_path=None):
 		"""Calculate McCabe complexity metrics for all files in the repository."""
-		print('🔄 Calculating McCabe Complexity for repository...')
-		print(f'  📁 Repository: {repository_path or os.getcwd()}')
+		logger.info('🔄 Calculating McCabe Complexity for repository...')
+		logger.info(f'  📁 Repository: {repository_path or os.getcwd()}')
 
 		original_cwd = os.getcwd()
 
@@ -1566,11 +1570,11 @@ class DataCollector:
 			source_files = self.get_repository_files_for_mi(repository_path)
 
 			if not source_files:
-				print('    ⚠️  No source files found for McCabe analysis')
+				logger.info('    ⚠️  No source files found for McCabe analysis')
 				return None
 
-			print(f'  📊 Found {len(source_files)} files for McCabe analysis')
-			print(f'  🔬 Calculating complexity for {len(source_files)} files...')
+			logger.info(f'  📊 Found {len(source_files)} files for McCabe analysis')
+			logger.info(f'  🔬 Calculating complexity for {len(source_files)} files...')
 
 			complexity_results = []
 			from src.utils.helpers import print_progress_bar
@@ -1610,11 +1614,11 @@ class DataCollector:
 					complexity_results.append(result)
 
 					if len(source_files) <= 10:
-						print(f'      📄 {filepath}: Complexity = {complexity} ({category})')
+						logger.info(f'      📄 {filepath}: Complexity = {complexity} ({category})')
 
 				except Exception as e:
 					if len(source_files) <= 10 or conf.get('debug', False):
-						print(f'      ❌ Error analyzing {filepath}: {e}')
+						logger.info(f'      ❌ Error analyzing {filepath}: {e}')
 
 			print_progress_bar(
 				len(source_files),
@@ -1636,30 +1640,30 @@ class DataCollector:
 				complex_files = len([r for r in complexity_results if r['category'] == 'complex'])
 				very_complex_files = len([r for r in complexity_results if r['category'] == 'very_complex'])
 
-				print('\n  📊 McCabe Complexity Analysis Summary:')
-				print(f'      Files analyzed: {len(complexity_results)}')
-				print(f'      Average complexity: {avg_complexity:.1f}')
-				print(f'      Maximum complexity: {max_complexity}')
-				print('      Distribution:')
-				print(f'        - Simple (≤5): {simple_files} files')
-				print(f'        - Moderate (6-10): {moderate_files} files')
-				print(f'        - Complex (11-20): {complex_files} files')
-				print(f'        - Very Complex (>20): {very_complex_files} files')
+				logger.info('\n  📊 McCabe Complexity Analysis Summary:')
+				logger.info(f'      Files analyzed: {len(complexity_results)}')
+				logger.info(f'      Average complexity: {avg_complexity:.1f}')
+				logger.info(f'      Maximum complexity: {max_complexity}')
+				logger.info('      Distribution:')
+				logger.info(f'        - Simple (≤5): {simple_files} files')
+				logger.info(f'        - Moderate (6-10): {moderate_files} files')
+				logger.info(f'        - Complex (11-20): {complex_files} files')
+				logger.info(f'        - Very Complex (>20): {very_complex_files} files')
 
 				# Show all files by complexity (highest first)
-				print('\n  === Files by McCabe Complexity (Highest First) ===')
+				logger.info('\n  === Files by McCabe Complexity (Highest First) ===')
 				sorted_results = sorted(complexity_results, key=lambda x: x['complexity'], reverse=True)
 				for result in sorted_results:  # Show all files
 					if result['complexity'] > 20:
-						print(f'    🚨 {result["filepath"]} (Complexity: {result["complexity"]}) - Very Complex')
+						logger.info(f'    🚨 {result["filepath"]} (Complexity: {result["complexity"]}) - Very Complex')
 					elif result['complexity'] > 10:
-						print(f'    ⚠️  {result["filepath"]} (Complexity: {result["complexity"]}) - Complex')
+						logger.info(f'    ⚠️  {result["filepath"]} (Complexity: {result["complexity"]}) - Complex')
 					elif result['complexity'] > 5:
-						print(f'    � {result["filepath"]} (Complexity: {result["complexity"]}) - Moderate')
+						logger.info(f'    � {result["filepath"]} (Complexity: {result["complexity"]}) - Moderate')
 					else:
-						print(f'    ✅ {result["filepath"]} (Complexity: {result["complexity"]}) - Simple')
+						logger.info(f'    ✅ {result["filepath"]} (Complexity: {result["complexity"]}) - Simple')
 
-				print('✓ McCabe complexity calculation completed')
+				logger.info('✓ McCabe complexity calculation completed')
 				return {
 					'repository_path': repository_path or os.getcwd(),
 					'files_analyzed': len(complexity_results),
@@ -1674,11 +1678,11 @@ class DataCollector:
 					}
 				}
 			else:
-				print('    ⚠️  No successful McCabe calculations')
+				logger.info('    ⚠️  No successful McCabe calculations')
 				return None
 
 		except Exception as e:
-			print(f'Error during McCabe calculation: {e}')
+			logger.info(f'Error during McCabe calculation: {e}')
 			return None
 		finally:
 			if repository_path:
@@ -1689,8 +1693,8 @@ class DataCollector:
 
 	def calculate_halstead_for_repository(self, repository_path=None):
 		"""Calculate Halstead metrics for all files in the repository."""
-		print('🧮 Calculating Halstead Metrics for repository...')
-		print(f'  📁 Repository: {repository_path or os.getcwd()}')
+		logger.info('🧮 Calculating Halstead Metrics for repository...')
+		logger.info(f'  📁 Repository: {repository_path or os.getcwd()}')
 
 		original_cwd = os.getcwd()
 
@@ -1698,11 +1702,11 @@ class DataCollector:
 			source_files = self.get_repository_files_for_mi(repository_path)
 
 			if not source_files:
-				print('    ⚠️  No source files found for Halstead analysis')
+				logger.info('    ⚠️  No source files found for Halstead analysis')
 				return None
 
-			print(f'  📊 Found {len(source_files)} files for Halstead analysis')
-			print(f'  🔬 Calculating metrics for {len(source_files)} files...')
+			logger.info(f'  📊 Found {len(source_files)} files for Halstead analysis')
+			logger.info(f'  🔬 Calculating metrics for {len(source_files)} files...')
 
 			halstead_results = []
 			from src.utils.helpers import print_progress_bar
@@ -1734,11 +1738,11 @@ class DataCollector:
 					halstead_results.append(result)
 
 					if len(source_files) <= 10:
-						print(f'      📄 {filepath}: Volume={halstead_metrics["V"]:.1f}, Difficulty={halstead_metrics["D"]:.1f}, Effort={halstead_metrics["E"]:.1f}')
+						logger.info(f'      📄 {filepath}: Volume={halstead_metrics["V"]:.1f}, Difficulty={halstead_metrics["D"]:.1f}, Effort={halstead_metrics["E"]:.1f}')
 
 				except Exception as e:
 					if len(source_files) <= 10 or conf.get('debug', False):
-						print(f'      ❌ Error analyzing {filepath}: {e}')
+						logger.info(f'      ❌ Error analyzing {filepath}: {e}')
 
 			print_progress_bar(
 				len(source_files),
@@ -1760,20 +1764,20 @@ class DataCollector:
 				avg_effort = sum(efforts) / len(efforts)
 				total_bugs = sum(bugs)
 
-				print('\n  📊 Halstead Metrics Analysis Summary:')
-				print(f'      Files analyzed: {len(halstead_results)}')
-				print(f'      Average volume: {avg_volume:.1f}')
-				print(f'      Average difficulty: {avg_difficulty:.1f}')
-				print(f'      Average effort: {avg_effort:.1f}')
-				print(f'      Estimated total bugs: {total_bugs:.2f}')
+				logger.info('\n  📊 Halstead Metrics Analysis Summary:')
+				logger.info(f'      Files analyzed: {len(halstead_results)}')
+				logger.info(f'      Average volume: {avg_volume:.1f}')
+				logger.info(f'      Average difficulty: {avg_difficulty:.1f}')
+				logger.info(f'      Average effort: {avg_effort:.1f}')
+				logger.info(f'      Estimated total bugs: {total_bugs:.2f}')
 
 				# Show all files by effort (highest first)
-				print('\n  === Files by Halstead Effort (Highest First) ===')
+				logger.info('\n  === Files by Halstead Effort (Highest First) ===')
 				sorted_results = sorted(halstead_results, key=lambda x: x['effort'], reverse=True)
 				for result in sorted_results:  # Show all files
-					print(f'    📄 {result["filepath"]} (Effort: {result["effort"]:.1f}, Bugs: {result["bugs"]:.2f})')
+					logger.info(f'    📄 {result["filepath"]} (Effort: {result["effort"]:.1f}, Bugs: {result["bugs"]:.2f})')
 
-				print('✓ Halstead metrics calculation completed')
+				logger.info('✓ Halstead metrics calculation completed')
 				return {
 					'repository_path': repository_path or os.getcwd(),
 					'files_analyzed': len(halstead_results),
@@ -1786,11 +1790,11 @@ class DataCollector:
 					}
 				}
 			else:
-				print('    ⚠️  No successful Halstead calculations')
+				logger.info('    ⚠️  No successful Halstead calculations')
 				return None
 
 		except Exception as e:
-			print(f'Error during Halstead calculation: {e}')
+			logger.info(f'Error during Halstead calculation: {e}')
 			return None
 		finally:
 			if repository_path:
@@ -1801,8 +1805,8 @@ class DataCollector:
 
 	def calculate_oop_for_repository(self, repository_path=None):
 		"""Calculate OOP metrics for all files in the repository."""
-		print('🏗️ Calculating OOP Metrics for repository...')
-		print(f'  📁 Repository: {repository_path or os.getcwd()}')
+		logger.info('🏗️ Calculating OOP Metrics for repository...')
+		logger.info(f'  📁 Repository: {repository_path or os.getcwd()}')
 
 		original_cwd = os.getcwd()
 
@@ -1810,11 +1814,11 @@ class DataCollector:
 			source_files = self.get_repository_files_for_mi(repository_path)
 
 			if not source_files:
-				print('    ⚠️  No source files found for OOP analysis')
+				logger.info('    ⚠️  No source files found for OOP analysis')
 				return None
 
-			print(f'  📊 Found {len(source_files)} files for OOP analysis')
-			print(f'  🔬 Calculating metrics for {len(source_files)} files...')
+			logger.info(f'  📊 Found {len(source_files)} files for OOP analysis')
+			logger.info(f'  🔬 Calculating metrics for {len(source_files)} files...')
 
 			oop_results = []
 			total_ce = 0
@@ -1856,13 +1860,13 @@ class DataCollector:
 
 					if len(source_files) <= 10:
 						if oop_metrics['classes_defined'] > 0:
-							print(f'      📄 {filepath}: Classes={oop_metrics["classes_defined"]}, Methods={oop_metrics["method_count"]}, Coupling={oop_metrics["coupling"]:.1f}')
+							logger.info(f'      📄 {filepath}: Classes={oop_metrics["classes_defined"]}, Methods={oop_metrics["method_count"]}, Coupling={oop_metrics["coupling"]:.1f}')
 						else:
-							print(f'      📄 {filepath}: No OOP constructs found')
+							logger.info(f'      📄 {filepath}: No OOP constructs found')
 
 				except Exception as e:
 					if len(source_files) <= 10 or conf.get('debug', False):
-						print(f'      ❌ Error analyzing {filepath}: {e}')
+						logger.info(f'      ❌ Error analyzing {filepath}: {e}')
 
 			print_progress_bar(
 				len(source_files),
@@ -1897,23 +1901,23 @@ class DataCollector:
 					'distance': distance
 				}
 
-				print('\n  📊 OOP Metrics Analysis Summary:')
-				print(f'      Files analyzed: {len(oop_results)}')
-				print(f'      Files with OOP constructs: {files_with_oop}')
-				print(f'      Total classes: {total_classes}')
-				print(f'      Total methods: {total_methods}')
-				print(f'      Total attributes: {total_attributes}')
-				print(f'      Average coupling: {avg_coupling:.1f}')
+				logger.info('\n  📊 OOP Metrics Analysis Summary:')
+				logger.info(f'      Files analyzed: {len(oop_results)}')
+				logger.info(f'      Files with OOP constructs: {files_with_oop}')
+				logger.info(f'      Total classes: {total_classes}')
+				logger.info(f'      Total methods: {total_methods}')
+				logger.info(f'      Total attributes: {total_attributes}')
+				logger.info(f'      Average coupling: {avg_coupling:.1f}')
 
 				# Show all files with OOP constructs by coupling (highest first)
 				if files_with_oop > 0:
-					print('\n  === Files with OOP Constructs (by Coupling) ===')
+					logger.info('\n  === Files with OOP Constructs (by Coupling) ===')
 					sorted_results = sorted([r for r in oop_results if r['coupling'] > 0],
 											key=lambda x: x['coupling'], reverse=True)
 					for result in sorted_results:  # Show all files with OOP
-						print(f'    📄 {result["filepath"]} (Classes: {result["classes"]}, Methods: {result["methods"]}, Coupling: {result["coupling"]:.1f})')
+						logger.info(f'    📄 {result["filepath"]} (Classes: {result["classes"]}, Methods: {result["methods"]}, Coupling: {result["coupling"]:.1f})')
 
-				print('✓ OOP metrics calculation completed')
+				logger.info('✓ OOP metrics calculation completed')
 				return {
 					'repository_path': repository_path or os.getcwd(),
 					'files_analyzed': len(oop_results),
@@ -1928,11 +1932,11 @@ class DataCollector:
 				}
 			else:
 				self.oop_metrics = {}
-				print('    ⚠️  No successful OOP calculations')
+				logger.info('    ⚠️  No successful OOP calculations')
 				return None
 
 		except Exception as e:
-			print(f'Error during OOP calculation: {e}')
+			logger.info(f'Error during OOP calculation: {e}')
 			return None
 		finally:
 			if repository_path:
@@ -1943,16 +1947,16 @@ class DataCollector:
 
 	def _calculate_comprehensive_project_metrics(self, repository_path=None):
 		"""Calculate comprehensive code quality metrics for the entire project."""
-		print('  Analyzing source files for comprehensive metrics...')
+		logger.info('  Analyzing source files for comprehensive metrics...')
 
 		# Get all source files using the new method - use the target repository path
 		source_files = self.get_repository_files_for_mi(repository_path)
 
 		if not source_files:
-			print('    No source files found with allowed extensions')
+			logger.info('    No source files found with allowed extensions')
 			return
 
-		print(f'    Processing {len(source_files)} source files...')
+		logger.info(f'    Processing {len(source_files)} source files...')
 
 		try:
 			# Initialize storage for per-file metrics (no aggregation)
@@ -1981,7 +1985,7 @@ class DataCollector:
 			# Analyze each file
 			for i, filepath in enumerate(source_files):
 				if i % 50 == 0 and i > 0:
-					print(f'    Processed {i}/{len(source_files)} files...')
+					logger.info(f'    Processed {i}/{len(source_files)} files...')
 
 				try:
 					# Use full path since we're not in the repository directory
@@ -2036,7 +2040,7 @@ class DataCollector:
 
 				except Exception as e:
 					if conf['debug']:
-						print(f'    Warning: Failed to analyze {filepath}: {e}')
+						logger.info(f'    Warning: Failed to analyze {filepath}: {e}')
 					continue
 
 			# Calculate averages and store results
@@ -2071,46 +2075,46 @@ class DataCollector:
 					'files_analyzed': files_count
 				}
 
-				print(f'    Completed comprehensive analysis of {files_count} files')
-				print('    Stored individual file metrics (no aggregation)')
+				logger.info(f'    Completed comprehensive analysis of {files_count} files')
+				logger.info('    Stored individual file metrics (no aggregation)')
 
 				# Print detailed MI analysis
 				mi_summary = cm['maintainability_summary']
-				print('\n  === Maintainability Index Analysis by Category ===')
-				print(f'    📈 Good Files (MI ≥ 85):       {mi_summary["good_files"]:4d} files')
-				print(f'    📊 Moderate Files (65 ≤ MI < 85): {mi_summary["moderate_files"]:4d} files')
-				print(f'    📉 Difficult Files (0 ≤ MI < 65): {mi_summary["difficult_files"]:4d} files')
-				print(f'    ⚠️  Critical Files (MI < 0):    {mi_summary["critical_files"]:4d} files')
-				print(f'    📁 Total Files Analyzed:       {files_count:4d} files')
+				logger.info('\n  === Maintainability Index Analysis by Category ===')
+				logger.info(f'    📈 Good Files (MI ≥ 85):       {mi_summary["good_files"]:4d} files')
+				logger.info(f'    📊 Moderate Files (65 ≤ MI < 85): {mi_summary["moderate_files"]:4d} files')
+				logger.info(f'    📉 Difficult Files (0 ≤ MI < 65): {mi_summary["difficult_files"]:4d} files')
+				logger.info(f'    ⚠️  Critical Files (MI < 0):    {mi_summary["critical_files"]:4d} files')
+				logger.info(f'    📁 Total Files Analyzed:       {files_count:4d} files')
 
 				# Show most problematic files if any exist
 				file_details = mi_summary['file_details']
 				if file_details['critical'] or file_details['difficult']:
-					print('\n  === Files Requiring Attention ===')
+					logger.info('\n  === Files Requiring Attention ===')
 
 					# Show critical files (MI < 0)
 					if file_details['critical']:
-						print('    🚨 Critical Files (MI < 0):')
+						logger.info('    🚨 Critical Files (MI < 0):')
 						critical_files = sorted(file_details['critical'], key=lambda x: x['mi_raw'])
 						for file_info in critical_files:  # Show all critical files
-							print(f'      {file_info["filepath"]} (MI: {file_info["mi_raw"]:.1f}, LOC: {file_info["loc"]}, Complexity: {file_info["complexity"]})')
+							logger.info(f'      {file_info["filepath"]} (MI: {file_info["mi_raw"]:.1f}, LOC: {file_info["loc"]}, Complexity: {file_info["complexity"]})')
 
 					# Show worst difficult files (0 ≤ MI < 65)
 					if file_details['difficult']:
-						print('    ⚠️  Difficult Files (0 ≤ MI < 65):')
+						logger.info('    ⚠️  Difficult Files (0 ≤ MI < 65):')
 						difficult_files = sorted(file_details['difficult'], key=lambda x: x['mi_raw'])
 						for file_info in difficult_files:  # Show all difficult files
-							print(f'      {file_info["filepath"]} (MI: {file_info["mi_raw"]:.1f}, LOC: {file_info["loc"]}, Complexity: {file_info["complexity"]})')
+							logger.info(f'      {file_info["filepath"]} (MI: {file_info["mi_raw"]:.1f}, LOC: {file_info["loc"]}, Complexity: {file_info["complexity"]})')
 
 				# Show best maintained files if any exist
 				if file_details['good']:
-					print('\n  === Well-Maintained Files ===')
+					logger.info('\n  === Well-Maintained Files ===')
 					good_files = sorted(file_details['good'], key=lambda x: x['mi_raw'], reverse=True)
 					for file_info in good_files:  # Show all good files
-						print(f'    ✅ {file_info["filepath"]} (MI: {file_info["mi_raw"]:.1f}, LOC: {file_info["loc"]}, Complexity: {file_info["complexity"]})')
+						logger.info(f'    ✅ {file_info["filepath"]} (MI: {file_info["mi_raw"]:.1f}, LOC: {file_info["loc"]}, Complexity: {file_info["complexity"]})')
 
 				# Show extension-based MI analysis
-				print('  === Maintainability Index by File Extension ===')
+				logger.info('  === Maintainability Index by File Extension ===')
 				extension_stats = {}
 
 				# Collect stats by extension
@@ -2131,17 +2135,17 @@ class DataCollector:
 					for ext in sorted(extension_stats.keys()):
 						stats = extension_stats[ext]
 						avg_mi = stats['sum_mi'] / stats['total'] if stats['total'] > 0 else 0.0
-						print(f'    {ext:8s}: {stats["total"]:3d} files (avg MI: {avg_mi:6.1f}) | ' +
+						logger.info(f'    {ext:8s}: {stats["total"]:3d} files (avg MI: {avg_mi:6.1f}) | ' +
 							  f'Good: {stats["good"]:2d}, Moderate: {stats["moderate"]:2d}, ' +
 							  f'Difficult: {stats["difficult"]:2d}, Critical: {stats["critical"]:2d}')
 
-				print()  # Add spacing after MI analysis
+				logger.info()  # Add spacing after MI analysis
 			else:
-				print('    No files could be analyzed for comprehensive metrics')
+				logger.info('    No files could be analyzed for comprehensive metrics')
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'    Error in comprehensive metrics calculation: {e}')
+				logger.info(f'    Error in comprehensive metrics calculation: {e}')
 
 
 
