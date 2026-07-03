@@ -1,3 +1,4 @@
+import logging
 """
 RAM-backed index builder.
 
@@ -20,6 +21,9 @@ import shutil
 import uuid
 import time
 from filelock import FileLock
+
+logger = logging.getLogger(__name__)
+
 
 
 _SHM_ROOT = "/dev/shm"
@@ -77,7 +81,7 @@ class RamdiskIndex:
         if os.path.exists(self.ssd_gorgonzola_path) and os.path.isdir(self.ssd_gorgonzola_path):
             shutil.copytree(self.ssd_gorgonzola_path, self.gorgonzola_path)
             
-        print(f"[ramdisk] Building index in RAM: {self.ram_dir} "
+        logger.info(f"[ramdisk] Building index in RAM: {self.ram_dir} "
               f"(quota {self.max_bytes / 1024 / 1024:.0f} MB)",
               file=sys.stderr, flush=True)
         return self
@@ -86,7 +90,7 @@ class RamdiskIndex:
         self._active = False
         if exc_type is not None:
             # On error, clean up ramdisk but do NOT overwrite SSD data
-            print(f"[ramdisk] Indexing failed ({exc_type.__name__}), "
+            logger.info(f"[ramdisk] Indexing failed ({exc_type.__name__}), "
                   f"discarding ramdisk build.",
                   file=sys.stderr, flush=True)
             self._cleanup()
@@ -166,7 +170,7 @@ class RamdiskIndex:
                         os.remove(ssd_wal)
 
             db_size = os.path.getsize(self.ssd_db_path)
-            print(f"[ramdisk] Synced DuckDB to SSD: "
+            logger.info(f"[ramdisk] Synced DuckDB to SSD: "
                   f"{db_size / 1024 / 1024:.2f} MB",
                   file=sys.stderr, flush=True)
 
@@ -181,7 +185,7 @@ class RamdiskIndex:
                     shutil.copy2(self.gorgonzola_path, tmp_gorgonzola)
                     os.replace(tmp_gorgonzola, self.ssd_gorgonzola_path)
                     gorg_size = os.path.getsize(self.ssd_gorgonzola_path)
-                    print(f"[ramdisk] Synced Gorgonzola to SSD: "
+                    logger.info(f"[ramdisk] Synced Gorgonzola to SSD: "
                           f"{gorg_size / 1024 / 1024:.2f} MB",
                           file=sys.stderr, flush=True)
                 elif os.path.isdir(self.gorgonzola_path):
@@ -194,7 +198,7 @@ class RamdiskIndex:
                         shutil.rmtree(self.ssd_gorgonzola_path)
                     os.rename(tmp_gorgonzola, self.ssd_gorgonzola_path)
                     gorg_size = self._dir_size(self.ssd_gorgonzola_path)
-                    print(f"[ramdisk] Synced Gorgonzola dir to SSD: "
+                    logger.info(f"[ramdisk] Synced Gorgonzola dir to SSD: "
                           f"{gorg_size / 1024 / 1024:.2f} MB",
                           file=sys.stderr, flush=True)
 
@@ -212,7 +216,7 @@ class RamdiskIndex:
 
         elapsed = time.monotonic() - t0
         total_bytes = self.get_usage_bytes()
-        print(f"[ramdisk] SSD sync completed in {elapsed:.2f}s — "
+        logger.info(f"[ramdisk] SSD sync completed in {elapsed:.2f}s — "
               f"wrote {total_bytes / 1024 / 1024:.2f} MB to SSD",
               file=sys.stderr, flush=True)
 
@@ -220,5 +224,5 @@ class RamdiskIndex:
         """Remove the ramdisk session directory."""
         if os.path.isdir(self.ram_dir):
             shutil.rmtree(self.ram_dir, ignore_errors=True)
-            print(f"[ramdisk] Cleaned up: {self.ram_dir}",
+            logger.info(f"[ramdisk] Cleaned up: {self.ram_dir}",
                   file=sys.stderr, flush=True)

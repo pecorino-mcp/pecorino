@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import logging
 import traceback
 import hashlib
 import shutil
@@ -16,6 +17,8 @@ from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
 from src.parsers.ast import ClassDef, InterfaceDef, walk
 from src.parsers.tree_sitter_parser import parse_with_tree_sitter
 from src.core.constants import get_language_for_extension, SUPPORTED_EXTENSIONS
+
+logger = logging.getLogger(__name__)
 
 class CodebaseIndexer:
     def __init__(self, repo_path: str = None):
@@ -447,7 +450,7 @@ class CodebaseIndexer:
         """Parse and index a single file for search and dependency graph."""
         MAX_FILE_SIZE = 2 * 1024 * 1024
         if len(content.encode('utf-8', errors='ignore')) > MAX_FILE_SIZE:
-            print(f"Warning: Skipping {filepath} (exceeds 2MB limit)", file=sys.stderr)
+            logger.warning("Skipping %s (exceeds 2MB limit)", filepath)
             return
 
         records = self._extract_records(content, filepath, file_extension)
@@ -479,15 +482,15 @@ class CodebaseIndexer:
                 if graph_edges:
                     self.graph.insert_edges_bulk(graph_edges, id_map)
             except Exception as e:
-                print(f"Warning: Failed to insert graph nodes/edges for {filepath}: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
+                logger.warning("Failed to insert graph nodes/edges for %s: %s", filepath, e)
+                logger.debug(traceback.format_exc())
 
         if rebuild_fts:
             try:
                 self.search_index.rebuild_fts()
             except Exception as e:
-                print(f"Warning: Failed to rebuild FTS index for {filepath}: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
+                logger.warning("Failed to rebuild FTS index for %s: %s", filepath, e)
+                logger.debug(traceback.format_exc())
         else:
             self.search_index.mark_fts_dirty()
 
@@ -513,8 +516,8 @@ class CodebaseIndexer:
             })
             return records
         except Exception as e:
-            print(f"Warning: Failed to parse {file_str}: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            logger.warning("Failed to parse %s: %s", file_str, e)
+            logger.debug(traceback.format_exc())
             return None
 
     def _post_process_recursion(self):
@@ -529,8 +532,8 @@ class CodebaseIndexer:
             with self.graph:
                 self.graph.query_batch(queries)
         except Exception as e:
-            print(f"Warning: Failed to post-process recursion: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            logger.warning("Failed to post-process recursion: %s", e)
+            logger.debug(traceback.format_exc())
 
     def index_directory(self, dirpath: str, progress_callback=None) -> dict:
         path = pathlib.Path(dirpath).resolve()
@@ -581,7 +584,7 @@ class CodebaseIndexer:
                         continue
                 parse_jobs.append((fp, file_str, mtime))
             except Exception as e:
-                print(f"Warning: Failed to stat {file_str}: {e}", file=sys.stderr)
+                logger.warning("Failed to stat %s: %s", file_str, e)
 
         results = []
         if parse_jobs:
@@ -614,7 +617,7 @@ class CodebaseIndexer:
                             else:
                                 results.append(res)
                     except Exception as e:
-                        print(f"Warning: Task failed for {file_str}: {e}", file=sys.stderr)
+                        logger.warning("Task failed for %s: %s", file_str, e)
                         
                     current_processed += 1
                     if progress_callback:
@@ -650,7 +653,7 @@ class CodebaseIndexer:
                     self.search_index.rebuild_fts()
                 except Exception as e:
                     fts_error = str(e)
-                    print(f"Warning: Failed to rebuild FTS index: {fts_error}", file=sys.stderr)
+                    logger.warning("Failed to rebuild FTS index: %s", fts_error)
 
             res = {
                 "status": "success" if not fts_error else "partial",
@@ -678,7 +681,7 @@ class CodebaseIndexer:
                 shm_free = shutil.disk_usage('/dev/shm').free
                 if required_ramdisk_bytes > (shm_free - 50 * 1024 * 1024):
                     use_ramdisk = False
-                    print(f"[ramdisk] Not enough /dev/shm (Free: {shm_free/(1024*1024):.1f}MB, Req: {required_ramdisk_bytes/(1024*1024):.1f}MB), using SSD directly", file=sys.stderr)
+                    logger.info("[ramdisk] Not enough /dev/shm (Free: %.1fMB, Req: %.1fMB), using SSD directly", shm_free/(1024*1024), required_ramdisk_bytes/(1024*1024))
             else:
                 use_ramdisk = False
         except Exception:
@@ -756,11 +759,11 @@ class CodebaseIndexer:
                         
                     indexed_count = len(results)
                 except RamdiskQuotaExceeded as e:
-                    print(f"[ramdisk] QUOTA EXCEEDED: {e}", file=sys.stderr, flush=True)
+                    logger.error("[ramdisk] QUOTA EXCEEDED: %s", e)
                     raise
                 except Exception as e:
-                    print(f"Warning: Failed during bulk database write: {e}", file=sys.stderr)
-                    traceback.print_exc(file=sys.stderr)
+                    logger.warning("Failed during bulk database write: %s", e)
+                    logger.debug(traceback.format_exc())
 
             ram_search.close()
 
@@ -785,8 +788,8 @@ class CodebaseIndexer:
             self.search_index.rebuild_fts()
         except Exception as e:
             fts_error = str(e)
-            print(f"Warning: Failed to rebuild FTS index: {fts_error}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            logger.warning("Failed to rebuild FTS index: %s", fts_error)
+            logger.debug(traceback.format_exc())
 
         if progress_callback:
             progress_callback(total_files, total_files, "Resolving symbols...")

@@ -7,6 +7,10 @@ Provides JSON and YAML export functionality for all collected metrics.
 import datetime
 import json
 import os
+import logging
+
+logger = logging.getLogger(__name__)
+
 from typing import Any, Dict, Optional
 
 from src.core.config import conf
@@ -347,7 +351,7 @@ class MetricsExporter:
                 json.dump(metrics, f, cls=DateTimeEncoder, ensure_ascii=False)
 
         if conf.get('verbose'):
-            print(f'Exported metrics to {filepath}')
+            logger.info(f'Exported metrics to {filepath}')
 
         return filepath
 
@@ -365,7 +369,7 @@ class MetricsExporter:
             import yaml
         except ImportError:
             if conf.get('verbose'):
-                print('Warning: PyYAML not installed, skipping YAML export')
+                logger.info('Warning: PyYAML not installed, skipping YAML export')
             return ''
 
         metrics = self.collector.collect_all()
@@ -376,7 +380,7 @@ class MetricsExporter:
             yaml.dump(metrics, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
         if conf.get('verbose'):
-            print(f'Exported metrics to {filepath}')
+            logger.info(f'Exported metrics to {filepath}')
 
         return filepath
 

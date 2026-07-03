@@ -6,6 +6,10 @@ Contains functions for discovering and validating git repositories.
 
 import fnmatch
 import os
+import logging
+
+logger = logging.getLogger(__name__)
+
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -52,11 +56,11 @@ def discover_repositories(scan_path, recursive=False, max_depth=10, include_patt
 	repositories = []
 
 	if not os.path.exists(scan_path):
-		print(f'Warning: Scan path does not exist: {scan_path}')
+		logger.info(f'Warning: Scan path does not exist: {scan_path}')
 		return repositories
 
 	if not os.path.isdir(scan_path):
-		print(f'Warning: Scan path is not a directory: {scan_path}')
+		logger.info(f'Warning: Scan path is not a directory: {scan_path}')
 		return repositories
 
 	# Set default patterns if not provided
@@ -120,11 +124,11 @@ def discover_repositories(scan_path, recursive=False, max_depth=10, include_patt
 				items = os.listdir(current_path)
 			except PermissionError:
 				if conf['verbose']:
-					print(f'  Permission denied accessing: {current_path}')
+					logger.info(f'  Permission denied accessing: {current_path}')
 				return
 			except OSError as e:
 				if conf['verbose']:
-					print(f'  Error accessing {current_path}: {e}')
+					logger.info(f'  Error accessing {current_path}: {e}')
 				return
 
 			# Check if current directory is a git repository
@@ -134,7 +138,7 @@ def discover_repositories(scan_path, recursive=False, max_depth=10, include_patt
 				repositories.append((repo_name, current_path, repo_type))
 
 				if conf['verbose']:
-					print(f'  Found {repo_type} repository: {repo_name} at {current_path}')
+					logger.info(f'  Found {repo_type} repository: {repo_name} at {current_path}')
 
 				# Don't scan inside git repositories to avoid nested repos
 				return
@@ -158,25 +162,25 @@ def discover_repositories(scan_path, recursive=False, max_depth=10, include_patt
 							# Skip if symlink points outside the scan directory
 							if not real_item_path.startswith(scan_real_path):
 								if conf['debug']:
-									print(f'  Skipping symlink pointing outside scan path: {item_path}')
+									logger.info(f'  Skipping symlink pointing outside scan path: {item_path}')
 								continue
 
 							# Skip if we've already seen this real path (circular symlinks)
 							if real_item_path in seen_paths:
 								if conf['debug']:
-									print(f'  Skipping circular symlink: {item_path}')
+									logger.info(f'  Skipping circular symlink: {item_path}')
 								continue
 							seen_paths.add(real_item_path)
 
 						except (OSError, ValueError):
 							if conf['debug']:
-								print(f'  Skipping invalid symlink: {item_path}')
+								logger.info(f'  Skipping invalid symlink: {item_path}')
 							continue
 
 					# Check exclusion patterns
 					if _should_exclude_directory(item):
 						if conf['debug']:
-							print(f'  Excluding directory: {item_path}')
+							logger.info(f'  Excluding directory: {item_path}')
 						continue
 
 					# Recursively scan subdirectory
@@ -184,26 +188,26 @@ def discover_repositories(scan_path, recursive=False, max_depth=10, include_patt
 
 		except Exception as e:
 			if conf['verbose']:
-				print(f'  Error scanning {current_path}: {e}')
+				logger.info(f'  Error scanning {current_path}: {e}')
 
 	# Keep track of seen paths to handle symbolic links
 	seen_paths = set()
 	seen_paths.add(os.path.realpath(scan_path))
 
 	if conf['verbose']:
-		print(f'Scanning for repositories in: {scan_path}')
-		print(f'  Recursive: {recursive}')
-		print(f'  Max depth: {max_depth}')
+		logger.info(f'Scanning for repositories in: {scan_path}')
+		logger.info(f'  Recursive: {recursive}')
+		logger.info(f'  Max depth: {max_depth}')
 		if include_patterns:
-			print(f'  Include patterns: {include_patterns}')
+			logger.info(f'  Include patterns: {include_patterns}')
 		if exclude_patterns:
-			print(f'  Exclude patterns: {exclude_patterns}')
+			logger.info(f'  Exclude patterns: {exclude_patterns}')
 
 	# Start scanning
 	_scan_directory(scan_path)
 
 	if conf['verbose']:
-		print(f'Repository discovery complete. Found {len(repositories)} repositories.')
+		logger.info(f'Repository discovery complete. Found {len(repositories)} repositories.')
 
 	return repositories
 
@@ -262,7 +266,7 @@ def _discover_repositories_concurrent(scan_path, max_depth=10, include_patterns=
 				items = os.listdir(current_path)
 			except (PermissionError, OSError) as e:
 				if conf['verbose']:
-					print(f'  Permission/access error: {current_path}: {e}')
+					logger.info(f'  Permission/access error: {current_path}: {e}')
 				return []
 
 			# Check if current directory is a git repository
@@ -272,7 +276,7 @@ def _discover_repositories_concurrent(scan_path, max_depth=10, include_patterns=
 				local_repos.append((repo_name, current_path, repo_type))
 
 				if conf['verbose']:
-					print(f'  Found {repo_type} repository: {repo_name}')
+					logger.info(f'  Found {repo_type} repository: {repo_name}')
 
 				# Don't scan inside git repositories
 				return local_repos
@@ -299,7 +303,7 @@ def _discover_repositories_concurrent(scan_path, max_depth=10, include_patterns=
 				# Check exclusion patterns
 				if _should_exclude_directory(item):
 					if conf['debug']:
-						print(f'  Excluding: {item_path}')
+						logger.info(f'  Excluding: {item_path}')
 					continue
 
 				subdirs_to_scan.append((item_path, current_depth + 1))
@@ -309,13 +313,13 @@ def _discover_repositories_concurrent(scan_path, max_depth=10, include_patterns=
 
 		except Exception as e:
 			if conf['verbose']:
-				print(f'  Error scanning {current_path}: {e}')
+				logger.info(f'  Error scanning {current_path}: {e}')
 			return []
 
 	if conf['verbose']:
-		print(f'Starting concurrent repository discovery in: {scan_path}')
-		print(f'  Max depth: {max_depth}')
-		print(f'  Max workers: {min(conf["multi_repo_max_workers"], 8)}')
+		logger.info(f'Starting concurrent repository discovery in: {scan_path}')
+		logger.info(f'  Max depth: {max_depth}')
+		logger.info(f'  Max workers: {min(conf["multi_repo_max_workers"], 8)}')
 
 	# Use ThreadPoolExecutor for I/O bound directory scanning
 	max_workers = min(conf.get('multi_repo_max_workers', 4), 8)  # Cap at 8 threads
@@ -352,7 +356,7 @@ def _discover_repositories_concurrent(scan_path, max_depth=10, include_patterns=
 								dirs_to_scan.put(item)
 					except Exception as e:
 						if conf['verbose']:
-							print(f'  Error in scanning task: {e}')
+							logger.info(f'  Error in scanning task: {e}')
 
 			# Remove completed futures
 			active_futures -= completed_futures
@@ -363,7 +367,7 @@ def _discover_repositories_concurrent(scan_path, max_depth=10, include_patterns=
 				time.sleep(0.001)
 
 	if conf['verbose']:
-		print(f'Concurrent repository discovery complete. Found {len(repositories)} repositories.')
+		logger.info(f'Concurrent repository discovery complete. Found {len(repositories)} repositories.')
 
 	return repositories
 
