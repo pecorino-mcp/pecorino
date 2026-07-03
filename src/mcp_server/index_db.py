@@ -59,23 +59,17 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         )
     ''')
 
-    # Handle existing DBs with old schema that had body_text
-    try:
-        conn.execute('ALTER TABLE code_nodes DROP COLUMN body_text')
-    except Exception:
-        pass
-
-    # Add relationships column
-    try:
-        conn.execute('ALTER TABLE code_nodes ADD COLUMN relationships VARCHAR')
-    except Exception:
-        pass
-
-    # Handle existing DBs with metrics_json
-    try:
-        conn.execute('ALTER TABLE code_nodes DROP COLUMN metrics_json')
-    except Exception:
-        pass
+    # Run migrations sequentially
+    migrations = [
+        'ALTER TABLE code_nodes DROP COLUMN body_text',
+        'ALTER TABLE code_nodes ADD COLUMN relationships VARCHAR',
+        'ALTER TABLE code_nodes DROP COLUMN metrics_json'
+    ]
+    for query in migrations:
+        try:
+            conn.execute(query)
+        except Exception:
+            pass
 
     # Files tracking table for incremental indexing
     conn.execute('''
@@ -307,9 +301,10 @@ class CodeSearchIndex:
         try:
             with self.graph:
                 self.graph.query_batch([
-                    "MATCH (f:File {id: $id})-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) DETACH DELETE m",
-                    "MATCH (f:File {id: $id})-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) DETACH DELETE m",
-                    "MATCH (f:File {id: $id})-[r:CONTAINS]->(child) DETACH DELETE child",
+                    "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda)-[:ACCESSES_STATE]->(v:Variable) DETACH DELETE v",
+                    "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda) DETACH DELETE l",
+                    "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:Variable) DETACH DELETE v",
+                    "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(child) DETACH DELETE child",
                     "MATCH (f:File {id: $id}) DETACH DELETE f",
                 ], {"id": filepath})
         except Exception:
@@ -331,9 +326,10 @@ class CodeSearchIndex:
             chunk = filepaths[i:i+chunk_size]
             try:
                 self.graph.query_batch([
-                    "MATCH (f:File)-[r1:CONTAINS]->(c:Class)-[r2:CONTAINS]->(m:Method) WHERE f.id IN $ids DETACH DELETE m",
-                    "MATCH (f:File)-[r1:CONTAINS]->(i:Interface)-[r2:CONTAINS]->(m:Method) WHERE f.id IN $ids DETACH DELETE m",
-                    "MATCH (f:File)-[r:CONTAINS]->(child) WHERE f.id IN $ids DETACH DELETE child",
+                    "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda)-[:ACCESSES_STATE]->(v:Variable) WHERE f.id IN $ids DETACH DELETE v",
+                    "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda) WHERE f.id IN $ids DETACH DELETE l",
+                    "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:Variable) WHERE f.id IN $ids DETACH DELETE v",
+                    "MATCH (f:File)-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
                     "MATCH (f:File) WHERE f.id IN $ids DETACH DELETE f",
                 ], {"ids": chunk})
             except Exception:

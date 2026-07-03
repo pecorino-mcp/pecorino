@@ -430,94 +430,147 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         return {"query": query, "results": results, "code_status": "ok"}
 
 
-    if path.is_dir():
-        if view not in ["summary", "search", "callers", "callees", "pagerank"]:
-            raise SecurityValidationError(f"View '{view}' is only supported for specific files, not directories.")
+    # ── Structural views: classes, functions, deps, tree, summary ──
+    # Unified handling for both files and directories.
+    is_dir = path.is_dir()
+    is_file = path.is_file()
 
-        nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
-        indexed_files = len(set(n['filepath'] for n in nodes))
+    if not is_dir and not is_file:
+        raise SecurityValidationError(f"Target not found: {path}")
 
-        # Capped on-disk scan
-        on_disk_count = 0
-        try:
-            for root, dirs, fnames in os.walk(str(path)):
-                # Ignore common ignored dirs to match indexer
-                dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}]
-                on_disk_count += len(fnames)
-                if on_disk_count > 1000:
-                    on_disk_count = "1000+"
-                    break
-        except Exception:
-            on_disk_count = "unknown"
+    if is_file and path.suffix not in SUPPORTED:
+        raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
 
-        # Language breakdown and total files from the database files table
-        try:
+    result: dict[str, Any] = {"target": path.as_posix(), "type": "directory" if is_dir else "file"}
+
+    if view == "tree":
+        if is_file:
+            import tree_sitter
+
+            from src.parsers.tree_sitter_parser import get_language_from_extension
+            from src.parsers.tsgm import TreeSitterGrammarManager
+            content = await asyncio.to_thread(read_limited, path)
+            lang = TreeSitterGrammarManager().get_language(get_language_from_extension(path.suffix))
+            parser = tree_sitter.Parser(lang)
+            ts_tree = parser.parse(content.encode())
+            tree_str = str(ts_tree.root_node)
+            if not output_file and len(tree_str) > 10000:
+                tree_str = tree_str[:10000] + "\n... (truncated for preview, use output_file parameter to save full AST)"
+            result["structure"] = {"tree": tree_str}
+        else:
+            # Directory: indexed file listing grouped by language
+            try:
+                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
+                db_res = index._conn.execute('''
+                    SELECT filepath, lang
+                    FROM files
+                    WHERE filepath LIKE ?
+                    ORDER BY filepath
+                ''', (f"{prefix}%",)).fetchall()
+                file_entries = [{"path": row[0][len(prefix):], "lang": row[1]} for row in db_res]
+            except Exception:
+                file_entries = []
+            result["structure"] = {"file_tree": file_entries, "total_indexed_files": len(file_entries)}
+
+    elif view == "deps":
+        if is_file:
+            content = await asyncio.to_thread(read_limited, path)
+            tree = await asyncio.to_thread(parse, content, path.suffix)
+            result["structure"] = [{"module": i.module, "names": i.names} for i in tree.imports]
+        else:
+            # Directory: aggregate outgoing dependencies from the graph
             prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
-            db_res = index._conn.execute('''
-                SELECT lang, count(*)
-                FROM files
-                WHERE filepath LIKE ?
-                GROUP BY lang
-            ''', (f"{prefix}%",)).fetchall()
-            lang_breakdown = {row[0]: row[1] for row in db_res}
-        except Exception:
-            lang_breakdown = {}
+            try:
+                db_res = index._conn.execute('''
+                    SELECT filepath FROM files WHERE filepath LIKE ?
+                ''', (f"{prefix}%",)).fetchall()
+                dir_files = [row[0] for row in db_res]
+            except Exception:
+                dir_files = []
 
-        node_preview = [n['name'] for n in nodes[:20]]
+            all_deps: dict[str, list] = {}
+            for fp in dir_files:
+                try:
+                    file_deps = await asyncio.to_thread(api.get_file_dependencies, fp)
+                    for dep in file_deps.get("outgoing_dependencies", []):
+                        dep_id = dep["id"] if isinstance(dep, dict) else dep
+                        if dep_id not in all_deps:
+                            all_deps[dep_id] = []
+                        if fp not in all_deps[dep_id]:
+                            all_deps[dep_id].append(fp)
+                except Exception:
+                    continue
 
-        return {
-            "target": path.as_posix(),
-            "type": "directory",
-            "structure": {
+            result["structure"] = [
+                {"dependency": dep_id, "depended_by": sources}
+                for dep_id, sources in sorted(all_deps.items())
+            ]
+
+    elif view in ("classes", "functions"):
+        if is_dir:
+            nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
+        else:
+            nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
+
+        if view == "classes":
+            type_filter = ('class', 'interface')
+        else:
+            type_filter = ('function', 'method')
+
+        filtered = [
+            {"name": n['name'], "filepath": n['filepath'], "line": n['start_line']}
+            for n in nodes if n['node_type'] in type_filter
+        ]
+        result["structure"] = filtered
+
+    else:  # summary
+        if is_dir:
+            nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
+            indexed_files = len(set(n['filepath'] for n in nodes))
+
+            # Capped on-disk scan
+            on_disk_count = 0
+            try:
+                for root, dirs, fnames in os.walk(str(path)):
+                    # Ignore common ignored dirs to match indexer
+                    dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}]
+                    on_disk_count += len(fnames)
+                    if on_disk_count > 1000:
+                        on_disk_count = "1000+"
+                        break
+            except Exception:
+                on_disk_count = "unknown"
+
+            # Language breakdown and total files from the database files table
+            try:
+                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
+                db_res = index._conn.execute('''
+                    SELECT lang, count(*)
+                    FROM files
+                    WHERE filepath LIKE ?
+                    GROUP BY lang
+                ''', (f"{prefix}%",)).fetchall()
+                lang_breakdown = {row[0]: row[1] for row in db_res}
+            except Exception:
+                lang_breakdown = {}
+
+            node_preview = [n['name'] for n in nodes[:20]]
+
+            result["structure"] = {
                 "indexed_files_count": indexed_files,
                 "total_files_on_disk": on_disk_count,
                 "language_breakdown": lang_breakdown,
                 "top_level_symbols_preview": node_preview
             }
-        }
-
-    if path.suffix not in SUPPORTED:
-        raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
-
-    result: dict[str, Any] = {"target": path.as_posix(), "type": "file"}
-
-    if view == "tree":
-        import tree_sitter
-
-        from src.parsers.tree_sitter_parser import get_language_from_extension
-        from src.parsers.tsgm import TreeSitterGrammarManager
-        content = await asyncio.to_thread(read_limited, path)
-        lang = TreeSitterGrammarManager().get_language(get_language_from_extension(path.suffix))
-        parser = tree_sitter.Parser(lang)
-        ts_tree = parser.parse(content.encode())
-        tree_str = str(ts_tree.root_node)
-        if not output_file and len(tree_str) > 10000:
-            tree_str = tree_str[:10000] + "\n... (truncated for preview, use output_file parameter to save full AST)"
-        result["structure"] = {"tree": tree_str}
-    elif view == "deps":
-        content = await asyncio.to_thread(read_limited, path)
-        tree = await asyncio.to_thread(parse, content, path.suffix)
-        result["structure"] = [{"module": i.module, "names": i.names} for i in tree.imports]
-    else:
-        nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
-        if view == "classes":
-            result["structure"] = [
-                {"name": n['name'], "line": n['start_line']}
-                for n in nodes if n['node_type'] in ('class', 'interface')
-            ]
-        elif view == "functions":
-            result["structure"] = [
-                {"name": n['name'], "line": n['start_line']}
-                for n in nodes if n['node_type'] in ('function', 'method')
-            ]
-        else: # summary
+        else:
+            nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
             classes = sum(1 for n in nodes if n['node_type'] in ('class', 'interface'))
             functions_nodes = [n for n in nodes if n['node_type'] in ('function', 'method')]
-            
+
             top_level = 0
             nested = 0
             methods = 0
-            
+
             for f in functions_nodes:
                 enclosing = [
                     p for p in nodes
@@ -541,14 +594,14 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 "methods": methods,
             }
 
-    # Graph database dependency and PageRank retrieval
-    if view in ("summary", "deps"):
+    # Graph database dependency and PageRank retrieval (file-level only)
+    if view in ("summary", "deps") and is_file:
         try:
             graph_metrics = await asyncio.to_thread(api.get_file_dependencies, path.as_posix())
             if view == "summary":
                 if "structure" in result and isinstance(result["structure"], dict):
                     result["structure"]["graph_metrics"] = graph_metrics
-            else: # view == "deps"
+            else:  # view == "deps"
                 result["graph_metrics"] = graph_metrics
         except Exception as e:
             sys.stderr.write(f"[WARNING] Graph database query failed: {e}\n")
@@ -881,7 +934,7 @@ async def handle_list_tools(
         tools=[
             types.Tool(
                 name="browse",
-                description="Browse the codebase (structure, semantic search, graph, or code retrieval). If view='search', requires query. For structure, view can be: summary, classes, functions, deps, tree. For graph, view can be: callers (requires query as function name), callees (requires query as function name), impact, pagerank. For code retrieval, view='code' fetches source code of matched symbols (use query to filter by name; requires query for directories).",
+                description="Browse the codebase (structure, semantic search, graph, or code retrieval). All views work for both files and directories. Structure views: summary (overview stats), classes (class/interface list), functions (function/method list), deps (imports for files, aggregated graph dependencies for directories), tree (AST S-expression for files, indexed file listing for directories). Graph views: callers/callees (require query as function name), impact, pagerank, functional-analysis. Search: view='search' requires query. Code: view='code' fetches source code of matched symbols (use query to filter; requires query for directories).",
                 input_schema={
                     "type": "object",
                     "properties": {

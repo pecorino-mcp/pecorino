@@ -1,6 +1,7 @@
 import csv
 import os
 import sys
+import threading
 
 # Column orders for each node table (matching CREATE statements, used for CSV COPY)
 _NODE_COLUMNS = {
@@ -61,6 +62,7 @@ def init_gorgonzola_schema(conn):
 class GorgonzolaGraph:
     def __init__(self, db_path: str):
         self._label_cache = {}
+        self._label_cache_lock = threading.Lock()
         self._db = None
         self._conn = None
         self._in_context = False
@@ -114,8 +116,9 @@ class GorgonzolaGraph:
         return os.path.dirname(self.gorgonzola_db_path) or "."
 
     def _get_node_label(self, node_id: str, conn) -> str:
-        if node_id in self._label_cache:
-            return self._label_cache[node_id]
+        with self._label_cache_lock:
+            if node_id in self._label_cache:
+                return self._label_cache[node_id]
         tables = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module", "ControlFlow", "Lambda", "Variable"]
         for t in tables:
             res = conn.execute(f"MATCH (n:{t} {{id: $id}}) RETURN label(n) AS lbl", {"id": node_id})
@@ -124,9 +127,21 @@ class GorgonzolaGraph:
                 lbl = res.get_next()[0]
             res.close()
             if lbl:
-                self._label_cache[node_id] = lbl
+                with self._label_cache_lock:
+                    self._label_cache[node_id] = lbl
                 return lbl
         return None
+
+    def _write_and_copy_csv(self, conn, csv_path, rows, copy_query):
+        try:
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+                writer.writerows(rows)
+            r = conn.execute(copy_query)
+            r.close()
+        finally:
+            if os.path.exists(csv_path):
+                os.remove(csv_path)
 
     def query(self, query: str, parameters: dict = None) -> list:
         if parameters is None:
@@ -216,36 +231,32 @@ class GorgonzolaGraph:
                 continue
 
             csv_path = os.path.join(csv_dir, f"_bulk_nodes_{label}.csv")
-            try:
-                with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-                    for node_id, properties in group:
-                        row = []
-                        for col in columns:
-                            if col == "id":
-                                row.append(str(node_id).replace('\n', ' ').replace('\r', ''))
-                            elif col in properties and properties[col] is not None:
-                                val = properties[col]
-                                if col in _NUMERIC_COLUMNS:
-                                    row.append(int(val) if col != "mtime" else float(val))
-                                else:
-                                    row.append(str(val).replace('\n', ' ').replace('\r', ''))
-                            else:
-                                # Default: 0 for numeric columns, empty string for strings
-                                if col in _NUMERIC_COLUMNS:
-                                    row.append(0)
-                                else:
-                                    row.append("")
-                        writer.writerow(row)
+            rows = []
+            for node_id, properties in group:
+                row = []
+                for col in columns:
+                    if col == "id":
+                        row.append(str(node_id).replace('\n', ' ').replace('\r', ''))
+                    elif col in properties and properties[col] is not None:
+                        val = properties[col]
+                        if col in _NUMERIC_COLUMNS:
+                            row.append(int(val) if col != "mtime" else float(val))
+                        else:
+                            row.append(str(val).replace('\n', ' ').replace('\r', ''))
+                    else:
+                        # Default: 0 for numeric columns, empty string for strings
+                        if col in _NUMERIC_COLUMNS:
+                            row.append(0)
+                        else:
+                            row.append("")
+                rows.append(row)
 
-                r = conn.execute(f"COPY {label} FROM '{csv_path}' (HEADER=false, PARALLEL=false, ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)")
-                r.close()
-            finally:
-                if os.path.exists(csv_path):
-                    os.remove(csv_path)
+            copy_query = f"COPY {label} FROM '{csv_path}' (HEADER=false, PARALLEL=false, ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
+            self._write_and_copy_csv(conn, csv_path, rows, copy_query)
 
         res_map = {node_id: label for node_id, _, label in nodes}
-        self._label_cache.update(res_map)
+        with self._label_cache_lock:
+            self._label_cache.update(res_map)
         return res_map
 
     def insert_edges_bulk(self, edges, id_map=None):
@@ -257,7 +268,8 @@ class GorgonzolaGraph:
         """
         label_map = id_map or {}
         if label_map:
-            self._label_cache.update(label_map)
+            with self._label_cache_lock:
+                self._label_cache.update(label_map)
         if self._in_context:
             self._insert_edges_bulk_conn(edges, self._conn, label_map)
         else:
@@ -270,8 +282,11 @@ class GorgonzolaGraph:
         # Group edges by (rel_type, src_label, dst_label)
         groups = {}
         for src_id, dst_id, properties, rel_type in edges:
-            src_label = label_map.get(src_id) or self._label_cache.get(src_id) or self._get_node_label(src_id, conn)
-            dst_label = label_map.get(dst_id) or self._label_cache.get(dst_id) or self._get_node_label(dst_id, conn)
+            with self._label_cache_lock:
+                c_src = self._label_cache.get(src_id)
+                c_dst = self._label_cache.get(dst_id)
+            src_label = label_map.get(src_id) or c_src or self._get_node_label(src_id, conn)
+            dst_label = label_map.get(dst_id) or c_dst or self._get_node_label(dst_id, conn)
 
             if not src_label or not dst_label:
                 continue
@@ -284,33 +299,27 @@ class GorgonzolaGraph:
         for (rel_type, src_label, dst_label), items in groups.items():
             csv_path = os.path.join(csv_dir, f"_bulk_edges_{rel_type}_{src_label}_{dst_label}.csv")
             try:
-                with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-                    for src_id, dst_id, props in items:
-                        row = [
-                            str(src_id).replace('\n', ' ').replace('\r', ''),
-                            str(dst_id).replace('\n', ' ').replace('\r', '')
-                        ]
-                        if rel_type == "ACCESSES_STATE":
-                            props = props or {}
-                            row.append(str(props.get("is_read", False)).lower())
-                            row.append(str(props.get("is_mutation", False)).lower())
-                            row.append(str(props.get("is_taint", False)).lower())
-                        writer.writerow(row)
-
-                r = conn.execute(
-                    f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
-                )
-                r.close()
+                rows = []
+                for src_id, dst_id, props in items:
+                    row = [
+                        str(src_id).replace('\n', ' ').replace('\r', ''),
+                        str(dst_id).replace('\n', ' ').replace('\r', '')
+                    ]
+                    if rel_type == "ACCESSES_STATE":
+                        props = props or {}
+                        row.append(str(props.get("is_read", False)).lower())
+                        row.append(str(props.get("is_mutation", False)).lower())
+                        row.append(str(props.get("is_taint", False)).lower())
+                    rows.append(row)
+                
+                copy_query = f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
+                self._write_and_copy_csv(conn, csv_path, rows, copy_query)
             except Exception as e:
                 print(
                     f"[ERROR] Failed to COPY edges {src_label}-[:{rel_type}]->{dst_label}: {e}",
                     file=sys.stderr,
                 )
                 sys.stderr.flush()
-            finally:
-                if os.path.exists(csv_path):
-                    os.remove(csv_path)
 
     def query_batch(self, queries, parameters=None):
         """Execute multiple queries within a single connection."""

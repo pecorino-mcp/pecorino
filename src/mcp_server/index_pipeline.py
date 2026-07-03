@@ -1,8 +1,13 @@
 import os
 import sys
 import json
-import asyncio
-from typing import Dict, Any, List
+import traceback
+import hashlib
+import shutil
+import pathlib
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Any, List, Set, Tuple
 
 from src.mcp_server.index_db import CodeSearchIndex, get_db_path_for_repo, find_repo_root
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
@@ -10,21 +15,24 @@ from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
 
 from src.parsers.ast import ClassDef, InterfaceDef, walk
 from src.parsers.tree_sitter_parser import parse_with_tree_sitter
+from src.core.constants import get_language_for_extension, SUPPORTED_EXTENSIONS
 
 class CodebaseIndexer:
     def __init__(self, repo_path: str = None):
         self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
         db_path = get_db_path_for_repo(self.repo_path)
         
-        self.graph = GorgonzolaGraph(db_path=db_path)
+        # Let CodeSearchIndex own the graph instance to avoid multiple connection handlers
         self.search_index = CodeSearchIndex(db_path)
-        self.search_index.graph = self.graph
+        self.graph = self.search_index.graph
+        self._repo_cache_lock = threading.Lock()
 
     def close(self):
         """Release the underlying DuckDB connection."""
         if self.search_index is not None:
             self.search_index.close()
             self.search_index = None
+            self.graph = None
 
     def __enter__(self):
         return self
@@ -46,33 +54,38 @@ class CodebaseIndexer:
             accesses.append(f"TAINTS: {', '.join(node.tainted_attributes)}")
         if accesses:
             rels.append(" ".join(accesses))
+            
+        extends_list = []
         if getattr(node, 'bases', None):
-            rels.append(f"EXTENDS: {', '.join(node.bases)}")
+            extends_list.extend(node.bases)
+        if getattr(node, 'extends', None):
+            if isinstance(node.extends, list):
+                extends_list.extend(node.extends)
+            elif isinstance(node.extends, str):
+                extends_list.append(node.extends)
+        if extends_list:
+            rels.append(f"EXTENDS: {', '.join(extends_list)}")
+            
         if getattr(node, 'interfaces', None):
             rels.append(f"IMPLEMENTS: {', '.join(node.interfaces)}")
-        if getattr(node, 'extends', None):
-            rels.append(f"EXTENDS: {', '.join(node.extends)}")
+            
         return " ".join(rels)
 
-    def _add_state_accesses(self, node, parent_id, class_name, graph_nodes_dict, graph_edges):
-        for attr in getattr(node, 'read_attributes', set()):
-            var_id = f"Variable::{class_name}.{attr}"
+    def _add_access(self, kind, attrs, parent_id, class_name, graph_nodes_dict, graph_edges, make_id):
+        flags = {"read": (True, False, False), "mutate": (False, True, False), "taint": (False, False, True)}[kind]
+        for attr in attrs:
+            var_id = make_id("Variable", class_name, attr)
             graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
-            graph_edges.append((parent_id, var_id, {"is_read": True, "is_mutation": False, "is_taint": False}, "ACCESSES_STATE"))
+            graph_edges.append((parent_id, var_id, {"is_read": flags[0], "is_mutation": flags[1], "is_taint": flags[2]}, "ACCESSES_STATE"))
 
-        for attr in getattr(node, 'mutated_attributes', set()):
-            var_id = f"Variable::{class_name}.{attr}"
-            graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
-            graph_edges.append((parent_id, var_id, {"is_read": False, "is_mutation": True, "is_taint": False}, "ACCESSES_STATE"))
+    def _add_state_accesses(self, node, parent_id, class_name, graph_nodes_dict, graph_edges, make_id):
+        self._add_access("read", getattr(node, 'read_attributes', set()), parent_id, class_name, graph_nodes_dict, graph_edges, make_id)
+        self._add_access("mutate", getattr(node, 'mutated_attributes', set()), parent_id, class_name, graph_nodes_dict, graph_edges, make_id)
+        self._add_access("taint", getattr(node, 'tainted_attributes', set()), parent_id, class_name, graph_nodes_dict, graph_edges, make_id)
 
-        for attr in getattr(node, 'tainted_attributes', set()):
-            var_id = f"Variable::{class_name}.{attr}"
-            graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
-            graph_edges.append((parent_id, var_id, {"is_read": False, "is_mutation": False, "is_taint": True}, "ACCESSES_STATE"))
-
-    def _add_lambdas(self, node, parent_id, filepath, class_name, graph_nodes_dict, graph_edges):
+    def _add_lambdas(self, node, parent_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id):
         for lmd in getattr(node, 'lambdas', []):
-            lmd_id = f"Lambda::{lmd.name}"
+            lmd_id = make_id("Lambda", parent_id, lmd.name, getattr(lmd, 'lineno', 0))
             graph_nodes_dict[lmd_id] = (lmd_id, {"name": lmd.name}, "Lambda")
             graph_edges.append((parent_id, lmd_id, {}, "CONTAINS_LAMBDA"))
             
@@ -81,11 +94,11 @@ class CodebaseIndexer:
                 graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                 graph_edges.append((lmd_id, symbol_id, {}, "CALLS"))
                 
-            self._add_state_accesses(lmd, lmd_id, class_name, graph_nodes_dict, graph_edges)
-            self._add_lambdas(lmd, lmd_id, filepath, class_name, graph_nodes_dict, graph_edges)
+            self._add_state_accesses(lmd, lmd_id, class_name, graph_nodes_dict, graph_edges, make_id)
+            self._add_lambdas(lmd, lmd_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
 
-    def _add_statement_to_graph(self, statement, parent_id, filepath, class_name, graph_nodes_dict, graph_edges):
-        stmt_id = f"{filepath}::{statement.name}::{statement.lineno}:{statement.col_offset}"
+    def _add_statement_to_graph(self, statement, parent_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id):
+        stmt_id = make_id("ControlFlow", statement.name, statement.lineno, statement.col_offset)
         graph_nodes_dict[stmt_id] = (stmt_id, {"name": statement.name, "type": statement.type}, "ControlFlow")
         graph_edges.append((parent_id, stmt_id, {}, "CONTAINS"))
         
@@ -94,49 +107,111 @@ class CodebaseIndexer:
             graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
             graph_edges.append((stmt_id, symbol_id, {}, "CALLS"))
             
-        self._add_state_accesses(statement, stmt_id, class_name, graph_nodes_dict, graph_edges)
-        self._add_lambdas(statement, stmt_id, filepath, class_name, graph_nodes_dict, graph_edges)
+        self._add_state_accesses(statement, stmt_id, class_name, graph_nodes_dict, graph_edges, make_id)
+        self._add_lambdas(statement, stmt_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
             
         for child_stmt in getattr(statement, 'statements', []):
-            self._add_statement_to_graph(child_stmt, stmt_id, filepath, class_name, graph_nodes_dict, graph_edges)
+            self._add_statement_to_graph(child_stmt, stmt_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
+
+    def _find_file_in_repo(self, dep_string: str) -> str:
+        """Find a file in the repo that matches dep_string (e.g. ending with it)."""
+        with self._repo_cache_lock:
+            if not hasattr(self, '_repo_files_cache'):
+                self._repo_files_cache = []
+                for r, d, fnames in os.walk(self.repo_path):
+                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
+                    d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
+                    for fname in fnames:
+                        self._repo_files_cache.append(os.path.abspath(os.path.join(r, fname)))
+        
+        norm_dep = dep_string.replace('\\', '/').lstrip('/')
+        for filepath in self._repo_files_cache:
+            if filepath.replace('\\', '/').endswith('/' + norm_dep) or filepath.replace('\\', '/').endswith('/' + dep_string):
+                return filepath
+            if os.path.basename(filepath) == dep_string:
+                return filepath
+        return ""
 
     def _resolve_dependency(self, dep_string: str, source_filepath: str, file_extension: str) -> str:
         """Enhanced language-specific dependency file resolution."""
-        # 1. JS/TS: Relative paths or modules
-        if file_extension in ['.js', '.jsx', '.ts', '.tsx']:
+        # 1. JS/TS: Relative paths, node_modules, package.json resolution
+        if file_extension in ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']:
+            exts = ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']
             if dep_string.startswith('.'):
                 base_dir = os.path.dirname(source_filepath)
                 target_base = os.path.join(base_dir, dep_string)
-                for ext in ['.js', '.jsx', '.ts', '.tsx']:
+                for ext in exts:
                     if os.path.exists(target_base + ext):
                         return os.path.abspath(target_base + ext)
-                # Check directory for index files
                 if os.path.isdir(target_base):
-                    for ext in ['index.js', 'index.ts', 'index.jsx', 'index.tsx']:
-                        idx_path = os.path.join(target_base, ext)
+                    for ext in exts:
+                        idx_path = os.path.join(target_base, f'index{ext}')
                         if os.path.exists(idx_path):
                             return os.path.abspath(idx_path)
-            return dep_string # Return as module name
+            else:
+                curr_dir = os.path.dirname(source_filepath)
+                while True:
+                    nm_path = os.path.join(curr_dir, 'node_modules', dep_string)
+                    if os.path.exists(nm_path):
+                        if os.path.isfile(nm_path):
+                            return os.path.abspath(nm_path)
+                        if os.path.isdir(nm_path):
+                            pkg_json = os.path.join(nm_path, 'package.json')
+                            if os.path.exists(pkg_json):
+                                try:
+                                    with open(pkg_json, 'r', encoding='utf-8') as f:
+                                        pkg_data = json.load(f)
+                                        main_file = pkg_data.get('main')
+                                        if main_file:
+                                            cand = os.path.abspath(os.path.join(nm_path, main_file))
+                                            if os.path.exists(cand): return cand
+                                            for ext in exts:
+                                                if os.path.exists(cand + ext): return cand + ext
+                                        exports = pkg_data.get('exports')
+                                        if exports:
+                                            if isinstance(exports, str):
+                                                cand = os.path.abspath(os.path.join(nm_path, exports))
+                                                if os.path.exists(cand): return cand
+                                            elif isinstance(exports, dict) and isinstance(exports.get('.'), str):
+                                                cand = os.path.abspath(os.path.join(nm_path, exports['.']))
+                                                if os.path.exists(cand): return cand
+                                except Exception:
+                                    pass
+                            for ext in exts:
+                                cand = os.path.join(nm_path, f'index{ext}')
+                                if os.path.exists(cand): return os.path.abspath(cand)
+                    if curr_dir == self.repo_path or curr_dir == os.path.dirname(curr_dir):
+                        break
+                    curr_dir = os.path.dirname(curr_dir)
+            if dep_string.startswith('.'):
+                return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
+            return dep_string
             
-        # 2. C/C++: Direct paths usually relative to repo root or current file
+        # 2. C/C++: Include paths
         elif file_extension in ['.cpp', '.cc', '.cxx', '.h', '.hpp']:
-            # Try relative to current file
             base_dir = os.path.dirname(source_filepath)
-            local_test = os.path.join(base_dir, dep_string)
-            if os.path.exists(local_test):
-                return os.path.abspath(local_test)
-            # Try relative to repo root
-            repo_test = os.path.join(self.repo_path, dep_string)
-            if os.path.exists(repo_test):
-                return os.path.abspath(repo_test)
+            local_test = os.path.abspath(os.path.join(base_dir, dep_string))
+            if os.path.exists(local_test): return local_test
+            repo_test = os.path.abspath(os.path.join(self.repo_path, dep_string))
+            if os.path.exists(repo_test): return repo_test
+            for inc in ['', 'include', 'src', 'src/include']:
+                test_path = os.path.abspath(os.path.join(self.repo_path, inc, dep_string))
+                if os.path.exists(test_path): return test_path
+            found = self._find_file_in_repo(dep_string)
+            if found: return found
+            if dep_string.startswith('.'): return local_test
             return dep_string
 
-        # 3. Python: dot-separated, resolve to .py or __init__.py
+        # 3. Python: relative imports (count dots) or absolute
         elif file_extension in ['.py', '.pyi']:
             if dep_string.startswith('.'):
+                dots = len(dep_string) - len(dep_string.lstrip('.'))
+                dep_without_dots = dep_string[dots:]
                 base_dir = os.path.dirname(source_filepath)
-                # Python relative imports are a bit tricky, but let's approximate
-                target_path = os.path.join(base_dir, dep_string.lstrip('.'))
+                for _ in range(dots - 1):
+                    base_dir = os.path.dirname(base_dir)
+                parts = dep_without_dots.split('.') if dep_without_dots else []
+                target_path = os.path.join(base_dir, *parts)
             else:
                 parts = dep_string.split('.')
                 target_path = os.path.join(self.repo_path, *parts)
@@ -145,63 +220,122 @@ class CodebaseIndexer:
                 return os.path.abspath(target_path + '.py')
             if os.path.isdir(target_path):
                 init_path = os.path.join(target_path, '__init__.py')
-                if os.path.exists(init_path):
-                    return os.path.abspath(init_path)
-            return dep_string
-            
-        # 4. Go: slash-separated paths
-        elif file_extension == '.go':
-            target_path = os.path.join(self.repo_path, dep_string)
-            if os.path.exists(target_path + '.go'):
-                return os.path.abspath(target_path + '.go')
-            if os.path.isdir(target_path):
+                if os.path.exists(init_path): return os.path.abspath(init_path)
+            if dep_string.startswith('.'):
                 return os.path.abspath(target_path)
             return dep_string
             
-        # 5. Rust: :: separated paths
+        # 4. Go
+        elif file_extension == '.go':
+            module_name = ""
+            go_mod = os.path.join(self.repo_path, 'go.mod')
+            if os.path.exists(go_mod):
+                try:
+                    with open(go_mod, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip().startswith('module '):
+                                module_name = line.strip().split()[1]
+                                break
+                except Exception:
+                    pass
+            if module_name and dep_string.startswith(module_name):
+                relative_path = dep_string[len(module_name):].lstrip('/')
+                target_path = os.path.abspath(os.path.join(self.repo_path, relative_path))
+                if os.path.exists(target_path): return target_path
+                if os.path.exists(target_path + '.go'): return target_path + '.go'
+            
+            target_path = os.path.abspath(os.path.join(self.repo_path, dep_string))
+            if os.path.exists(target_path): return target_path
+            found = self._find_file_in_repo(dep_string)
+            if found: return found
+            if dep_string.startswith('.'):
+                return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
+            return dep_string
+            
+        # 5. Rust
         elif file_extension == '.rs':
             parts = dep_string.split('::')
             target_path = os.path.join(self.repo_path, *parts)
-            if os.path.exists(target_path + '.rs'):
-                return os.path.abspath(target_path + '.rs')
+            if os.path.exists(target_path + '.rs'): return os.path.abspath(target_path + '.rs')
             if os.path.isdir(target_path):
-                mod_path = os.path.join(target_path, 'mod.rs')
-                if os.path.exists(mod_path):
-                    return os.path.abspath(mod_path)
+                for mod_file in ['mod.rs', 'lib.rs', 'main.rs']:
+                    mod_path = os.path.join(target_path, mod_file)
+                    if os.path.exists(mod_path): return os.path.abspath(mod_path)
+            found = self._find_file_in_repo(parts[-1] + '.rs')
+            if found: return found
+            if dep_string.startswith('.'):
+                return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
             return dep_string
 
-        # 6. Fallback (Java, Swift, etc)
+        # 6. Fallback
         else:
+            if dep_string.startswith('.'):
+                return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
             parts = dep_string.split('.')
             dep_suffix = "/".join(parts)
             for ext in ['.py', '.java', '.js', '.ts', '.go', '.rs', '.swift']:
-                test_rel_path = dep_suffix + ext
-                test_abs_path = os.path.join(self.repo_path, test_rel_path)
-                if os.path.exists(test_abs_path):
-                    return os.path.abspath(test_abs_path)
+                test_abs = os.path.join(self.repo_path, dep_suffix + ext)
+                if os.path.exists(test_abs): return os.path.abspath(test_abs)
             return dep_string
 
-    def index_file(self, filepath: str, content: str, file_extension: str, rebuild_fts: bool = False):
-        """Parse and index a single file for search and dependency graph."""
+    def _extract_records(self, content: str, filepath: str, file_extension: str) -> dict:
         tree = parse_with_tree_sitter(content, file_extension)
         if not tree:
-            return
-            
-        self.search_index.clear_file(filepath)
-        
+            return None
+
         nodes_to_index = []
-        
         graph_nodes_dict = {}
         graph_edges = []
-        
-        file_id = filepath
-        graph_nodes_dict[file_id] = (file_id, {"name": os.path.basename(filepath), "path": filepath, "extension": file_extension}, "File")
-
         dependencies = set()
+
+        file_id = filepath
+        lang_name = get_language_for_extension(file_extension)
+        graph_nodes_dict[file_id] = (file_id, {
+            "name": os.path.basename(filepath),
+            "path": filepath,
+            "extension": file_extension,
+            "lang": lang_name
+        }, "File")
+
+        def make_id(*parts):
+            return "::".join([filepath] + [str(p) for p in parts])
+
+        def process_methods(methods, class_id, class_name):
+            for m in methods:
+                m_cc = getattr(m, 'cyclomatic_complexity', 1)
+                method_metrics = {'cyclomatic_complexity': m_cc}
+                nodes_to_index.append({
+                    'name': f"{class_name}.{m.name}",
+                    'node_type': 'method',
+                    'filepath': filepath,
+                    'start_line': m.lineno,
+                    'end_line': m.end_lineno,
+                    'metrics': method_metrics,
+                    'relationships': self._build_relationships_text(m)
+                })
+                method_id = make_id(class_name, m.name)
+                graph_nodes_dict[method_id] = (method_id, {
+                    "name": m.name,
+                    "complexity": m_cc,
+                    "filepath": filepath,
+                    "start_line": m.lineno,
+                    "end_line": m.end_lineno,
+                }, "Method")
+                graph_edges.append((class_id, method_id, {}, "CONTAINS"))
+                
+                for call in getattr(m, 'called_methods', set()):
+                    symbol_id = f"Symbol::{call}"
+                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
+                    graph_edges.append((method_id, symbol_id, {}, "CALLS"))
+
+                self._add_state_accesses(m, method_id, class_name, graph_nodes_dict, graph_edges, make_id)
+                self._add_lambdas(m, method_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
+
+                for stmt in getattr(m, 'statements', []):
+                    self._add_statement_to_graph(stmt, method_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
 
         for node in walk(tree):
             if isinstance(node, ClassDef):
-                # Get metrics with defaults since we don't have CK metrics calculator
                 wmc = getattr(node, 'wmc', 0)
                 metrics = {'wmc': wmc, 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
                 nodes_to_index.append({
@@ -214,7 +348,7 @@ class CodebaseIndexer:
                     'relationships': self._build_relationships_text(node)
                 })
                 
-                class_id = f"{filepath}::{node.name}"
+                class_id = make_id(node.name)
                 graph_nodes_dict[class_id] = (class_id, {
                     "name": node.name,
                     "filepath": filepath,
@@ -232,38 +366,8 @@ class CodebaseIndexer:
                     symbol_id = f"Symbol::{interface}"
                     graph_nodes_dict[symbol_id] = (symbol_id, {"name": interface}, "Symbol")
                     graph_edges.append((class_id, symbol_id, {}, "IMPLEMENTS"))
-                for m in node.methods:
-                    m_cc = getattr(m, 'cyclomatic_complexity', 1)
-                    method_metrics = {'cyclomatic_complexity': m_cc}
-                    nodes_to_index.append({
-                        'name': f"{node.name}.{m.name}",
-                        'node_type': 'method',
-                        'filepath': filepath,
-                        'start_line': m.lineno,
-                        'end_line': m.end_lineno,
-                        'metrics': method_metrics,
-                        'relationships': self._build_relationships_text(m)
-                    })
-                    method_id = f"{class_id}::{m.name}"
-                    graph_nodes_dict[method_id] = (method_id, {
-                        "name": m.name,
-                        "complexity": m_cc,
-                        "filepath": filepath,
-                        "start_line": m.lineno,
-                        "end_line": m.end_lineno,
-                    }, "Method")
-                    graph_edges.append((class_id, method_id, {}, "CONTAINS"))
                     
-                    for call in getattr(m, 'called_methods', set()):
-                        symbol_id = f"Symbol::{call}"
-                        graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
-                        graph_edges.append((method_id, symbol_id, {}, "CALLS"))
-
-                    self._add_state_accesses(m, method_id, node.name, graph_nodes_dict, graph_edges)
-                    self._add_lambdas(m, method_id, filepath, node.name, graph_nodes_dict, graph_edges)
-
-                    for stmt in getattr(m, 'statements', []):
-                        self._add_statement_to_graph(stmt, method_id, filepath, node.name, graph_nodes_dict, graph_edges)
+                process_methods(node.methods, class_id, node.name)
 
             elif isinstance(node, InterfaceDef):
                 nodes_to_index.append({
@@ -275,7 +379,7 @@ class CodebaseIndexer:
                     'metrics': {},
                     'relationships': self._build_relationships_text(node)
                 })
-                class_id = f"{filepath}::{node.name}"
+                class_id = make_id(node.name)
                 graph_nodes_dict[class_id] = (class_id, {
                     "name": node.name,
                     "filepath": filepath,
@@ -283,27 +387,9 @@ class CodebaseIndexer:
                     "end_line": node.end_lineno,
                 }, "Interface")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-                for m in node.methods:
-                    m_cc = getattr(m, 'cyclomatic_complexity', 1)
-                    method_metrics = {'cyclomatic_complexity': m_cc}
-                    nodes_to_index.append({
-                        'name': f"{node.name}.{m.name}",
-                        'node_type': 'method',
-                        'filepath': filepath,
-                        'start_line': m.lineno,
-                        'end_line': m.end_lineno,
-                        'metrics': method_metrics,
-                        'relationships': self._build_relationships_text(m)
-                    })
-                    method_id = f"{class_id}::{m.name}"
-                    graph_nodes_dict[method_id] = (method_id, {
-                        "name": m.name,
-                        "complexity": m_cc,
-                        "filepath": filepath,
-                        "start_line": m.lineno,
-                        "end_line": m.end_lineno,
-                    }, "Method")
-                    graph_edges.append((class_id, method_id, {}, "CONTAINS"))
+                
+                process_methods(node.methods, class_id, node.name)
+                    
             elif type(node).__name__ == 'ImportDef':
                 if node.module:
                     dependencies.add(node.module)
@@ -320,7 +406,7 @@ class CodebaseIndexer:
                 'metrics': func_metrics,
                 'relationships': self._build_relationships_text(func)
             })
-            func_id = f"{filepath}::{func.name}"
+            func_id = make_id(func.name)
             graph_nodes_dict[func_id] = (func_id, {
                 "name": func.name,
                 "complexity": f_cc,
@@ -335,15 +421,43 @@ class CodebaseIndexer:
                 graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                 graph_edges.append((func_id, symbol_id, {}, "CALLS"))
                 
-            self._add_state_accesses(func, func_id, "Global", graph_nodes_dict, graph_edges)
-            self._add_lambdas(func, func_id, filepath, "Global", graph_nodes_dict, graph_edges)
+            self._add_state_accesses(func, func_id, "Global", graph_nodes_dict, graph_edges, make_id)
+            self._add_lambdas(func, func_id, filepath, "Global", graph_nodes_dict, graph_edges, make_id)
                 
             for stmt in getattr(func, 'statements', []):
-                self._add_statement_to_graph(stmt, func_id, filepath, "Global", graph_nodes_dict, graph_edges)
+                self._add_statement_to_graph(stmt, func_id, filepath, "Global", graph_nodes_dict, graph_edges, make_id)
 
-        # Add dependencies to graph
+        resolved_deps = []
         for dep in dependencies:
             resolved_dep = self._resolve_dependency(dep, filepath, file_extension)
+            resolved_deps.append((dep, resolved_dep))
+
+        return {
+            "nodes_to_index": nodes_to_index,
+            "graph_nodes": list(graph_nodes_dict.values()),
+            "graph_edges": graph_edges,
+            "resolved_deps": resolved_deps
+        }
+
+    def index_file(self, filepath: str, content: str, file_extension: str, rebuild_fts: bool = False):
+        """Parse and index a single file for search and dependency graph."""
+        MAX_FILE_SIZE = 2 * 1024 * 1024
+        if len(content.encode('utf-8', errors='ignore')) > MAX_FILE_SIZE:
+            print(f"Warning: Skipping {filepath} (exceeds 2MB limit)", file=sys.stderr)
+            return
+
+        records = self._extract_records(content, filepath, file_extension)
+        if not records:
+            return
+            
+        self.search_index.clear_file(filepath)
+        
+        nodes_to_index = records["nodes_to_index"]
+        graph_nodes_dict = {nid: (nid, props, lbl) for nid, props, lbl in records["graph_nodes"]}
+        graph_edges = records["graph_edges"]
+        file_id = filepath
+
+        for dep, resolved_dep in records["resolved_deps"]:
             if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
                 graph_nodes_dict[resolved_dep] = (resolved_dep, {"name": os.path.basename(resolved_dep), "path": resolved_dep}, "File")
                 graph_edges.append((file_id, resolved_dep, {}, "DEPENDS_ON"))
@@ -361,283 +475,171 @@ class CodebaseIndexer:
                 if graph_edges:
                     self.graph.insert_edges_bulk(graph_edges, id_map)
             except Exception as e:
-                import sys
                 print(f"Warning: Failed to insert graph nodes/edges for {filepath}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
 
         if rebuild_fts:
             try:
                 self.search_index.rebuild_fts()
             except Exception as e:
-                import sys
                 print(f"Warning: Failed to rebuild FTS index for {filepath}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
         else:
             self.search_index.mark_fts_dirty()
 
 
-    def _parse_file_task(self, fp: Any, file_str: str, content_hash: str, mtime: float):
+    def _parse_file_task(self, fp: Any, file_str: str, mtime: float):
         try:
-            content = fp.read_text(encoding='utf-8', errors='ignore')
-            file_extension = fp.suffix
-            tree = parse_with_tree_sitter(content, file_extension)
-            if not tree:
+            MAX_FILE_SIZE = 2 * 1024 * 1024
+            if fp.stat().st_size > MAX_FILE_SIZE:
                 return None
                 
-            nodes_to_index = []
-            graph_nodes_dict = {}
-            graph_edges = []
+            content = fp.read_text(encoding='utf-8', errors='ignore')
+            content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
             
-            file_id = file_str
-            from src.core.constants import get_language_for_extension
-            lang_name = get_language_for_extension(file_extension)
-            graph_nodes_dict[file_id] = (file_id, {
-                "name": os.path.basename(file_str),
-                "path": file_str,
-                "extension": file_extension,
-                "content_hash": content_hash,
-                "mtime": float(mtime),
-                "lang": lang_name
-            }, "File")
-            dependencies = set()
-
-            for node in walk(tree):
-                if isinstance(node, ClassDef):
-                    wmc = getattr(node, 'wmc', 0)
-                    metrics = {'wmc': wmc, 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
-                    nodes_to_index.append({
-                        'name': node.name,
-                        'node_type': 'class',
-                        'filepath': file_str,
-                        'start_line': node.lineno,
-                        'end_line': node.end_lineno,
-                        'metrics': metrics
-                    })
-                    
-                    class_id = f"{file_str}::{node.name}"
-                    graph_nodes_dict[class_id] = (class_id, {
-                        "name": node.name,
-                        "filepath": file_str,
-                        "start_line": node.lineno,
-                        "end_line": node.end_lineno,
-                    }, "Class")
-                    graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-                    
-                    for base in getattr(node, 'bases', []):
-                        symbol_id = f"Symbol::{base}"
-                        graph_nodes_dict[symbol_id] = (symbol_id, {"name": base}, "Symbol")
-                        graph_edges.append((class_id, symbol_id, {}, "EXTENDS"))
-
-                    for interface in getattr(node, 'interfaces', []):
-                        symbol_id = f"Symbol::{interface}"
-                        graph_nodes_dict[symbol_id] = (symbol_id, {"name": interface}, "Symbol")
-                        graph_edges.append((class_id, symbol_id, {}, "IMPLEMENTS"))
-                    for m in node.methods:
-                        m_cc = getattr(m, 'cyclomatic_complexity', 1)
-                        method_metrics = {'cyclomatic_complexity': m_cc}
-                        nodes_to_index.append({
-                            'name': f"{node.name}.{m.name}",
-                            'node_type': 'method',
-                            'filepath': file_str,
-                            'start_line': m.lineno,
-                            'end_line': m.end_lineno,
-                            'metrics': method_metrics
-                        })
-                        method_id = f"{class_id}::{m.name}"
-                        graph_nodes_dict[method_id] = (method_id, {
-                            "name": m.name,
-                            "complexity": m_cc,
-                            "filepath": file_str,
-                            "start_line": m.lineno,
-                            "end_line": m.end_lineno,
-                        }, "Method")
-                        graph_edges.append((class_id, method_id, {}, "CONTAINS"))
-                        
-                        for call in getattr(m, 'called_methods', set()):
-                            symbol_id = f"Symbol::{call}"
-                            graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
-                            graph_edges.append((method_id, symbol_id, {}, "CALLS"))
-                elif isinstance(node, InterfaceDef):
-                    nodes_to_index.append({
-                        'name': node.name,
-                        'node_type': 'interface',
-                        'filepath': file_str,
-                        'start_line': node.lineno,
-                        'end_line': node.end_lineno,
-                        'metrics': {}
-                    })
-                    class_id = f"{file_str}::{node.name}"
-                    graph_nodes_dict[class_id] = (class_id, {
-                        "name": node.name,
-                        "filepath": file_str,
-                        "start_line": node.lineno,
-                        "end_line": node.end_lineno,
-                    }, "Interface")
-                    graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-                    for m in node.methods:
-                        m_cc = getattr(m, 'cyclomatic_complexity', 1)
-                        method_metrics = {'cyclomatic_complexity': m_cc}
-                        nodes_to_index.append({
-                            'name': f"{node.name}.{m.name}",
-                            'node_type': 'method',
-                            'filepath': file_str,
-                            'start_line': m.lineno,
-                            'end_line': m.end_lineno,
-                            'metrics': method_metrics
-                        })
-                        method_id = f"{class_id}::{m.name}"
-                        graph_nodes_dict[method_id] = (method_id, {
-                            "name": m.name,
-                            "complexity": m_cc,
-                            "filepath": file_str,
-                            "start_line": m.lineno,
-                            "end_line": m.end_lineno,
-                        }, "Method")
-                        graph_edges.append((class_id, method_id, {}, "CONTAINS"))
-                elif type(node).__name__ == 'ImportDef':
-                    if node.module:
-                        dependencies.add(node.module)
-
-            for func in tree.functions:
-                f_cc = getattr(func, 'cyclomatic_complexity', 1)
-                func_metrics = {'func_cc': f_cc}
-                nodes_to_index.append({
-                    'name': func.name,
-                    'node_type': 'function',
-                    'filepath': file_str,
-                    'start_line': func.lineno,
-                    'end_line': func.end_lineno,
-                    'metrics': func_metrics
-                })
-                func_id = f"{file_str}::{func.name}"
-                graph_nodes_dict[func_id] = (func_id, {
-                    "name": func.name,
-                    "complexity": f_cc,
-                    "filepath": file_str,
-                    "start_line": func.lineno,
-                    "end_line": func.end_lineno,
-                }, "Function")
-                graph_edges.append((file_id, func_id, {}, "CONTAINS"))
+            records = self._extract_records(content, file_str, fp.suffix)
+            if not records:
+                return None
                 
-                for call in getattr(func, 'called_methods', set()):
-                    symbol_id = f"Symbol::{call}"
-                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
-                    graph_edges.append((func_id, symbol_id, {}, "CALLS"))
-
-            resolved_deps = []
-            for dep in dependencies:
-                resolved_dep = self._resolve_dependency(dep, file_str, file_extension)
-                resolved_deps.append((dep, resolved_dep))
-
-            return {
+            records.update({
                 "file_str": file_str,
                 "content_hash": content_hash,
                 "mtime": mtime,
-                "lang": file_extension,
-                "nodes_to_index": nodes_to_index,
-                "graph_nodes": list(graph_nodes_dict.values()),
-                "graph_edges": graph_edges,
-                "resolved_deps": resolved_deps
-            }
+                "lang": fp.suffix
+            })
+            return records
         except Exception as e:
-            import sys
             print(f"Warning: Failed to parse {file_str}: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             return None
 
     def _post_process_recursion(self):
         """Find recursive self-calls and add RECURSES_TO relationships."""
         queries = [
-            "MATCH (m:Method)-[:CALLS]->(m) MERGE (m)-[:RECURSES_TO]->(m)",
-            "MATCH (f:Function)-[:CALLS]->(f) MERGE (f)-[:RECURSES_TO]->(f)"
+            "MATCH (m:Method)-[r:RECURSES_TO]->(m) DELETE r",
+            "MATCH (f:Function)-[r:RECURSES_TO]->(f) DELETE r",
+            "MATCH (m:Method)-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
+            "MATCH (f:Function)-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)"
         ]
         try:
             with self.graph:
                 self.graph.query_batch(queries)
         except Exception as e:
-            import sys
             print(f"Warning: Failed to post-process recursion: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
     def index_directory(self, dirpath: str, progress_callback=None) -> dict:
-        import pathlib
-        import hashlib
-        from concurrent.futures import ThreadPoolExecutor
-        
         path = pathlib.Path(dirpath).resolve()
-        from src.core.constants import SUPPORTED_EXTENSIONS
-        SUPPORTED = SUPPORTED_EXTENSIONS
         ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}
         files = []
         for r, d, fnames in os.walk(str(path)):
             d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
             for fname in fnames:
                 fp = (pathlib.Path(r) / fname).resolve()
-                if fp.suffix in SUPPORTED:
+                if fp.suffix in SUPPORTED_EXTENSIONS:
                     files.append(fp)
         
-        # Estimate required RAM disk quota based on a 40x source-to-database size multiplier
+        total_files = len(files)
         try:
             total_source_bytes = sum(fp.stat().st_size for fp in files)
         except Exception:
             total_source_bytes = 0
             
         projected_db_bytes = int(total_source_bytes * 40.0)
-        # 1.5x safety buffer, with a minimum of 1 GB
-        required_ramdisk_bytes = max(int(projected_db_bytes * 1.5), 1024 * 1024 * 1024)
+        required_ramdisk_bytes = max(int(projected_db_bytes * 1.5), 100 * 1024 * 1024)
         
         if progress_callback:
-            progress_callback(0, len(files), f"Projected raw DB size: {projected_db_bytes / (1024*1024):.1f} MB (Allocating {required_ramdisk_bytes / (1024*1024):.1f} MB safe quota)")
+            progress_callback(0, total_files, f"Projected raw DB size: {projected_db_bytes / (1024*1024):.1f} MB")
+
+        # Get existing metadata to avoid concurrent DB queries in threads
+        tracked_metadata = {}
+        try:
+            if self.search_index and self.search_index._conn:
+                rows = self.search_index._conn.execute('SELECT filepath, content_hash, mtime FROM files').fetchall()
+                tracked_metadata = {row[0]: (row[1], row[2]) for row in rows}
+        except Exception as e:
+            pass
 
         indexed_count = 0
         skipped_count = 0
         current_files_set = set()
-        
-        # 1. Filter out files that have not changed
         parse_jobs = []
-        for idx, fp in enumerate(files):
+        
+        for fp in files:
             file_str = str(fp)
             current_files_set.add(file_str)
             try:
-                content = fp.read_text(encoding='utf-8', errors='ignore')
-                content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
                 mtime = os.path.getmtime(file_str)
-                
-                existing_hash = self.search_index.get_file_hash(file_str)
-                if existing_hash == content_hash:
-                    skipped_count += 1
-                    continue
-                
-                parse_jobs.append((fp, file_str, content_hash, mtime))
+                if file_str in tracked_metadata:
+                    existing_hash, existing_mtime = tracked_metadata[file_str]
+                    if abs(mtime - existing_mtime) < 0.01:
+                        skipped_count += 1
+                        continue
+                parse_jobs.append((fp, file_str, mtime))
             except Exception as e:
-                print(f"Warning: Failed to scan hash for {file_str}: {e}", file=sys.stderr)
+                print(f"Warning: Failed to stat {file_str}: {e}", file=sys.stderr)
 
-        # 2. Parse AST of modified files concurrently
-        max_workers = min(8, os.cpu_count() or 4)
         results = []
         if parse_jobs:
-            if progress_callback:
-                progress_callback(0, len(parse_jobs), "Starting parallel parsing...")
+            max_workers = min(8, os.cpu_count() or 4)
+            current_processed = skipped_count
+            
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(self._parse_file_task, job[0], job[1], job[2], job[3])
-                    for job in parse_jobs
-                ]
-                for idx, fut in enumerate(futures):
-                    res = fut.result()
-                    if res:
-                        results.append(res)
+                job_iterator = iter(parse_jobs)
+                futures = {}
+                
+                # Pre-populate pool (backpressure queue size = 2 * max_workers)
+                for _ in range(2 * max_workers):
+                    try:
+                        job = next(job_iterator)
+                        fut = executor.submit(self._parse_file_task, job[0], job[1], job[2])
+                        futures[fut] = job[1]
+                    except StopIteration:
+                        break
+                        
+                while futures:
+                    done = next(as_completed(futures))
+                    file_str = futures.pop(done)
+                    try:
+                        res = done.result()
+                        if res:
+                            # Verify hash in main thread before keeping
+                            existing_hash = tracked_metadata.get(file_str, (None, None))[0]
+                            if existing_hash == res["content_hash"]:
+                                skipped_count += 1
+                            else:
+                                results.append(res)
+                    except Exception as e:
+                        print(f"Warning: Task failed for {file_str}: {e}", file=sys.stderr)
+                        
+                    current_processed += 1
                     if progress_callback:
-                        progress_callback(idx + 1, len(parse_jobs), f"Parsed {idx+1}/{len(parse_jobs)}")
+                        progress_callback(current_processed, total_files, f"Parsed {file_str}")
+                        
+                    try:
+                        job = next(job_iterator)
+                        fut = executor.submit(self._parse_file_task, job[0], job[1], job[2])
+                        futures[fut] = job[1]
+                    except StopIteration:
+                        pass
+
+        # Close existing connections before mass update/ramdisk to prevent connection errors
+        ssd_db_path = self.search_index.db_path
+        self.close()
 
         if not results:
-            # Nothing to index — still clean up stale files
+            self.search_index = CodeSearchIndex(ssd_db_path)
+            self.graph = self.search_index.graph
+            
             tracked_files = self.search_index.get_all_tracked_files()
             stale_files = [tf for tf in tracked_files if tf not in current_files_set]
             stale_count = len(stale_files)
             if stale_files:
                 if progress_callback:
-                    progress_callback(len(files), len(files), f"Removing {stale_count} stale files...")
+                    progress_callback(total_files, total_files, f"Removing {stale_count} stale files...")
                 with self.graph:
                     self.search_index.clear_files_bulk(stale_files)
 
-            # Rebuild FTS if it doesn't exist or is dirty (may have failed on a previous run)
             fts_error = None
             if not self.search_index.has_fts_index() or self.search_index.is_fts_dirty():
                 try:
@@ -646,38 +648,51 @@ class CodebaseIndexer:
                     fts_error = str(e)
                     print(f"Warning: Failed to rebuild FTS index: {fts_error}", file=sys.stderr)
 
-            result = {
+            res = {
                 "status": "success" if not fts_error else "partial",
                 "indexed_files": 0,
                 "skipped_files": skipped_count,
                 "stale_files_removed": stale_count,
-                "total_files_found": len(files)
+                "total_files_found": total_files
             }
             if fts_error:
-                result["fts_error"] = fts_error
-            return result
+                res["fts_error"] = fts_error
+            return res
 
-        # 3. Build the index in RAM (/dev/shm), then sync to SSD
-        ssd_db_path = self.search_index.db_path
-        ramdisk = RamdiskIndex(ssd_db_path, max_bytes=required_ramdisk_bytes)
+        class DummyContext:
+            def __init__(self, db_path):
+                self.db_path = db_path
+            def __enter__(self): return self
+            def __exit__(self, exc_type, exc_val, exc_tb): return False
+            def check_quota(self): pass
+            def get_usage_bytes(self): return 0
+
+        # Ramdisk Fallback Check
+        use_ramdisk = True
+        try:
+            if os.path.exists('/dev/shm') and os.path.isdir('/dev/shm'):
+                shm_free = shutil.disk_usage('/dev/shm').free
+                if required_ramdisk_bytes > (shm_free - 50 * 1024 * 1024):
+                    use_ramdisk = False
+                    print(f"[ramdisk] Not enough /dev/shm (Free: {shm_free/(1024*1024):.1f}MB, Req: {required_ramdisk_bytes/(1024*1024):.1f}MB), using SSD directly", file=sys.stderr)
+            else:
+                use_ramdisk = False
+        except Exception:
+            use_ramdisk = False
+
+        ramdisk = RamdiskIndex(ssd_db_path, max_bytes=required_ramdisk_bytes) if use_ramdisk else DummyContext(ssd_db_path)
 
         with ramdisk:
-            # Create fresh DB instances pointing at the ramdisk
             ram_search = CodeSearchIndex(ramdisk.db_path)
-            ram_graph = ram_search.graph  # Already initialized by CodeSearchIndex.__init__
-
-            if progress_callback:
-                progress_callback(0, len(results), "Writing parsed ASTs to RAM database...")
+            ram_graph = ram_search.graph
 
             with ram_graph:
-                # Clear files in bulk (in RAM DB — fast, no SSD I/O)
                 files_to_clear = [res["file_str"] for res in results]
                 if files_to_clear:
                     if progress_callback:
-                        progress_callback(0, len(results), "Clearing existing indexes for modified files...")
+                        progress_callback(total_files, total_files, "Clearing existing indexes for modified files...")
                     ram_search.clear_files_bulk(files_to_clear)
 
-                # Aggregate all data
                 all_search_nodes = []
                 all_graph_nodes = {}
                 all_graph_edges = set()
@@ -685,7 +700,6 @@ class CodebaseIndexer:
 
                 for res in results:
                     file_str = res["file_str"]
-                    
                     if res["nodes_to_index"]:
                         all_search_nodes.extend(res["nodes_to_index"])
                     
@@ -709,37 +723,31 @@ class CodebaseIndexer:
                                 all_graph_nodes[resolved_dep] = ({"name": resolved_dep}, "Module")
                             all_graph_edges.add((file_str, resolved_dep, frozenset(), "DEPENDS_ON"))
                     
-                    from src.core.constants import get_language_for_extension
                     lang_name = get_language_for_extension(res["lang"])
                     files_metadata.append((file_str, res["content_hash"], res["mtime"], lang_name))
 
-                # Perform bulk saving — all to RAM
                 try:
                     if all_search_nodes:
                         if progress_callback:
-                            progress_callback(30, 100, "Saving search nodes to RAM DuckDB...")
+                            progress_callback(total_files, total_files, "Saving search nodes to RAM DuckDB...")
                         ram_search.index_nodes(all_search_nodes)
 
                     if all_graph_nodes:
                         if progress_callback:
-                            progress_callback(50, 100, "Inserting graph nodes into RAM Gorgonzola...")
+                            progress_callback(total_files, total_files, "Inserting graph nodes into RAM Gorgonzola...")
                         nodes_list = [(nid, props, lbl) for nid, (props, lbl) in all_graph_nodes.items()]
                         id_map = ram_graph.insert_nodes_bulk(nodes_list)
                         
                         if all_graph_edges:
                             if progress_callback:
-                                progress_callback(70, 100, "Linking graph edges in RAM...")
+                                progress_callback(total_files, total_files, "Linking graph edges in RAM...")
                             edges_list = [(src, dst, dict(props), rel) for src, dst, props, rel in all_graph_edges]
                             ram_graph.insert_edges_bulk(edges_list, id_map)
 
-                    # Check quota after heavy writes
                     ramdisk.check_quota()
-                    usage_mb = ramdisk.get_usage_bytes() / 1024 / 1024
-                    print(f"[ramdisk] Current usage: {usage_mb:.2f} MB", file=sys.stderr, flush=True)
-
                     if files_metadata:
                         if progress_callback:
-                            progress_callback(90, 100, "Updating file hash tracking in RAM...")
+                            progress_callback(total_files, total_files, "Updating file hash tracking in RAM...")
                         ram_search.upsert_file_hashes_bulk(files_metadata)
                         
                     indexed_count = len(results)
@@ -748,58 +756,53 @@ class CodebaseIndexer:
                     raise
                 except Exception as e:
                     print(f"Warning: Failed during bulk database write: {e}", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
 
-            # Close RAM DB connections before sync
             ram_search.close()
 
-        # ── Phase 2: Finalization ──
-        # After ramdisk context exits, files are on SSD.
-        # Re-open the SSD-backed DB with a fresh write connection.
-        self.search_index.close()
         self.search_index = CodeSearchIndex(ssd_db_path)
         self.graph = self.search_index.graph
 
-        # Clean up stale files that no longer exist on disk
         tracked_files = self.search_index.get_all_tracked_files()
         stale_files = [tf for tf in tracked_files if tf not in current_files_set]
         stale_count = len(stale_files)
         if stale_files:
             if progress_callback:
-                progress_callback(len(files), len(files), f"Removing {stale_count} stale files...")
+                progress_callback(total_files, total_files, f"Removing {stale_count} stale files...")
             with self.graph:
                 self.search_index.clear_files_bulk(stale_files)
                 
         self._post_process_recursion()
-         
-        if progress_callback:
-            progress_callback(len(files), len(files), "Resolving symbols")
- 
-        # Resolve all unlinked AST symbols (CALLS, EXTENDS, IMPLEMENTS)
-        from src.mcp_server.graph_api import GraphAPI
-        graph_api = GraphAPI(dirpath)
-        graph_api.resolve_symbols()
-        
-        # Rebuild the FTS index for the whole directory once
+
         fts_error = None
         try:
+            if progress_callback:
+                progress_callback(total_files, total_files, "Rebuilding FTS index...")
             self.search_index.rebuild_fts()
         except Exception as e:
             fts_error = str(e)
             print(f"Warning: Failed to rebuild FTS index: {fts_error}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+
+        if progress_callback:
+            progress_callback(total_files, total_files, "Resolving symbols...")
+ 
+        from src.mcp_server.graph_api import GraphAPI
+        graph_api = GraphAPI(dirpath)
+        graph_api.resolve_symbols()
         
-        # Close all connections at end of Phase 2
         self.search_index.close()
 
-        result = {
+        res = {
             "status": "success" if not fts_error else "partial",
             "indexed_files": indexed_count, 
             "skipped_files": skipped_count,
             "stale_files_removed": stale_count,
-            "total_files_found": len(files)
+            "total_files_found": total_files
         }
         if fts_error:
-            result["fts_error"] = fts_error
-        return result
+            res["fts_error"] = fts_error
+        return res
 
 def progress_callback(current: int, total: int, file_path: str):
     print(json.dumps({
@@ -822,8 +825,8 @@ def main():
         print(json.dumps({"result": res}), flush=True)
     except Exception as e:
         sys.stderr.write(f"Error during indexing subprocess: {e}\n")
+        traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
     main()
-

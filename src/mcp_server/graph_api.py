@@ -62,6 +62,20 @@ class GraphAPI:
             res["error"] = error_msg
         return res
 
+    def _find_calls(self, query: str, target_name: str, return_key: str) -> List[Dict[str, Any]]:
+        try:
+            results = self.graph.query(query, {"target": target_name})
+            seen = set()
+            unique_nodes = []
+            for row in results:
+                props = row[return_key]['properties']
+                if props.get('id') not in seen:
+                    seen.add(props.get('id'))
+                    unique_nodes.append(props)
+            return unique_nodes
+        except Exception as e:
+            return [{"error": str(e), "type": "graph_query_failed"}]
+
     def find_callers(self, target_name: str) -> List[Dict[str, Any]]:
         """Find all methods/functions that call the target function/method."""
         query = '''
@@ -69,18 +83,7 @@ class GraphAPI:
             WHERE callee.name = $target
             RETURN caller
         '''
-        try:
-            results = self.graph.query(query, {"target": target_name})
-            seen = set()
-            unique_callers = []
-            for row in results:
-                props = row['caller']['properties']
-                if props.get('id') not in seen:
-                    seen.add(props.get('id'))
-                    unique_callers.append(props)
-            return unique_callers
-        except Exception as e:
-            return [{"error": str(e), "type": "graph_query_failed"}]
+        return self._find_calls(query, target_name, 'caller')
 
     def find_callees(self, target_name: str) -> List[Dict[str, Any]]:
         """Find all functions/methods called by the given target function/method."""
@@ -89,18 +92,7 @@ class GraphAPI:
             WHERE caller.name = $target
             RETURN callee
         '''
-        try:
-            results = self.graph.query(query, {"target": target_name})
-            seen = set()
-            unique_callees = []
-            for row in results:
-                props = row['callee']['properties']
-                if props.get('id') not in seen:
-                    seen.add(props.get('id'))
-                    unique_callees.append(props)
-            return unique_callees
-        except Exception as e:
-            return [{"error": str(e), "type": "graph_query_failed"}]
+        return self._find_calls(query, target_name, 'callee')
 
     def impact_analysis(self, filepath: str, max_depth: int = 3) -> List[Dict[str, Any]]:
         """Find all files/modules that transitively depend on the given filepath."""

@@ -90,12 +90,15 @@ Performs tree-sitter AST analysis and populates the DuckDB codebase index for fa
 - `src/core/` — Core metrics collector and configuration.
 - `src/git/` — Git history and commit log parsers.
 - `src/mcp_server/` — MCP server endpoints and core logic.
-  - `src/mcp_server/index.py` — DuckDB Full-Text Search (FTS) codebase index.
+  - `src/mcp_server/index_pipeline.py` — Unified AST extraction and indexing pipeline.
+  - `src/mcp_server/index_db.py` — DuckDB Full-Text Search (FTS) codebase index.
   - `src/mcp_server/gorgonzola_graph.py` — Gorgonzola graph database adapter.
+  - `src/mcp_server/ramdisk.py` — `/dev/shm` RAM-disk staging for bulk indexing.
 - `src/metrics/` — Maintainability index and Object-Oriented design metrics analyzers.
 - `src/parsers/` — AST parsing (using Tree-sitter).
 - `src/transports/` — MCP Adapters (stdio, fastAPI).
 - `src/utils/` — Export formats and helper utilities.
+- `modules/docs/` — Architecture and pipeline documentation.
 - `tests/` — Automated test suites.
 
 ---
