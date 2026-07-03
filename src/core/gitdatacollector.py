@@ -7,6 +7,10 @@ Contains the GitDataCollector class that extends DataCollector with git-specific
 import datetime
 import gc
 import os
+import logging
+
+logger = logging.getLogger(__name__)
+
 import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -38,17 +42,17 @@ class GitDataCollector(DataCollector):
 		# Print information about branch scanning
 		if conf['scan_default_branch_only']:
 			default_branch = get_default_branch()
-			print(f'Branch scanning: ONLY scanning default branch ({default_branch})')
+			logger.info(f'Branch scanning: ONLY scanning default branch ({default_branch})')
 		else:
-			print('Branch scanning: Scanning ALL branches (default behavior)')
+			logger.info('Branch scanning: Scanning ALL branches (default behavior)')
 
 		# Print information about extension filtering
 		if conf['filter_by_extensions']:
-			print('File extension filtering is ENABLED. Only analyzing files with these extensions:')
+			logger.info('File extension filtering is ENABLED. Only analyzing files with these extensions:')
 			extensions_list = sorted(list(conf['allowed_extensions']))
-			print(f'  {", ".join(extensions_list)}')
+			logger.info(f'  {", ".join(extensions_list)}')
 		else:
-			print('File extension filtering is DISABLED. Analyzing all file types.')
+			logger.info('File extension filtering is DISABLED. Analyzing all file types.')
 
 		first_parent_flag = get_first_parent_flag()
 		self.total_authors += int(getpipeoutput(['git shortlog -s %s %s' % (first_parent_flag, getlogrange()), 'wc -l']))
@@ -240,7 +244,7 @@ class GitDataCollector(DataCollector):
 			worker_count = min(len(revs_to_read), conf['processes'])
 			chunk_size = conf.get('chunk_size', 500)
 			if conf['verbose']:
-				print(f'Processing {len(revs_to_read)} revisions with {worker_count} workers (chunk size: {chunk_size})')
+				logger.info(f'Processing {len(revs_to_read)} revisions with {worker_count} workers (chunk size: {chunk_size})')
 
 			# Process in chunks to reduce peak memory usage
 			for i in range(0, len(revs_to_read), chunk_size):
@@ -279,7 +283,7 @@ class GitDataCollector(DataCollector):
 				if year not in self.temporal_data['files_by_year'] or file_count > self.temporal_data['files_by_year'][year]:
 					self.temporal_data['files_by_year'][year] = file_count
 			except ValueError:
-				print('Warning: failed to parse line "%s"' % line)
+				logger.info('Warning: failed to parse line "%s"' % line)
 
 		# extensions and size of files
 		lines = getpipeoutput(['git ls-tree -r -l -z %s' % getcommitrange('HEAD', end_only = True)]).split('\000')
@@ -301,7 +305,7 @@ class GitDataCollector(DataCollector):
 			# Apply extension filtering - skip files that don't match allowed extensions
 			if not should_include_file(filename):
 				if conf['verbose'] or conf['debug']:
-					print(f'Skipping file (extension not in allowed list): {fullpath}')
+					logger.info(f'Skipping file (extension not in allowed list): {fullpath}')
 				continue
 
 			self.repository_stats['total_size'] += size
@@ -339,7 +343,7 @@ class GitDataCollector(DataCollector):
 			worker_count = min(len(blobs_to_read), conf['processes'])
 			chunk_size = conf.get('chunk_size', 500)
 			if conf['verbose']:
-				print(f'Processing {len(blobs_to_read)} uncached blobs with {worker_count} workers (chunk size: {chunk_size})')
+				logger.info(f'Processing {len(blobs_to_read)} uncached blobs with {worker_count} workers (chunk size: {chunk_size})')
 
 			for i in range(0, len(blobs_to_read), chunk_size):
 				chunk = blobs_to_read[i:i + chunk_size]
@@ -355,7 +359,7 @@ class GitDataCollector(DataCollector):
 			worker_count = min(len(all_blobs_for_sloc), conf['processes'])
 			chunk_size = conf.get('chunk_size', 500)
 			if conf['verbose']:
-				print(f'Performing SLOC analysis on {len(all_blobs_for_sloc)} blobs with {worker_count} workers (chunk size: {chunk_size})')
+				logger.info(f'Performing SLOC analysis on {len(all_blobs_for_sloc)} blobs with {worker_count} workers (chunk size: {chunk_size})')
 
 			for i in range(0, len(all_blobs_for_sloc), chunk_size):
 				chunk = all_blobs_for_sloc[i:i + chunk_size]
@@ -392,7 +396,7 @@ class GitDataCollector(DataCollector):
 
 
 		# File revision counting
-		print('Collecting file revision statistics...')
+		logger.info('Collecting file revision statistics...')
 		first_parent_flag = get_first_parent_flag()
 		revision_lines = getpipeoutput(['git log %s --name-only --pretty=format: %s' % (first_parent_flag, getlogrange('HEAD'))]).strip().split('\n')
 		for line in revision_lines:
@@ -415,7 +419,7 @@ class GitDataCollector(DataCollector):
 				self.code_analysis['directories'][directory]['files'].add(line)
 
 		# Directory activity analysis
-		print('Collecting directory activity statistics...')
+		logger.info('Collecting directory activity statistics...')
 		first_parent_flag = get_first_parent_flag()
 		numstat_lines = getpipeoutput(['git log %s --numstat --pretty=format:"%%at %%aN" %s' % (first_parent_flag, getlogrange('HEAD'))]).split('\n')
 		current_author = None
@@ -529,9 +533,9 @@ class GitDataCollector(DataCollector):
 
 						files, inserted, deleted = 0, 0, 0
 					except ValueError:
-						print('Warning: unexpected line "%s"' % line)
+						logger.info('Warning: unexpected line "%s"' % line)
 				else:
-					print('Warning: unexpected line "%s"' % line)
+					logger.info('Warning: unexpected line "%s"' % line)
 			else:
 				numbers = getstatsummarycounts(line)
 
@@ -543,7 +547,7 @@ class GitDataCollector(DataCollector):
 					self.repository_stats['total_lines_removed'] += deleted
 
 				else:
-					print('Warning: failed to handle line "%s"' % line)
+					logger.info('Warning: failed to handle line "%s"' % line)
 					(files, inserted, deleted) = (0, 0, 0)
 				#self.changes_by_date[stamp] = { 'files': files, 'ins': inserted, 'del': deleted }
 		self.repository_stats['total_lines'] += total_lines
@@ -594,34 +598,34 @@ class GitDataCollector(DataCollector):
 						self.temporal_data['commits_by_author_by_year'][year][author] += 1
 						files, inserted, deleted = 0, 0, 0
 					except ValueError:
-						print('Warning: unexpected line "%s"' % line)
+						logger.info('Warning: unexpected line "%s"' % line)
 				else:
-					print('Warning: unexpected line "%s"' % line)
+					logger.info('Warning: unexpected line "%s"' % line)
 			else:
 				numbers = getstatsummarycounts(line)
 
 				if len(numbers) == 3:
 					(files, inserted, deleted) = list(map(lambda el : int(el), numbers))
 				else:
-					print('Warning: failed to handle line "%s"' % line)
+					logger.info('Warning: failed to handle line "%s"' % line)
 					(files, inserted, deleted) = (0, 0, 0)
 
 		# Branch analysis - collect unmerged branches and per-branch statistics
 		if conf['verbose']:
-			print('Analyzing branches and detecting unmerged branches...')
+			logger.info('Analyzing branches and detecting unmerged branches...')
 		self._analyzeBranches()
 
 		# Calculate repository size (this is slow as noted in TODO)
 		if conf['verbose']:
-			print('Calculating repository size...')
+			logger.info('Calculating repository size...')
 		try:
 			# Get .git directory size
 			git_dir_size = getpipeoutput(['du -sm .git']).split()[0]
 			self.repository_size_mb = float(git_dir_size)
 			if conf['verbose']:
-				print(f'Repository size: {self.repository_size_mb:.1f} MB')
+				logger.info(f'Repository size: {self.repository_size_mb:.1f} MB')
 		except (ValueError, IndexError):
-			print('Warning: Could not calculate repository size')
+			logger.info('Warning: Could not calculate repository size')
 			self.repository_size_mb = 0.0
 
 		# Perform advanced team analysis
@@ -641,7 +645,7 @@ class GitDataCollector(DataCollector):
 				gc.collect()
 				if conf['verbose']:
 					new_mem = psutil.Process().memory_info().rss / 1024 / 1024
-					print(f'GC triggered at {mem_mb:.0f}MB, now {new_mem:.0f}MB')
+					logger.info(f'GC triggered at {mem_mb:.0f}MB, now {new_mem:.0f}MB')
 				return True
 		except ImportError:
 			# psutil not available, do periodic GC anyway in low_memory_mode
@@ -680,7 +684,7 @@ class GitDataCollector(DataCollector):
 			# Detect main branch
 			main_branch = self._detectMainBranch()
 			if conf['verbose']:
-				print(f'Detected main branch: {main_branch}')
+				logger.info(f'Detected main branch: {main_branch}')
 
 			# Get all local branches
 			branches_output = getpipeoutput(['git branch'])
@@ -696,17 +700,17 @@ class GitDataCollector(DataCollector):
 				self.unmerged_branches = [b for b in all_branches if b != main_branch]
 
 			if conf['verbose']:
-				print(f'Found {len(self.unmerged_branches)} unmerged branches: {", ".join(self.unmerged_branches)}')
+				logger.info(f'Found {len(self.unmerged_branches)} unmerged branches: {", ".join(self.unmerged_branches)}')
 
 			# Analyze each branch
 			for branch in all_branches:
 				if conf['verbose']:
-					print(f'Analyzing branch: {branch}')
+					logger.info(f'Analyzing branch: {branch}')
 				self._analyzeBranch(branch, main_branch)
 
 		except Exception as e:
 			if conf['verbose'] or conf['debug']:
-				print(f'Warning: Branch analysis failed: {e}')
+				logger.info(f'Warning: Branch analysis failed: {e}')
 			# Initialize empty structures if analysis fails
 			self.unmerged_branches = []
 			self.branches = {}
@@ -767,7 +771,7 @@ class GitDataCollector(DataCollector):
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Failed to analyze branch {branch_name}: {e}')
+				logger.info(f'Warning: Failed to analyze branch {branch_name}: {e}')
 
 	def _analyzeBranchCommit(self, branch_name, commit_hash):
 		"""Analyze a single commit for branch statistics"""
@@ -825,12 +829,12 @@ class GitDataCollector(DataCollector):
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Failed to analyze commit {commit_hash}: {e}')
+				logger.info(f'Warning: Failed to analyze commit {commit_hash}: {e}')
 
 	def _analyzeTeamCollaboration(self):
 		"""Analyze how team members collaborate on files and projects"""
 		if conf['verbose']:
-			print('Analyzing team collaboration patterns...')
+			logger.info('Analyzing team collaboration patterns...')
 
 		try:
 			# Get commit details with files changed
@@ -883,10 +887,10 @@ class GitDataCollector(DataCollector):
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Team collaboration analysis failed: {e}')
+				logger.info(f'Warning: Team collaboration analysis failed: {e}')
 
 		# Enhanced Metrics Collection - College Project Implementation
-		print('Calculating enhanced metrics...')
+		logger.info('Calculating enhanced metrics...')
 
 		# Analyze current files for enhanced metrics
 		try:
@@ -913,23 +917,23 @@ class GitDataCollector(DataCollector):
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Enhanced file analysis failed: {e}')
+				logger.info(f'Warning: Enhanced file analysis failed: {e}')
 
 		# Calculate comprehensive software metrics
 		try:
 			if conf['verbose']:
-				print('Calculating comprehensive software metrics...')
+				logger.info('Calculating comprehensive software metrics...')
 			self._calculate_comprehensive_project_metrics()
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Comprehensive metrics calculation failed: {e}')
+				logger.info(f'Warning: Comprehensive metrics calculation failed: {e}')
 
 
 
 	def _analyzeCommitPatterns(self):
 		"""Analyze commit patterns to identify commit behavior (small vs large commits, frequency, etc.)"""
 		if conf['verbose']:
-			print('Analyzing commit patterns...')
+			logger.info('Analyzing commit patterns...')
 
 		try:
 			# Get detailed commit information using a simpler, more reliable approach
@@ -1023,12 +1027,12 @@ class GitDataCollector(DataCollector):
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Commit pattern analysis failed: {e}')
+				logger.info(f'Warning: Commit pattern analysis failed: {e}')
 
 	def _analyzeWorkingPatterns(self):
 		"""Analyze when authors typically work (time of day, day of week, timezone patterns)"""
 		if conf['verbose']:
-			print('Analyzing working time patterns...')
+			logger.info('Analyzing working time patterns...')
 
 		try:
 			# Get commit timestamps with timezone info
@@ -1141,12 +1145,12 @@ class GitDataCollector(DataCollector):
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Working pattern analysis failed: {e}')
+				logger.info(f'Warning: Working pattern analysis failed: {e}')
 
 	def _analyzeImpactAndQuality(self):
 		"""Analyze the impact of changes and identify critical files and potential quality issues"""
 		if conf['verbose']:
-			print('Analyzing impact and quality indicators...')
+			logger.info('Analyzing impact and quality indicators...')
 
 		try:
 			# Identify critical files based on common patterns
@@ -1253,12 +1257,12 @@ class GitDataCollector(DataCollector):
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Impact analysis failed: {e}')
+				logger.info(f'Warning: Impact analysis failed: {e}')
 
 	def _calculateTeamPerformanceMetrics(self):
 		"""Calculate comprehensive team performance metrics"""
 		if conf['verbose']:
-			print('Calculating team performance metrics...')
+			logger.info('Calculating team performance metrics...')
 
 		try:
 			total_commits = self.getTotalCommits()
@@ -1349,11 +1353,11 @@ class GitDataCollector(DataCollector):
 
 		except Exception as e:
 			if conf['debug']:
-				print(f'Warning: Team performance calculation failed: {e}')
+				logger.info(f'Warning: Team performance calculation failed: {e}')
 
 	def refine(self):
 		# Calculate comprehensive metrics for all files
-		print('Calculating comprehensive code metrics...')
+		logger.info('Calculating comprehensive code metrics...')
 		self._calculate_comprehensive_project_metrics(getattr(self, 'repository_path', None))
 
 
