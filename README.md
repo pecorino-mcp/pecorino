@@ -24,7 +24,7 @@ Clone the repository recursively (to fetch the MCP SDK submodule) and set up the
 
 ```bash
 # Clone recursively
-git clone --recursive https://github.com/lechibang-1512/pecorino.git
+git clone --recursive https://github.com/pecorino-mcp/pecorino.git
 cd pecorino
 
 # Create and activate virtual environment
@@ -67,9 +67,14 @@ Once connected, your AI assistant can use the following tools:
 ### 1. `/browse`
 Inspects directories, files, or performs a semantic FTS search on the indexed codebase.
 - **Parameters**:
-  - `target` *(string, required)*: Absolute path to the file or directory.
-  - `view` *(string, optional)*: `"summary"` (default), `"classes"`, `"functions"`, `"deps"` (imports), `"tree"` (directory tree), or `"search"` (semantic search).
-  - `query` *(string, optional)*: The search term (required if `view` is `"search"`).
+  - `target` *(string, optional)*: Absolute path to the file or directory. Defaults to the current workspace root.
+  - `view` *(string, optional)*: One of:
+    - **Structure**: `"summary"` (default), `"classes"`, `"functions"`, `"deps"` (imports), `"tree"` (AST/directory tree)
+    - **Search**: `"search"` (semantic FTS), `"code"` (source code retrieval)
+    - **Graph**: `"callers"`, `"callees"`, `"impact"`, `"pagerank"`, `"functional-analysis"`
+  - `query` *(string, optional)*: The search term (required for `search`, `callers`, `callees`, and `code` on directories).
+  - `limit` *(integer, optional)*: Maximum results to return (default: 10).
+  - `offset` *(integer, optional)*: Offset for pagination (default: 0).
 
 ### 2. `/metrics`
 Computes design metrics, cyclomatic complexity, Halstead metrics, or risk hotspots.

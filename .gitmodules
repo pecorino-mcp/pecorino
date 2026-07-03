@@ -21,4 +21,5 @@
 	url = https://github.com/pecorino-mcp/pecorino-utils.git
 [submodule "modules/docs"]
 	path = modules/docs
-	url = https://github.com/pecorino-mcp/pecorino-docs.git
+	url = https://github.com/pecorino-mcp/pecorino-docs
+

@@ -132,6 +132,10 @@ class CodebaseIndexer:
                 return filepath
         return ""
 
+    def _resolve_relative_fallback(self, dep_string: str, source_filepath: str) -> str:
+        """Shared fallback: resolve a relative dep_string against the source file's directory."""
+        return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
+
     def _resolve_dependency(self, dep_string: str, source_filepath: str, file_extension: str) -> str:
         """Enhanced language-specific dependency file resolution."""
         # 1. JS/TS: Relative paths, node_modules, package.json resolution
@@ -184,7 +188,7 @@ class CodebaseIndexer:
                         break
                     curr_dir = os.path.dirname(curr_dir)
             if dep_string.startswith('.'):
-                return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
+                return self._resolve_relative_fallback(dep_string, source_filepath)
             return dep_string
             
         # 2. C/C++: Include paths
@@ -199,7 +203,7 @@ class CodebaseIndexer:
                 if os.path.exists(test_path): return test_path
             found = self._find_file_in_repo(dep_string)
             if found: return found
-            if dep_string.startswith('.'): return local_test
+            if dep_string.startswith('.'): return self._resolve_relative_fallback(dep_string, source_filepath)
             return dep_string
 
         # 3. Python: relative imports (count dots) or absolute
@@ -249,7 +253,7 @@ class CodebaseIndexer:
             found = self._find_file_in_repo(dep_string)
             if found: return found
             if dep_string.startswith('.'):
-                return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
+                return self._resolve_relative_fallback(dep_string, source_filepath)
             return dep_string
             
         # 5. Rust
@@ -264,13 +268,13 @@ class CodebaseIndexer:
             found = self._find_file_in_repo(parts[-1] + '.rs')
             if found: return found
             if dep_string.startswith('.'):
-                return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
+                return self._resolve_relative_fallback(dep_string, source_filepath)
             return dep_string
 
         # 6. Fallback
         else:
             if dep_string.startswith('.'):
-                return os.path.abspath(os.path.join(os.path.dirname(source_filepath), dep_string))
+                return self._resolve_relative_fallback(dep_string, source_filepath)
             parts = dep_string.split('.')
             dep_suffix = "/".join(parts)
             for ext in ['.py', '.java', '.js', '.ts', '.go', '.rs', '.swift']:

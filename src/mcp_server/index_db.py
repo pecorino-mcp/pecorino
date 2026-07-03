@@ -128,6 +128,7 @@ class CodeSearchIndex:
     def __init__(self, db_path: str = None, read_only: bool = False):
         self._conn = None
         self.graph = None
+        self._read_only = read_only
         if db_path is None:
             repo_path = find_repo_root(os.getcwd())
             db_path = get_db_path_for_repo(repo_path)
@@ -158,7 +159,15 @@ class CodeSearchIndex:
                     self._conn.execute("LOAD fts")
                 except Exception:
                     pass
-        self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
+        
+        if not read_only:
+            self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
+
+    def _ensure_graph(self):
+        """Lazily initialize the GorgonzolaGraph for write operations."""
+        if self.graph is None:
+            self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
+        return self.graph
 
     def close(self):
         """Close the underlying database connections."""
@@ -184,11 +193,20 @@ class CodeSearchIndex:
         conn = self._conn
         conn.execute("INSTALL fts")
         conn.execute("LOAD fts")
-        # Drop the index if it exists to rebuild
-        try:
-            conn.execute("PRAGMA drop_fts_index('code_nodes')")
-        except Exception:
-            conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
+        # Drop the index if it exists to rebuild.
+        # CASCADE schema drop is tried first because it handles stale internal
+        # FTS tables (e.g. stopwords) that can cause the pragma to fail.
+        dropped = False
+        for drop_strategy in [
+            lambda: conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE"),
+            lambda: conn.execute("PRAGMA drop_fts_index('code_nodes')"),
+        ]:
+            try:
+                drop_strategy()
+                dropped = True
+                break
+            except Exception:
+                pass
         conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
         try:
             self.clear_fts_dirty()
@@ -299,8 +317,9 @@ class CodeSearchIndex:
         conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
             
         try:
-            with self.graph:
-                self.graph.query_batch([
+            graph = self._ensure_graph()
+            with graph:
+                graph.query_batch([
                     "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda)-[:ACCESSES_STATE]->(v:Variable) DETACH DELETE v",
                     "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda) DETACH DELETE l",
                     "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:Variable) DETACH DELETE v",
@@ -325,7 +344,8 @@ class CodeSearchIndex:
         for i in range(0, len(filepaths), chunk_size):
             chunk = filepaths[i:i+chunk_size]
             try:
-                self.graph.query_batch([
+                graph = self._ensure_graph()
+                graph.query_batch([
                     "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda)-[:ACCESSES_STATE]->(v:Variable) WHERE f.id IN $ids DETACH DELETE v",
                     "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda) WHERE f.id IN $ids DETACH DELETE l",
                     "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:Variable) WHERE f.id IN $ids DETACH DELETE v",
@@ -384,8 +404,9 @@ class CodeSearchIndex:
                 
             if queries:
                 try:
-                    with self.graph:
-                        self.graph.query_batch(queries, params)
+                    graph = self._ensure_graph()
+                    with graph:
+                        graph.query_batch(queries, params)
                 except Exception:
                     pass
 
@@ -409,8 +430,9 @@ class CodeSearchIndex:
             ON MATCH SET f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
         """
         try:
-            with self.graph:
-                self.graph.query(query, {
+            graph = self._ensure_graph()
+            with graph:
+                graph.query(query, {
                     "id": filepath,
                     "name": name,
                     "ext": ext,
@@ -459,8 +481,9 @@ class CodeSearchIndex:
                 pass  # File deleted or inaccessible — stale removal handled elsewhere
         return stale
 
-    def search(self, query: str, limit: int = 10, target_path: str = None) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0) -> List[Dict[str, Any]]:
         """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
+        from src.core.errors import AnalysisError, IndexNotFoundError
         conn = self._conn
         try:
             # Build path filter clause
@@ -476,7 +499,7 @@ class CodeSearchIndex:
                     prefix = target_path if target_path.endswith('/') else f"{target_path}/"
                     path_filter = "AND c.filepath LIKE ?"
                     params.append(f"{prefix}%")
-            params.append(limit)
+            params.extend([limit, offset])
 
             # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the 
             # WHERE clause for filtering and in the SELECT clause to retrieve the score.
@@ -487,7 +510,7 @@ class CodeSearchIndex:
                 WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
                 {path_filter}
                 ORDER BY score DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
             ''', params).fetchall()
             
             results = []
@@ -503,7 +526,12 @@ class CodeSearchIndex:
                 })
             return results
         except Exception as e:
-            return [{"error": str(e), "type": "fts_query_failed"}]
+            err_str = str(e)
+            if "fts_main_code_nodes" in err_str or "Catalog Error" in err_str:
+                raise IndexNotFoundError(
+                    f"Full-text search index has not been built yet. Error details: {err_str}"
+                ) from e
+            raise AnalysisError(f"FTS query failed: {err_str}") from e
 
     def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
         """Get all nodes for a specific file."""

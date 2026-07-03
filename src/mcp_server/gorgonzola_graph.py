@@ -363,7 +363,7 @@ class GorgonzolaGraph:
                         
                     conn.execute("""
                         CALL PROJECT_GRAPH('CodeGraph', 
-                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module'],
+                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable'],
                             ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS']
                         );
                     """)

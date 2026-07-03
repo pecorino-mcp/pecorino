@@ -3,57 +3,83 @@ import threading
 from typing import List, Dict, Any
 from src.mcp_server.index_db import get_db_path_for_repo, find_repo_root
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
+from src.core.errors import AnalysisError
 
 class GraphAPI:
-    def __init__(self, repo_path: str = None):
+    def __init__(self, repo_path: str = None, graph: GorgonzolaGraph = None):
         self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
         self.db_path = get_db_path_for_repo(self.repo_path)
-        self.graph = GorgonzolaGraph(db_path=self.db_path)
+        if graph is not None:
+            self.graph = graph
+            self._owns_graph = False
+        else:
+            self.graph = GorgonzolaGraph(db_path=self.db_path)
+            self._owns_graph = True
         self._pagerank_cache = None
         self._pagerank_lock = threading.Lock()
+
+    def close(self):
+        """Close the graph connection if this instance owns it."""
+        if self._owns_graph and self.graph is not None:
+            try:
+                self.graph.close()
+            except Exception:
+                pass
+            self.graph = None
 
     def invalidate_pagerank_cache(self):
         with self._pagerank_lock:
             self._pagerank_cache = None
 
+    def _safe_query(self, fn):
+        """Run fn() and return (result, None) on success, or (None, error_str) on failure."""
+        try:
+            return fn(), None
+        except Exception as e:
+            return None, str(e)
+
     def get_file_dependencies(self, filepath: str) -> Dict[str, Any]:
         """Query incoming and outgoing file dependencies and PageRank score."""
         rel_depends = "DEPENDS_ON"
-        graph_status = "ok"
         error_msg = None
 
-        incoming_deps = []
+        incoming_deps, err = self._safe_query(
+            lambda: [r["id"] for r in self.graph.query(
+                f"MATCH (other:File)-[:{rel_depends}]->(f:File {{id: $id}}) RETURN other.id AS id",
+                {"id": filepath}
+            )]
+        )
+        if err:
+            incoming_deps = []
+            error_msg = err
+
         outgoing_deps = []
+        if not error_msg:
+            outgoing_deps, err = self._safe_query(
+                lambda: [{"id": r["id"], "type": r["label"] if r.get("label") else "Unknown"} for r in self.graph.query(
+                    f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, label(other) AS label",
+                    {"id": filepath}
+                )]
+            )
+            if err:
+                outgoing_deps = []
+                error_msg = err
+
         pagerank_score = 0.0
-
-        try:
-            inc_res = self.graph.query(f"MATCH (other:File)-[:{rel_depends}]->(f:File {{id: $id}}) RETURN other.id AS id", {"id": filepath})
-            incoming_deps = [r["id"] for r in inc_res]
-        except Exception as e:
-            graph_status = "unavailable"
-            error_msg = str(e)
-
-        if graph_status == "ok":
-            try:
-                out_res = self.graph.query(f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, label(other) AS label", {"id": filepath})
-                outgoing_deps = [{"id": r["id"], "type": r["label"] if r.get("label") else "Unknown"} for r in out_res]
-            except Exception as e:
-                graph_status = "unavailable"
-                error_msg = str(e)
-
-        if graph_status == "ok":
-            try:
+        if not error_msg:
+            def _get_pagerank():
                 with self._pagerank_lock:
                     if self._pagerank_cache is None:
                         pr_scores = self.graph.pagerank()
                         self._pagerank_cache = {pr.get("node_id"): pr.get("score", 0.0) for pr in pr_scores}
-                    pagerank_score = self._pagerank_cache.get(filepath, 0.0)
-            except Exception as e:
-                graph_status = "unavailable"
-                error_msg = str(e)
+                    return self._pagerank_cache.get(filepath, 0.0)
+            pagerank_score, err = self._safe_query(_get_pagerank)
+            if err:
+                pagerank_score = 0.0
+                error_msg = err
 
         res = {
-            "graph_status": graph_status,
+            "graph_status": "ok" if not error_msg else "unavailable",
             "incoming_dependencies": incoming_deps,
             "outgoing_dependencies": outgoing_deps,
             "pagerank_score": pagerank_score
@@ -74,7 +100,7 @@ class GraphAPI:
                     unique_nodes.append(props)
             return unique_nodes
         except Exception as e:
-            return [{"error": str(e), "type": "graph_query_failed"}]
+            raise AnalysisError(f"Graph query failed for '{target_name}': {e}") from e
 
     def find_callers(self, target_name: str) -> List[Dict[str, Any]]:
         """Find all methods/functions that call the target function/method."""
@@ -112,7 +138,7 @@ class GraphAPI:
                     unique_deps.append(dep_props)
             return unique_deps
         except Exception as e:
-            return [{"error": str(e), "type": "graph_query_failed"}]
+            raise AnalysisError(f"Impact analysis failed for '{filepath}': {e}") from e
 
     def resolve_symbols(self):
         """
@@ -199,6 +225,6 @@ class GraphAPI:
                 })
                 
         except Exception as e:
-            result["error"] = str(e)
+            raise AnalysisError(f"Functional purity analysis failed: {e}") from e
             
         return result
