@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 from urllib.parse import unquote
 
-import mcp.types as types
+import mcp_types as types
 from mcp.server import ServerRequestContext
 
 from src.mcp_server.context_helper import PecorinoContext

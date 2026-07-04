@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-import mcp.types as types
+import mcp_types as types
 from mcp.server import ServerRequestContext
 from mcp.server.subscriptions import ToolsListChanged
 
@@ -17,7 +17,6 @@ from src.mcp_server.middleware.security import check_suspicious
 from src.mcp_server.prometheus_metrics import TOOL_CALLS, TOOL_DURATION
 from src.mcp_server.tools.browse import do_browse
 from src.mcp_server.tools.search import do_search
-from src.mcp_server.tools.code import do_get_code
 from src.mcp_server.tools.graph import do_analyze
 from src.mcp_server.tools.metrics_tool import do_metrics
 from src.mcp_server.tools.update_index import do_update_index
@@ -69,47 +68,22 @@ async def handle_list_tools(
         ),
         types.Tool(
             name="search",
-            description="Perform a semantic Full-Text Search (FTS) across the codebase for a symbol or keyword.",
+            description="Search the codebase for symbols or keywords. Can also retrieve source code when include_source=True. Works on both files (returns nodes) and directories (FTS search).",
             input_schema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query or keyword."
+                        "description": "The search query or keyword. Required for directory targets, optional filter for file targets."
                     },
                     "target": {
                         "type": "string",
-                        "description": "Absolute path to search within. Optional."
+                        "description": "Absolute path to search within. Can be a file or directory. Optional."
                     },
-                    "limit": {
-                        "type": "integer",
-                        "default": 10
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "default": 0
-                    },
-                    "allow_external": {
+                    "include_source": {
                         "type": "boolean",
-                        "default": False
-                    }
-                },
-                "required": ["query"]
-            }
-        ),
-        types.Tool(
-            name="get_code",
-            description="Retrieve the source code of a file or search for source code snippets within a directory.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Absolute path to the target directory or file."
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Optional search query to filter symbols within a file, or required query if target is a directory."
+                        "default": False,
+                        "description": "If True, include source code (body_text) in results, capped at 300 lines per result."
                     },
                     "limit": {
                         "type": "integer",
@@ -204,17 +178,6 @@ async def handle_list_tools(
                 },
                 "required": ["query_json"]
             }
-        ),
-        types.Tool(
-            name="set_role",
-            description="Change your role to test dynamic tool lists (e.g. 'admin' vs 'viewer').",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "role": {"type": "string", "description": "The role name to switch to (e.g. 'admin', 'viewer')."}
-                },
-                "required": ["role"]
-            }
         )
     ]
     
@@ -267,13 +230,7 @@ async def handle_call_tool(
 
     TOOL_CALLS.labels(tool=name).inc()
 
-    if name == "set_role":
-        new_role = arguments.get("role", "admin")
-        os.environ["MCP_USER_ROLE"] = new_role
-        await bus.publish(ToolsListChanged())
-        return types.CallToolResult(
-            content=[types.TextContent(type="text", text=f"Role changed to {new_role}. Dynamic tool list updated!")]
-        )
+
 
     try:
         def _normalize_target(t: Any) -> Any:
@@ -333,17 +290,7 @@ async def handle_call_tool(
                 limit=arguments.get("limit", 10),
                 offset=arguments.get("offset", 0),
                 allow_external=arguments.get("allow_external", False),
-                ctx=ctx
-            )
-        elif name == "get_code":
-            target = await _detect_directory(_normalize_target(arguments.get("target")))
-            check_suspicious(target, "target")
-            res = await do_get_code(
-                target=target,
-                query=arguments.get("query"),
-                limit=arguments.get("limit", 10),
-                offset=arguments.get("offset", 0),
-                allow_external=arguments.get("allow_external", False),
+                include_source=arguments.get("include_source", False),
                 ctx=ctx
             )
         elif name == "analyze":

@@ -212,40 +212,44 @@ class CodeSearchIndex:
         conn.execute("LOAD fts")
 
         # --- Phase 1: Drop via pragma (cleanest path) ---
+        drop_success = False
         try:
             conn.execute("PRAGMA drop_fts_index('code_nodes')")
-        except Exception:
-            pass
+            drop_success = True
+        except Exception as e:
+            logger.debug("PRAGMA drop_fts_index failed: %s", e)
 
-        # --- Phase 2: Force-drop the FTS schema and all its internal tables ---
-        try:
-            conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
-        except Exception:
-            pass
+        if not drop_success:
+            # --- Phase 2: Force-drop the FTS schema and all its internal tables ---
+            try:
+                conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
+            except Exception:
+                pass
 
-        # --- Phase 3: Hunt and destroy orphaned FTS internal tables ---
-        # DuckDB's FTS extension creates internal tables (stopwords, docs, fields,
-        # etc.) inside its schema. If the schema drop partially fails or the DB
-        # was corrupted, these can linger and block the next create_fts_index.
-        try:
-            orphans = conn.execute("""
-                SELECT table_name, schema_name
-                FROM information_schema.tables
-                WHERE schema_name LIKE 'fts_main_code_nodes%'
-            """).fetchall()
-            for table_name, schema_name in orphans:
-                try:
-                    conn.execute(f'DROP TABLE IF EXISTS "{schema_name}"."{table_name}" CASCADE')
-                except Exception:
-                    pass
-            # Final attempt to drop the schema if orphans existed
-            if orphans:
-                try:
-                    conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
-                except Exception:
-                    pass
-        except Exception:
-            pass  # information_schema query itself failed — DB is very fresh, nothing to clean
+            # --- Phase 3: Hunt and destroy orphaned FTS internal tables ---
+            # DuckDB's FTS extension creates internal tables (stopwords, docs, fields,
+            # etc.) inside its schema. If the schema drop partially fails or the DB
+            # was corrupted, these can linger and block the next create_fts_index.
+            try:
+                orphans = conn.execute("""
+                    SELECT table_name, schema_name
+                    FROM information_schema.tables
+                    WHERE schema_name LIKE 'fts_main_code_nodes%'
+                """).fetchall()
+                for table_name, schema_name in orphans:
+                    try:
+                        conn.execute(f'DROP TABLE IF EXISTS "{schema_name}"."{table_name}" CASCADE')
+                    except Exception:
+                        pass
+                # Final attempt to drop the schema if orphans existed
+                if orphans:
+                    try:
+                        conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # information_schema query itself failed — DB is very fresh, nothing to clean
+
 
         # --- Phase 3.5: Commit cleanup before re-creation ---
         # DuckDB's FTS extension creates internal tables (stopwords, docs, etc.)
@@ -253,6 +257,14 @@ class CodeSearchIndex:
         # re-creating the FTS index within the same implicit transaction causes a
         # "Could not commit creation of dependency, subject has been deleted" error.
         # Force a commit boundary so the catalog is clean before create_fts_index.
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            conn.execute("COMMIT")
+        except Exception:
+            pass
         try:
             conn.execute("CHECKPOINT")
         except Exception:

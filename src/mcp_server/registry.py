@@ -29,7 +29,7 @@ class RegistryDB:
                     name VARCHAR,
                     duckdb_path VARCHAR,
                     kuzu_path VARCHAR,
-                    last_indexed TIMESTAMP DEFAULT current_timestamp
+                    last_indexed TIMESTAMP DEFAULT now()
                 )
             ''')
 
@@ -42,11 +42,11 @@ class RegistryDB:
         with self._get_conn() as conn:
             conn.execute('''
                 INSERT INTO repositories (hash, repo_path, name, duckdb_path, kuzu_path, last_indexed)
-                VALUES (?, ?, ?, ?, ?, current_timestamp)
+                VALUES (?, ?, ?, ?, ?, now())
                 ON CONFLICT (hash) DO UPDATE SET
                     duckdb_path = excluded.duckdb_path,
                     kuzu_path = excluded.kuzu_path,
-                    last_indexed = current_timestamp
+                    last_indexed = now()
             ''', (hash_str, str(resolved), name, duckdb_path, kuzu_path))
 
     def get_all_repos(self) -> List[Dict[str, str]]:

@@ -32,8 +32,15 @@ class FederatedGraphAPI(GraphAPI):
                 return
 
             # Otherwise, build a new one
-            logger.info("Building federated in-memory graph for %d repositories...", len(repos))
-            in_memory_graph = GorgonzolaGraph(":memory:")
+            logger.info("Building federated graph for %d repositories...", len(repos))
+            from src.mcp_server.config import settings
+            federated_path = os.path.join(settings.index_dir, "federated_kuzu")
+            
+            # Wipe old federated graph to rebuild cleanly
+            if os.path.exists(federated_path):
+                shutil.rmtree(federated_path, ignore_errors=True)
+                
+            in_memory_graph = GorgonzolaGraph(federated_path)
             # Ensure schema is created
             with in_memory_graph:
                 pass

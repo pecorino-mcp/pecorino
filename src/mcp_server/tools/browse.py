@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 
 _fts_rebuild_lock = threading.Lock()
 
-ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree", "search",
-                           "callers", "callees", "impact", "pagerank", "functional-analysis", "code"})
+ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree"})
 MAX_LIMIT = 100
 MAX_DEPTH = 10
 MAX_QUERY_LEN = 200

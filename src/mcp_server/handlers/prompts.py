@@ -2,7 +2,7 @@ import glob
 import logging
 import os
 
-import mcp.types as types
+import mcp_types as types
 from mcp.server import ServerRequestContext
 
 from src.core.constants import SUPPORTED_EXTENSIONS as SUPPORTED
@@ -25,10 +25,11 @@ async def handle_list_prompts(
             ),
             types.Prompt(
                 name="search",
-                description="Perform a semantic Full-Text Search (FTS) across the codebase for a symbol or keyword.",
+                description="Search the codebase for symbols or keywords. Use include_source=True to retrieve source code.",
                 arguments=[
-                    types.PromptArgument(name="query", description="The search query or keyword", required=True),
-                    types.PromptArgument(name="target", description="Target path", required=False)
+                    types.PromptArgument(name="query", description="The search query or keyword", required=False),
+                    types.PromptArgument(name="target", description="Target path (file or directory)", required=False),
+                    types.PromptArgument(name="include_source", description="Include source code in results", required=False)
                 ]
             ),
             types.Prompt(
