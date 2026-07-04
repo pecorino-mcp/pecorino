@@ -20,8 +20,8 @@ def _get_cached_api(repo_root: str, db_path: str, api_type: str):
         from src.mcp_server.index_db import CodeSearchIndex
         new_api = CodeSearchIndex(db_path=db_path, read_only=True)
     elif api_type == "graph":
-        from src.mcp_server.graph_api import GraphAPI
-        new_api = GraphAPI(repo_path=repo_root)
+        from src.mcp_server.federated_graph import FederatedGraphAPI
+        new_api = FederatedGraphAPI(repo_root)
         
     with _API_CACHE_LOCK:
         if key in _API_CACHE:

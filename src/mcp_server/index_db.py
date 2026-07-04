@@ -138,6 +138,19 @@ class CodeSearchIndex:
         
         try:
             self._conn = duckdb.connect(self.db_path, read_only=read_only)
+            
+            # ATTACH other repos for federated querying if we are in read-only mode
+            if read_only:
+                try:
+                    from src.mcp_server.registry import registry
+                    for repo in registry.get_all_repos():
+                        if repo['duckdb_path'] != self.db_path:
+                            try:
+                                self._conn.execute(f"ATTACH '{repo['duckdb_path']}' AS repo_{repo['hash']} (READ_ONLY)")
+                            except Exception as e:
+                                logger.warning(f"Failed to attach repo {repo['name']} for federated query: {e}")
+                except Exception as e:
+                    logger.debug(f"Could not load registry for ATTACH: {e}")
         except duckdb.IOException as e:
             if not read_only and "not a valid DuckDB database file" in str(e):
                 logger.warning("Corrupted DuckDB file detected, removing and recreating: %s", e)
