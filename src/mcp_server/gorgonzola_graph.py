@@ -319,11 +319,7 @@ class GorgonzolaGraph:
                 copy_query = f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
                 self._write_and_copy_csv(conn, csv_path, rows, copy_query)
             except Exception as e:
-                logger.info(
-                    f"[ERROR] Failed to COPY edges {src_label}-[:{rel_type}]->{dst_label}: {e}",
-                    file=sys.stderr,
-                )
-                sys.stderr.flush()
+                logger.error("Failed to COPY edges %s-[:%s]->%s: %s", src_label, rel_type, dst_label, e)
 
     def query_batch(self, queries, parameters=None):
         """Execute multiple queries within a single connection."""
@@ -385,6 +381,5 @@ class GorgonzolaGraph:
                         
             return results
         except Exception as e:
-            sys.stderr.write(f"[WARNING] PageRank calculation failed: {e}\n")
-            sys.stderr.flush()
+            logger.warning("PageRank calculation failed: %s", e)
             return []

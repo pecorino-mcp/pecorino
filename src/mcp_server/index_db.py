@@ -234,6 +234,17 @@ class CodeSearchIndex:
         except Exception:
             pass  # information_schema query itself failed — DB is very fresh, nothing to clean
 
+        # --- Phase 3.5: Commit cleanup before re-creation ---
+        # DuckDB's FTS extension creates internal tables (stopwords, docs, etc.)
+        # that are tracked as catalog dependencies. Dropping them and immediately
+        # re-creating the FTS index within the same implicit transaction causes a
+        # "Could not commit creation of dependency, subject has been deleted" error.
+        # Force a commit boundary so the catalog is clean before create_fts_index.
+        try:
+            conn.execute("CHECKPOINT")
+        except Exception:
+            pass
+
         # --- Phase 4: Create fresh index ---
         conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
 

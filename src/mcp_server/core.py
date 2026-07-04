@@ -20,8 +20,10 @@ logger = logging.getLogger(__name__)
 bus = InMemorySubscriptionBus()
 from mcp.server import Server, ServerRequestContext
 
+from src.mcp_server.context_helper import PecorinoContext
+from src.mcp_server.middleware.input_required import InputRequiredMiddleware
 from src.core.gitdatacollector import GitDataCollector
-from src.mcp_server.metrics import TOOL_CALLS, TOOL_DURATION, TOOL_ERRORS
+from src.mcp_server.prometheus_metrics import TOOL_CALLS, TOOL_DURATION, TOOL_ERRORS
 from src.metrics.hotspot import HotspotDetector
 from src.metrics.maintainability import (
     calculate_halstead_metrics,
@@ -41,10 +43,14 @@ workspace_root = Path(__file__).resolve().parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-# --- Security constants ---
-ALLOWED_OUTPUT = workspace_root / ".mcp_outputs"
-ALLOWED_OUTPUT.mkdir(exist_ok=True)
-MAX_READ_BYTES = 1_000_000  # 1 MB
+# --- Security constants (Moved to middleware/security.py) ---
+from src.mcp_server.middleware.security import (
+    ALLOWED_OUTPUT,
+    MAX_READ_BYTES,
+    STRICT_INJECTION_CHECK,
+    SUSPICIOUS_PATTERNS
+)
+
 ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree", "search",
                            "callers", "callees", "impact", "pagerank", "functional-analysis", "code"})
 ALLOWED_WHAT = frozenset({"oop", "complexity", "hotspots", "all"})
@@ -54,9 +60,6 @@ MAX_DEPTH = 10
 MAX_QUERY_LEN = 200
 MAX_CODE_LINES = 300  # Max lines of source code returned per result in 'code' view
 INDEX_TIMEOUT_S = 300  # 5 minutes
-SUSPICIOUS_PATTERNS = ("ignore previous", "system prompt", "you are now",
-                       "disregard", "forget your instructions")
-STRICT_INJECTION_CHECK = os.getenv("PECORINO_STRICT_INJECTION_CHECK", "").lower() in ("true", "1", "yes")
 
 from src.mcp_server.config import settings
 from src.core.errors import (
@@ -69,245 +72,24 @@ from src.core.errors import (
 from src.mcp_server.errors import handle_mcp_error
 
 
+from src.mcp_server.middleware.security import (
+    is_project_workspace,
+    is_safe_path,
+    safe_path,
+    safe_output_path,
+    read_limited,
+    check_suspicious
+)
 
-def is_project_workspace(path: Path) -> bool:
-    """Check if the path resides inside a project workspace.
-    
-    A project workspace is defined as any directory that contains common project 
-    marker files/folders (like .git, .vscode, package.json, pyproject.toml) in its hierarchy.
-    """
-    try:
-        current = path if path.is_dir() else path.parent
-        visited = set()
-        
-        while current and current != current.parent:
-            current_resolved = current.resolve()
-            if current_resolved in visited:
-                break
-            visited.add(current_resolved)
-            
-            if (current / ".git").is_dir() or (current / ".vscode").is_dir() or (current / ".idea").is_dir():
-                return True
-                
-            for marker in ("pyproject.toml", "package.json", "Cargo.toml", "go.mod", "Makefile", "requirements.txt", "setup.py"):
-                if (current / marker).is_file():
-                    return True
-                    
-            current = current.parent
-            
-        return False
-    except Exception:
-        return False
-
-
-def is_safe_path(p: str, allow_external: bool = False) -> bool:
-    """Validate path safety with optional external access.
-    
-    Allows:
-    1. Paths within settings.workspace_root.
-    2. Paths within the current working directory (Path.cwd()).
-    3. Paths inside recognized project workspaces (checked via is_project_workspace).
-    4. Allowlisted external paths if allow_external=True.
-    """
-    try:
-        target = Path(p).expanduser().resolve()
-        
-        # 1. Check if within workspace (always allowed)
-        if target.is_relative_to(settings.workspace_root):
-            return True
-            
-        # 2. Check if within current working directory (always allowed)
-        try:
-            if target.is_relative_to(Path.cwd().resolve()):
-                return True
-        except (ValueError, RuntimeError):
-            pass
-
-        # 3. Check if inside a project workspace
-        if is_project_workspace(target):
-            return True
-
-        # 4. External access checks when allow_external=True
-        if allow_external:
-            # Allowlist model: only roots set via PECORINO_ALLOWED_EXTERNAL_DIRS
-            if not settings.allowed_external_roots:
-                return False
-            for allowed_root in settings.allowed_external_roots:
-                try:
-                    if target.is_relative_to(allowed_root):
-                        return True
-                except ValueError:
-                    continue
-            return False
-        
-        return False
-    except Exception:
-        return False
-
-
-def safe_path(p: str, allow_external: bool = False) -> Path:
-    """Resolve and validate a path, ensuring it's safe."""
-    if not p:
-        p = "."
-    path = Path(p).expanduser().resolve()
-
-    if not path.exists():
-        raise TargetNotFoundError(f"Not found: {path}")
-
-    # Must be safe (no directory traversal out of workspace roots).
-    # Note: resolve() above already followed any symlinks, so the
-    # validated path is the final real path — no separate symlink check needed.
-    if not is_safe_path(str(path), allow_external):
-        raise SecurityValidationError(f"Path outside allowed workspace: {path}")
-
-    return path
-
-
-def safe_output_path(p: str) -> Path:
-    """Validate output path — must be a relative filename (placed in ALLOWED_OUTPUT)
-    or an absolute path already under ALLOWED_OUTPUT."""
-    if Path(p).is_absolute():
-        out = Path(p).resolve()
-    else:
-        out = (ALLOWED_OUTPUT / Path(p).name).resolve()
-    if not out.is_relative_to(ALLOWED_OUTPUT):
-        raise SecurityValidationError(
-            f"output_file must be a relative filename (written to {ALLOWED_OUTPUT}) "
-            f"or an absolute path under {ALLOWED_OUTPUT}. Got: {p}"
-        )
-    return out
-
-
-def read_limited(p: Path) -> str:
-    """Read file content with a hard size cap to prevent DoS."""
-    with p.open('rb') as f:
-        data = f.read(MAX_READ_BYTES + 1)
-    if len(data) > MAX_READ_BYTES:
-        raise SecurityValidationError(f"File too large (>{MAX_READ_BYTES} bytes): {p.name}")
-    return data.decode('utf-8', errors='ignore')
-
-_API_CACHE_MAX_SIZE = 10
-_API_CACHE = collections.OrderedDict()
-_API_CACHE_LOCK = threading.Lock()
-
-def _get_cached_api(repo_root: str, db_path: str, api_type: str):
-    if api_type not in ALLOWED_API_TYPES:
-        raise ValueError(f"Invalid api_type: {api_type}")
-    key = (db_path, api_type)
-    with _API_CACHE_LOCK:
-        if key in _API_CACHE:
-            _API_CACHE.move_to_end(key)
-            return _API_CACHE[key]
-        
-    if api_type == "index":
-        from src.mcp_server.index_db import CodeSearchIndex
-        new_api = CodeSearchIndex(db_path=db_path, read_only=True)
-    elif api_type == "graph":
-        from src.mcp_server.graph_api import GraphAPI
-        new_api = GraphAPI(repo_path=repo_root)
-        
-    with _API_CACHE_LOCK:
-        if key in _API_CACHE:
-            if hasattr(new_api, 'close'):
-                new_api.close()
-            return _API_CACHE[key]
-        _API_CACHE[key] = new_api
-        
-        if len(_API_CACHE) > _API_CACHE_MAX_SIZE:
-            oldest_key, oldest_api = _API_CACHE.popitem(last=False)
-            if hasattr(oldest_api, 'close'):
-                try:
-                    oldest_api.close()
-                except Exception:
-                    pass
-                
-    return new_api
-
-def clear_api_cache():
-    with _API_CACHE_LOCK:
-        while _API_CACHE:
-            _, api = _API_CACHE.popitem()
-            if hasattr(api, 'close'):
-                try:
-                    api.close()
-                except Exception:
-                    pass
-
-def clear_index_cache():
-    """Clear only CodeSearchIndex (DuckDB) cache entries, preserving GraphAPI.
-
-    This avoids destroying the GraphAPI's PageRank cache on every auto-sync,
-    which would force expensive recomputation on the next pagerank view.
-    """
-    with _API_CACHE_LOCK:
-        keys_to_remove = [k for k in _API_CACHE if k[1] == "index"]
-        for k in keys_to_remove:
-            api = _API_CACHE.pop(k)
-            if hasattr(api, 'close'):
-                try:
-                    api.close()
-                except Exception:
-                    pass
-        # Invalidate pagerank cache on any remaining GraphAPI instances
-        for k, api in _API_CACHE.items():
-            if k[1] == "graph" and hasattr(api, 'invalidate_pagerank_cache'):
-                api.invalidate_pagerank_cache()
+from src.mcp_server.middleware.caching import (
+    _get_cached_api,
+    clear_api_cache,
+    clear_index_cache
+)
 
 # Core implementation of tools (without decorators)
 
-async def _auto_sync_stale(repo_root: str, db_path: str, scope_path: str):
-    """Detect and re-index files whose on-disk mtime is newer than indexed mtime.
-
-    Runs inline before browse queries to ensure the index reflects current disk state.
-    Protected by a lock to prevent concurrent reindexing of the same files.
-    """
-    import hashlib
-    from src.mcp_server.index_db import CodeSearchIndex
-
-    def _sync():
-        with _auto_sync_lock:
-            check_index = CodeSearchIndex(db_path=db_path, read_only=True)
-            try:
-                stale_files = check_index.get_stale_files(scope_path)
-            finally:
-                check_index.close()
-
-            if not stale_files:
-                return 0
-
-            sys.stderr.write(f"[INFO] Auto-sync: {len(stale_files)} stale file(s) detected, re-indexing...\n")
-            sys.stderr.flush()
-
-            from src.mcp_server.index_pipeline import CodebaseIndexer
-
-            # Must close cached read-only connections before opening a write connection —
-            # DuckDB doesn't allow mixing read_only and read_write to the same file.
-            clear_index_cache()
-
-            indexer = CodebaseIndexer(repo_path=repo_root)
-            try:
-                for filepath in stale_files:
-                    try:
-                        content = Path(filepath).read_text(encoding='utf-8', errors='ignore')
-                        ext = os.path.splitext(filepath)[1]
-                        indexer.index_file(filepath, content, ext, rebuild_fts=False)
-                        mtime = os.path.getmtime(filepath)
-                        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
-                        lang = ext.lstrip('.')
-                        indexer.search_index.upsert_file_hash(filepath, content_hash, mtime, lang)
-                    except Exception as e:
-                        sys.stderr.write(f"[WARNING] Auto-sync failed for {filepath}: {e}\n")
-                        sys.stderr.flush()
-            finally:
-                indexer.close()
-
-            return len(stale_files)
-
-    synced = await asyncio.to_thread(_sync)
-    if synced:
-        # Clear cached read-only DuckDB connections so they pick up the new data.
-        # Preserves GraphAPI (and its PageRank cache) — only invalidates pagerank scores.
-        clear_index_cache()
+from src.mcp_server.middleware.sync import _auto_sync_stale
 
 async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False) -> dict:
     # --- Input validation ---
@@ -410,8 +192,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             with _fts_rebuild_lock:
                 # Double-check after acquiring lock
                 if not index.has_fts_index() or index.is_fts_dirty():
-                    sys.stderr.write(f"[INFO] Lazy FTS rebuild triggered for {db_path}\n")
-                    sys.stderr.flush()
+                    logger.info("Lazy FTS rebuild triggered for %s", db_path)
                     # Must close read-only connections before opening a write connection —
                     # DuckDB doesn't allow mixing read_only and read_write to the same file.
                     clear_index_cache()
@@ -643,8 +424,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             else:  # view == "deps"
                 result["graph_metrics"] = graph_metrics
         except Exception as e:
-            sys.stderr.write(f"[WARNING] Graph database query failed: {e}\n")
-            sys.stderr.flush()
+            logger.warning("Graph database query failed: %s", e)
 
     if output_file:
         try:
@@ -653,8 +433,7 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
                 json.dump(result, f, indent=2)
             output_file = str(out_path)  # Use safe path in results
         except Exception as e:
-            sys.stderr.write(f"[ERROR] Failed to write browse output: {e}\n")
-            sys.stderr.flush()
+            logger.error("Failed to write browse output: %s", e)
 
         # Create a summarized version of result to return to the LLM
         summary_result = {"saved_to": output_file}
@@ -906,19 +685,14 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
                             start_time=start_time
                         )
                         
-                        if ctx:
-                            try:
-                                await ctx.report_progress(
-                                    progress=current,
-                                    total=total,
-                                    message=msg
-                                )
-                            except Exception as e:
-                                sys.stderr.write(f"[WARNING] Failed to send progress notification: {e}\n")
-                                sys.stderr.flush()
+                        helper = PecorinoContext(ctx)
+                        await helper.report_progress(
+                            progress=current,
+                            total=total,
+                            message=msg
+                        )
                 except Exception as e:
-                    sys.stderr.write(f"[WARNING] Subprocess parse error: {e} for line: {line_str}\n")
-                    sys.stderr.flush()
+                    logger.warning("Subprocess parse error: %s for line: %s", e, line_str)
 
         async def read_stderr():
             while True:
@@ -927,8 +701,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
                     break
                 line_str = line.decode('utf-8', errors='ignore').strip()
                 if line_str:
-                    sys.stderr.write(f"[INDEX WORKER LOG] {line_str}\n")
-                    sys.stderr.flush()
+                    logger.debug("[index worker] %s", line_str)
 
         try:
             await asyncio.wait_for(
@@ -946,14 +719,12 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
 
         # Surface FTS errors from the subprocess
         if final_res.get("status") == "partial" and final_res.get("fts_error"):
-            sys.stderr.write(f"[WARNING] FTS index rebuild failed: {final_res['fts_error']}\n")
-            sys.stderr.flush()
+            logger.warning("FTS index rebuild failed: %s", final_res['fts_error'])
         try:
             summary_res = await do_browse(target=path.as_posix(), view="summary")
             final_res["summary"] = summary_res.get("structure", summary_res)
         except Exception as e:
-            sys.stderr.write(f"[WARNING] Failed to generate summary after indexing: {e}\n")
-            sys.stderr.flush()
+            logger.warning("Failed to generate summary after indexing: %s", e)
             
         return final_res
 
@@ -972,8 +743,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
         summary_res = await do_browse(target=path.as_posix(), view="summary")
         res["summary"] = summary_res.get("structure", summary_res)
     except Exception as e:
-        sys.stderr.write(f"[WARNING] Failed to generate summary after indexing: {e}\n")
-        sys.stderr.flush()
+        logger.warning("Failed to generate summary after indexing: %s", e)
     return res
 
 
@@ -992,7 +762,8 @@ async def handle_list_tools(
     ctx: ServerRequestContext,
     params: types.PaginatedRequestParams | None = None
 ) -> types.ListToolsResult:
-    role = getattr(ctx, "lifespan_context", {}).get("user_role", "admin")
+    helper = PecorinoContext(ctx)
+    role = helper.role
     
     tools = [
         types.Tool(
@@ -1114,6 +885,8 @@ async def handle_call_tool(
 ) -> types.CallToolResult:
     name = params.name
     arguments = params.arguments or {}
+    input_responses = getattr(params, "input_responses", {}) or {}
+    helper = PecorinoContext(ctx, input_responses=input_responses)
     start_time = time.time()
 
     safe_args = json.dumps(arguments, ensure_ascii=True)[:2000]
@@ -1147,35 +920,43 @@ async def handle_call_tool(
         async def _detect_directory(t: Any) -> str:
             """Resolve empty/None/dot targets to a real workspace path."""
             if t is None or (isinstance(t, str) and (not t.strip() or t.strip() == ".")):
-                # Fall back to workspace_root if configured or if cwd is not a git repository
+                # 1. Try to get roots from the client
+                try:
+                    roots = await helper.require_roots()
+                    if roots and isinstance(roots, list) and len(roots) > 0:
+                        first_root = roots[0]
+                        uri = getattr(first_root, "uri", None)
+                        if uri is None and isinstance(first_root, dict):
+                            uri = first_root.get("uri")
+                        if uri and uri.startswith("file://"):
+                            from urllib.parse import unquote
+                            path = unquote(uri[7:])
+                            logger.info("Using client root fallback: %s", path)
+                            return path
+                except Exception as e:
+                    if type(e).__name__ == "NeedsInputError":
+                        raise e
+                    logger.warning("Failed to get client roots: %s", e)
+
+                # 2. Fall back to workspace_root if configured or if cwd is not a git repository
                 cwd = os.getcwd()
                 from src.mcp_server.index_db import find_repo_root
                 fallback = find_repo_root(cwd)
                 # If resolved fallback doesn't look like a git repo/project but workspace_root does, use workspace_root
                 if not (Path(fallback) / ".git").is_dir() and (settings.workspace_root / ".git").is_dir():
                     fallback = str(settings.workspace_root)
-                sys.stderr.write(f"[INFO] Using repo_root fallback: {fallback}\n")
-                sys.stderr.flush()
+                logger.info("Using repo_root fallback: %s", fallback)
                 return fallback
             return str(t) if not isinstance(t, str) else t
-
-        def _check_suspicious(value: str, param_name: str) -> None:
-            """Reject values containing patterns that look like prompt injection.
-            Gated behind PECORINO_STRICT_INJECTION_CHECK env var (disabled by default).
-            The output wrapping instruction is the primary mitigation."""
-            if not STRICT_INJECTION_CHECK:
-                return
-            if isinstance(value, str) and any(s in value.lower() for s in SUSPICIOUS_PATTERNS):
-                raise SecurityValidationError(f"Potential prompt injection detected in {param_name}")
 
         if name == "browse":
             target = await _detect_directory(_normalize_target(arguments.get("target")))
             if not isinstance(target, str):
                 raise SecurityValidationError("target must be a string")
-            _check_suspicious(target, "target")
+            check_suspicious(target, "target")
             query = arguments.get("query")
             if query:
-                _check_suspicious(query, "query")
+                check_suspicious(query, "query")
             res = await do_browse(
                 target=target,
                 view=arguments.get("view", "summary"),
@@ -1190,12 +971,12 @@ async def handle_call_tool(
             target = await _detect_directory(_normalize_target(arguments.get("target")))
             if not isinstance(target, str):
                 raise SecurityValidationError("target must be a string")
-            _check_suspicious(target, "target")
+            check_suspicious(target, "target")
             output_path = arguments.get("output_path")
             if output_path:
                 if not isinstance(output_path, str):
                     raise SecurityValidationError("output_path must be a string")
-                _check_suspicious(output_path, "output_path")
+                check_suspicious(output_path, "output_path")
             res = await do_metrics(
                 target=target,
                 what=arguments.get("what", ["all"]),
@@ -1206,7 +987,7 @@ async def handle_call_tool(
             target = await _detect_directory(_normalize_target(arguments.get("target")))
             if not isinstance(target, str):
                 raise SecurityValidationError("target must be a string")
-            _check_suspicious(target, "target")
+            check_suspicious(target, "target")
             res = await do_update_index(
                 target=target,
                 ctx=ctx,
@@ -1216,8 +997,7 @@ async def handle_call_tool(
             raise SecurityValidationError(f"Unknown tool: {name}")
 
         duration = time.time() - start_time
-        sys.stderr.write(f"[INFO] MCP Tool Success: '{name}' in {duration:.4f}s\n")
-        sys.stderr.flush()
+        logger.info("MCP Tool Success: '%s' in %.4fs", name, duration)
 
         TOOL_DURATION.labels(tool=name).observe(duration)
 
@@ -1367,6 +1147,7 @@ server = Server(
     on_subscriptions_listen=ListenHandler(bus),
 )
 server.middleware.append(RoleMiddleware())
+server.middleware.append(InputRequiredMiddleware())
 
 
 

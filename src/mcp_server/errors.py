@@ -1,3 +1,4 @@
+import logging
 import sys
 import time
 import traceback
@@ -9,7 +10,9 @@ from src.core.errors import (
     IndexNotFoundError,
     AnalysisError
 )
-from src.mcp_server.metrics import TOOL_ERRORS, TOOL_DURATION
+from src.mcp_server.prometheus_metrics import TOOL_ERRORS, TOOL_DURATION
+
+logger = logging.getLogger(__name__)
 
 def handle_mcp_error(tool_name: str, error: Exception, start_time: float) -> types.CallToolResult:
     """
@@ -20,12 +23,10 @@ def handle_mcp_error(tool_name: str, error: Exception, start_time: float) -> typ
     TOOL_DURATION.labels(tool=tool_name).observe(duration)
     TOOL_ERRORS.labels(tool=tool_name).inc()
 
-    # Log to stderr
-    sys.stderr.write(f"[ERROR] MCP Tool Failure: '{tool_name}' after {duration:.4f}s - Error: {str(error)}\n")
+    logger.error("MCP Tool Failure: '%s' after %.4fs - Error: %s", tool_name, duration, error)
     # Only print full stack trace for unexpected internal errors (non-PecorinoError exceptions)
     if not isinstance(error, PecorinoError):
         traceback.print_exc(file=sys.stderr)
-    sys.stderr.flush()
 
     if isinstance(error, SecurityValidationError):
         msg = f"Security Policy Violation: {str(error)}"
