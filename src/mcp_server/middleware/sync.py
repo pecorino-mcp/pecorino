@@ -20,6 +20,12 @@ async def _auto_sync_stale(repo_root: str, db_path: str, scope_path: str):
 
     def _sync():
         with _auto_sync_lock:
+            # If the proactive background watcher is running, it handles stale files 
+            # as they change. No need to block queries with an inline check.
+            from src.mcp_server.middleware.file_watcher import get_file_watcher
+            if get_file_watcher() is not None:
+                return 0
+
             check_index = CodeSearchIndex(db_path=db_path, read_only=True)
             try:
                 stale_files = check_index.get_stale_files(scope_path)

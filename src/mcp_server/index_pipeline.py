@@ -520,19 +520,24 @@ class CodebaseIndexer:
             logger.debug(traceback.format_exc())
             return None
 
-    def _post_process_recursion(self):
-        """Find recursive self-calls and add RECURSES_TO relationships."""
+    def _post_process_graph(self):
+        """Find recursive self-calls and resolve Symbol nodes to Method/Function for dynamic languages."""
         queries = [
             "MATCH (m:Method)-[r:RECURSES_TO]->(m) DELETE r",
             "MATCH (f:Function)-[r:RECURSES_TO]->(f) DELETE r",
             "MATCH (m:Method)-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
-            "MATCH (f:Function)-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)"
+            "MATCH (f:Function)-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
+            # Resolve CALLS to Symbol nodes into direct CALLS to Method nodes (e.g. for dynamic languages like Python)
+            "MATCH (caller:Method)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:Method)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)"
         ]
         try:
             with self.graph:
                 self.graph.query_batch(queries)
         except Exception as e:
-            logger.warning("Failed to post-process recursion: %s", e)
+            logger.warning("Failed to post-process graph: %s", e)
             logger.debug(traceback.format_exc())
 
     def index_directory(self, dirpath: str, progress_callback=None) -> dict:
@@ -779,7 +784,7 @@ class CodebaseIndexer:
             with self.graph:
                 self.search_index.clear_files_bulk(stale_files)
                 
-        self._post_process_recursion()
+        self._post_process_graph()
 
         fts_error = None
         try:

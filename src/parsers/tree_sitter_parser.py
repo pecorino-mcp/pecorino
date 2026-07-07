@@ -1049,8 +1049,28 @@ def parse_with_tree_sitter(source: str, extension: str) -> Optional[Any]:
 
     extractor = TreeSitterExtractor(source_bytes, language, lang_obj=lang_obj)
     extractor.extract_with_queries(tree.root_node)
+    
+    module = extractor.module
+    
+    # Apply language-specific strategy if available to extract richer semantics
+    from src.parsers.strategies import StrategyFactory
+    strategy = StrategyFactory.get_strategy(ts_lang_name)
+    if strategy:
+        # We replace the flat lists of classes/functions with the strategy's output
+        # TreeSitterExtractor still handles imports, attributes, and control flow
+        try:
+            # We use an empty filepath string here to match original parser behavior,
+            # CodeSearchIndex adds the actual filepath later in the pipeline
+            new_classes = strategy.extract_classes(tree, source_bytes, "")
+            new_functions = strategy.extract_functions(tree, source_bytes, "")
+            if new_classes or new_functions:
+                module.classes = new_classes
+                module.functions = new_functions
+        except Exception:
+            # Fallback to the generic TreeSitterExtractor if strategy fails
+            pass
 
-    return extractor.module
+    return module
 
 def get_raw_tree_sitter_tree(source: str, extension: str) -> Optional[Any]:
     """Returns the raw tree-sitter Tree object, used for Halstead metrics."""

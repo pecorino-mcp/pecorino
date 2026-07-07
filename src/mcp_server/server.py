@@ -2,6 +2,7 @@ import logging
 import sys
 import asyncio
 import argparse
+import signal
 from pathlib import Path
 
 # Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
@@ -9,12 +10,33 @@ workspace_root = Path(__file__).resolve().parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-
 from src.mcp_server.config import settings
 from src.mcp_server.core import server as mcp_server
 
 logger = logging.getLogger(__name__)
 
+def _setup_signal_handlers():
+    """Setup signal handlers for multi-session stability."""
+    def sigint_handler(signum, frame):
+        logger.warning("Received SIGINT - ignoring for multi-session stability")
+
+    def sigterm_handler(signum, frame):
+        logger.info("Received SIGTERM - shutting down gracefully")
+        
+        # Stop file watcher if running
+        from src.mcp_server.middleware.file_watcher import get_file_watcher
+        watcher = get_file_watcher()
+        if watcher:
+            watcher.stop()
+            
+        sys.exit(0)
+
+    if hasattr(signal, 'SIGINT'):
+        signal.signal(signal.SIGINT, sigint_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, sigterm_handler)
+
+_setup_signal_handlers()
 
 def main():
     parser = argparse.ArgumentParser(description="Run OOP Metrics Analyzer Server")
@@ -34,6 +56,14 @@ def main():
 
     # Removed global safe startup migration to prevent blocking MCP server startup.
     # Individual databases are migrated lazily in CodeSearchIndex.__init__().
+
+    # Start the background file watcher on the current workspace root
+    try:
+        from src.mcp_server.middleware.file_watcher import init_file_watcher
+        watcher = init_file_watcher(settings.workspace_root)
+        watcher.start()
+    except Exception as e:
+        logger.warning(f"Failed to start file watcher: {e}")
 
     if settings.transport == "stdio":
         from src.transports.stdio_adapter import run_stdio
