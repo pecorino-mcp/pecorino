@@ -38,7 +38,13 @@ class FederatedGraphAPI(GraphAPI):
             
             # Wipe old federated graph to rebuild cleanly
             if os.path.exists(federated_path):
-                shutil.rmtree(federated_path, ignore_errors=True)
+                if os.path.isdir(federated_path):
+                    shutil.rmtree(federated_path, ignore_errors=True)
+                else:
+                    try:
+                        os.remove(federated_path)
+                    except OSError:
+                        pass
                 
             in_memory_graph = GorgonzolaGraph(federated_path)
             # Ensure schema is created
@@ -48,12 +54,28 @@ class FederatedGraphAPI(GraphAPI):
             temp_dir = tempfile.mkdtemp(prefix="pecorino_federated_")
             try:
                 node_tables = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module", "ControlFlow", "Lambda", "Variable"]
-                rel_tables = ["CONTAINS", "CONTAINS_LAMBDA", "EXTENDS", "IMPLEMENTS", "CALLS", "RECURSES_TO", "DEPENDS_ON", "ACCESSES_STATE"]
+                
+                from src.mcp_server.gorgonzola_graph import _RELATIONSHIP_SCHEMA
+                rel_pairs = {}
+                rel_tables = []
+                for schema in _RELATIONSHIP_SCHEMA:
+                    table_name = schema.split("CREATE REL TABLE ")[1].split(" (")[0]
+                    rel_tables.append(table_name)
+                    pairs_str = schema.split("(")[1].split(")")[0].split(",")
+                    parsed_pairs = []
+                    for pair in pairs_str:
+                        parts = pair.strip().split(" ")
+                        if len(parts) >= 4 and parts[0] == "FROM" and parts[2] == "TO":
+                            parsed_pairs.append((parts[1], parts[3]))
+                    rel_pairs[table_name] = parsed_pairs
                 
                 # We will merge CSVs from all repos into single CSVs per table, then load them once.
                 # To avoid ID collisions (if any, though IDs are usually hash-based or file-based), 
                 # we just append them.
-                merged_csvs = {t: os.path.join(temp_dir, f"{t}_merged.csv") for t in node_tables + rel_tables}
+                merged_csvs = {t: os.path.join(temp_dir, f"{t}_merged.csv") for t in node_tables}
+                for table, pairs in rel_pairs.items():
+                    for from_table, to_table in pairs:
+                        merged_csvs[f"{table}_{from_table}_{to_table}"] = os.path.join(temp_dir, f"{table}_{from_table}_{to_table}_merged.csv")
                 
                 for repo in repos:
                     logger.debug("Exporting graph for %s", repo['name'])
@@ -81,20 +103,19 @@ class FederatedGraphAPI(GraphAPI):
                                     # Ignore if table is empty or doesn't exist
                                     pass
                                     
-                            # Export rels
-                            for table in rel_tables:
-                                out_csv = os.path.join(temp_dir, f"{table}_{repo['hash']}.csv")
-                                try:
-                                    # We must return FROM and TO nodes by default Kuzu COPY format
-                                    conn.execute(f"COPY (MATCH (a)-[e:{table}]->(b) RETURN id(a), id(b), e.*) TO '{out_csv}'")
-                                    if os.path.exists(out_csv):
-                                        with open(merged_csvs[table], 'a') as outfile:
-                                            with open(out_csv, 'r') as infile:
-                                                if os.path.getsize(merged_csvs[table]) > 0:
-                                                    next(infile, None)
-                                                shutil.copyfileobj(infile, outfile)
-                                except Exception as e:
-                                    pass
+                            # Export rels per valid pair
+                            for table, pairs in rel_pairs.items():
+                                for from_table, to_table in pairs:
+                                    out_csv = os.path.join(temp_dir, f"{table}_{from_table}_{to_table}_{repo['hash']}.csv")
+                                    try:
+                                        conn.execute(f"COPY (MATCH (a:{from_table})-[e:{table}]->(b:{to_table}) RETURN a.id, b.id, e.*) TO '{out_csv}'")
+                                        if os.path.exists(out_csv):
+                                            with open(merged_csvs[f"{table}_{from_table}_{to_table}"], 'a') as outfile:
+                                                with open(out_csv, 'r') as infile:
+                                                    # For relationships using MATCH we don't output headers, so no need to skip
+                                                    shutil.copyfileobj(infile, outfile)
+                                    except Exception as e:
+                                        pass
                     except Exception as e:
                         logger.warning("Failed to export graph for %s: %s", repo['name'], e)
 
@@ -108,12 +129,14 @@ class FederatedGraphAPI(GraphAPI):
                             except Exception as e:
                                 logger.warning("Failed to import %s: %s", table, e)
                                 
-                    for table in rel_tables:
-                        if os.path.exists(merged_csvs[table]) and os.path.getsize(merged_csvs[table]) > 0:
-                            try:
-                                conn.execute(f"COPY {table} FROM '{merged_csvs[table]}' (HEADER=true)")
-                            except Exception as e:
-                                logger.warning("Failed to import %s: %s", table, e)
+                    for table, pairs in rel_pairs.items():
+                        for from_table, to_table in pairs:
+                            merged_csv = merged_csvs[f"{table}_{from_table}_{to_table}"]
+                            if os.path.exists(merged_csv) and os.path.getsize(merged_csv) > 0:
+                                try:
+                                    conn.execute(f"COPY {table} FROM '{merged_csv}' (FROM='{from_table}', TO='{to_table}')")
+                                except Exception as e:
+                                    logger.warning("Failed to import %s (%s->%s): %s", table, from_table, to_table, e)
 
                 # Cache the federated graph
                 if getattr(FederatedGraphAPI, '_cached_instance', None):

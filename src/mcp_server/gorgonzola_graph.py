@@ -24,6 +24,17 @@ _NODE_COLUMNS = {
 # Columns that should default to 0 instead of empty string when missing
 _NUMERIC_COLUMNS = {"complexity", "start_line", "end_line", "mtime"}
 
+_RELATIONSHIP_SCHEMA = [
+    "CREATE REL TABLE CONTAINS (FROM File TO Class, FROM Class TO Method, FROM Class TO Function, FROM Class TO Class, FROM File TO Interface, FROM Interface TO Method, FROM File TO Function, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class, FROM Method TO ControlFlow, FROM Function TO ControlFlow, FROM ControlFlow TO ControlFlow)",
+    "CREATE REL TABLE CONTAINS_LAMBDA (FROM Method TO Lambda, FROM Function TO Lambda, FROM ControlFlow TO Lambda, FROM Lambda TO Lambda)",
+    "CREATE REL TABLE EXTENDS (FROM Class TO Symbol, FROM Class TO Class)",
+    "CREATE REL TABLE IMPLEMENTS (FROM Class TO Symbol, FROM Class TO Interface)",
+    "CREATE REL TABLE CALLS (FROM Method TO Symbol, FROM Method TO Method, FROM Method TO Function, FROM Function TO Symbol, FROM Function TO Method, FROM Function TO Function, FROM ControlFlow TO Symbol, FROM ControlFlow TO Method, FROM ControlFlow TO Function, FROM Lambda TO Symbol, FROM Lambda TO Method, FROM Lambda TO Function, FROM Method TO Lambda, FROM Function TO Lambda)",
+    "CREATE REL TABLE RECURSES_TO (FROM Method TO Method, FROM Function TO Function)",
+    "CREATE REL TABLE DEPENDS_ON (FROM File TO File, FROM File TO Module)",
+    "CREATE REL TABLE ACCESSES_STATE (FROM Method TO Variable, FROM Function TO Variable, FROM ControlFlow TO Variable, FROM Lambda TO Variable, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
+]
+
 def init_gorgonzola_schema(conn):
     # Check if schema is already initialized
     try:
@@ -50,15 +61,7 @@ def init_gorgonzola_schema(conn):
             "CREATE NODE TABLE Variable (id STRING, name STRING, PRIMARY KEY (id))",
 
             # Create relationship tables
-            "CREATE REL TABLE CONTAINS (FROM File TO Class, FROM Class TO Method, FROM Class TO Function, FROM Class TO Class, FROM File TO Interface, FROM Interface TO Method, FROM File TO Function, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class, FROM Method TO ControlFlow, FROM Function TO ControlFlow, FROM ControlFlow TO ControlFlow)",
-            "CREATE REL TABLE CONTAINS_LAMBDA (FROM Method TO Lambda, FROM Function TO Lambda, FROM ControlFlow TO Lambda, FROM Lambda TO Lambda)",
-            "CREATE REL TABLE EXTENDS (FROM Class TO Symbol, FROM Class TO Class)",
-            "CREATE REL TABLE IMPLEMENTS (FROM Class TO Symbol, FROM Class TO Interface)",
-            "CREATE REL TABLE CALLS (FROM Method TO Symbol, FROM Method TO Method, FROM Method TO Function, FROM Function TO Symbol, FROM Function TO Method, FROM Function TO Function, FROM ControlFlow TO Symbol, FROM ControlFlow TO Method, FROM ControlFlow TO Function, FROM Lambda TO Symbol, FROM Lambda TO Method, FROM Lambda TO Function, FROM Method TO Lambda, FROM Function TO Lambda)",
-            "CREATE REL TABLE RECURSES_TO (FROM Method TO Method, FROM Function TO Function)",
-            "CREATE REL TABLE DEPENDS_ON (FROM File TO File, FROM File TO Module)",
-            "CREATE REL TABLE ACCESSES_STATE (FROM Method TO Variable, FROM Function TO Variable, FROM ControlFlow TO Variable, FROM Lambda TO Variable, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
-        ]
+        ] + _RELATIONSHIP_SCHEMA
         for q in queries:
             r = conn.execute(q)
             r.close()
@@ -72,8 +75,10 @@ class GorgonzolaGraph:
         self._in_context = False
         self._schema_initialized = False
         # Normalize path
+        from src.mcp_server.index_db import get_graph_path_for_repo
+        
         if db_path.endswith(".duckdb"):
-            self.gorgonzola_db_path = db_path[:-7] + "_gorgonzola"
+            self.gorgonzola_db_path = get_graph_path_for_repo(db_path)
         else:
             self.gorgonzola_db_path = db_path
         
@@ -338,8 +343,8 @@ class GorgonzolaGraph:
             try:
                 r = conn.execute(q, parameters)
                 r.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Batch query failed: {q.strip()} - Error: {e}")
 
     def pagerank(self) -> list:
         try:
