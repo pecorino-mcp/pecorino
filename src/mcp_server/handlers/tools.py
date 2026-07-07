@@ -21,8 +21,23 @@ from src.mcp_server.tools.graph import do_analyze
 from src.mcp_server.tools.metrics_tool import do_metrics
 from src.mcp_server.tools.update_index import do_update_index
 from src.mcp_server.tools.query import do_query
+from src.mcp_server.tools.code import do_get_code_range
 
 logger = logging.getLogger(__name__)
+
+from src.mcp_server.middleware.concurrency import FIFOConcurrencyLimiter
+_concurrency_limiter = None
+
+def get_concurrency_limiter():
+    global _concurrency_limiter
+    if _concurrency_limiter is None:
+        _concurrency_limiter = FIFOConcurrencyLimiter(
+            max_concurrent=settings.max_concurrent_tools,
+            timeout=settings.tool_queue_timeout
+        )
+    return _concurrency_limiter
+
+
 
 async def handle_list_tools(
     ctx: ServerRequestContext,
@@ -48,7 +63,7 @@ async def handle_list_tools(
     tools = [
         types.Tool(
             name="browse",
-            description="Browse codebase structure (tree, deps, summary, classes, functions).",
+            description="Browse codebase structure (tree, deps, summary, classes, functions). Use this for structural viewing, not for searching or precise code retrieval.",
             annotations=types.ToolAnnotations(
                 title="Browse Codebase",
                 **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
@@ -86,7 +101,7 @@ async def handle_list_tools(
         ),
         types.Tool(
             name="search",
-            description="Search the codebase for symbols or keywords. Can also retrieve source code when include_source=True. Works on both files (returns nodes) and directories (FTS search). Automatically includes source code when 3 or fewer results are found.",
+            description="Search the codebase for symbols or keywords using Full-Text Search. Works on both files (returns nodes) and directories (FTS search). Do NOT use this for AST structure queries (use query_codebase) or exact line-range snippet extraction (use get_code_range). Automatically includes source code when 3 or fewer results are found.",
             annotations=types.ToolAnnotations(
                 title="Search Code",
                 **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
@@ -189,7 +204,7 @@ async def handle_list_tools(
         ),
         types.Tool(
             name="query_codebase",
-            description="Query the codebase AST and graph. Use 'intent' for common queries (recommended) or 'query_json' for custom DSL. Provide one or the other.",
+            description="Perform Structural AST Queries on the codebase (e.g. find all classes, find all functions). Uses 'intent' presets or custom 'query_json' DSL. Do NOT use this for keyword searches (use search) or exact line extraction (use get_code_range).",
             annotations=types.ToolAnnotations(
                 title="Query AST",
                 **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
@@ -215,6 +230,54 @@ async def handle_list_tools(
                         "default": False
                     }
                 }
+            }
+        ),
+        types.Tool(
+            name="get_code_range",
+            description="Retrieve a precise range of lines from a specific file. Use this when you know the exact line numbers to extract a specific snippet.",
+            annotations=types.ToolAnnotations(
+                title="Get Code Range",
+                **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute path to the target file."
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "The starting line number (1-indexed, inclusive)."
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "The ending line number (1-indexed, inclusive)."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": False
+                    }
+                },
+                "required": ["target", "start_line", "end_line"]
+            }
+        ),
+        types.Tool(
+            name="set_workspace",
+            description="Change the server's workspace root directory at runtime.",
+            annotations=types.ToolAnnotations(
+                title="Set Workspace",
+                **{k: v for k, v in _MUTATING.model_dump(exclude_none=True).items() if k != "title"},
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to the new workspace directory."
+                    }
+                },
+                "required": ["path"]
             }
         )
     ]
@@ -275,7 +338,23 @@ async def handle_call_tool(
 
     TOOL_CALLS.labels(tool=name).inc()
 
-
+    limiter = get_concurrency_limiter()
+    try:
+        import asyncio
+        ticket = await asyncio.to_thread(limiter.acquire, settings.tool_queue_timeout)
+        logger.debug(f"Acquired execution slot for {name} (ticket {ticket})")
+    except TimeoutError as e:
+        logger.warning(f"Queue timeout for tool {name}: {e}")
+        return types.CallToolResult(
+            content=[types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error_type": "queue_timeout",
+                    "message": f"Server busy, request queued too long. ({e})",
+                    "suggestion": "Retry after a few seconds."
+                })
+            )]
+        )
 
     try:
         def _normalize_target(t: Any) -> Any:
@@ -421,6 +500,48 @@ async def handle_call_tool(
                 allow_external=arguments.get("allow_external", False),
                 ctx=ctx
             )
+        elif name == "get_code_range":
+            target = await _detect_directory(_normalize_target(arguments.get("target")))
+            check_suspicious(target, "target")
+            start_line = arguments.get("start_line")
+            end_line = arguments.get("end_line")
+            if start_line is None or end_line is None:
+                raise SecurityValidationError("Missing required arguments 'start_line' and/or 'end_line' for get_code_range")
+            res = await do_get_code_range(
+                target=target,
+                start_line=int(start_line),
+                end_line=int(end_line),
+                allow_external=arguments.get("allow_external", False),
+                ctx=ctx
+            )
+        elif name == "set_workspace":
+            path_arg = arguments.get("path")
+            if not path_arg:
+                raise SecurityValidationError("Missing 'path' argument")
+            
+            new_path = Path(path_arg).expanduser().resolve()
+            if not new_path.is_dir():
+                raise SecurityValidationError(f"Path does not exist or is not a directory: {new_path}")
+                
+            # Update settings
+            settings.workspace_root = new_path
+            
+            # Restart file watcher with new path if it's running
+            from src.mcp_server.middleware.file_watcher import get_file_watcher
+            watcher = get_file_watcher()
+            if watcher:
+                watcher.stop()
+                watcher.start(new_path)
+                
+            # Clear index cache to force re-indexing of the new workspace
+            from src.mcp_server.index_db import clear_index_cache
+            clear_index_cache()
+            
+            # Notify clients that roots and resources changed
+            await helper.notify_roots_list_changed()
+            await helper.notify_resource_list_changed()
+            
+            res = [{"type": "text", "text": f"Workspace root successfully changed to: {new_path}"}]
         else:
             raise SecurityValidationError(f"Unknown tool: {name}")
 
@@ -439,3 +560,5 @@ async def handle_call_tool(
         )
     except Exception as e:
         return handle_mcp_error(name, e, start_time)
+    finally:
+        limiter.release()

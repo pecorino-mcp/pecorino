@@ -10,6 +10,10 @@ class Config:
         # Determine Host/Port for Network Transports
         self.host = os.getenv("HOST", "127.0.0.1")
         self.port = int(os.getenv("PORT", "8000"))
+
+        # Concurrency controls
+        self.max_concurrent_tools = int(os.getenv("MCP_MAX_CONCURRENT", "3"))
+        self.tool_queue_timeout = int(os.getenv("MCP_QUEUE_TIMEOUT", "60"))
         
         # OAuth 2.1 Configurations
         self.oauth_jwt_secret = os.getenv("OAUTH_JWT_SECRET", "pecorino-secret-key-change-in-prod")

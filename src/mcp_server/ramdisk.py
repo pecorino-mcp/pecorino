@@ -80,8 +80,7 @@ class RamdiskIndex:
             shutil.copytree(self.ssd_gorgonzola_path, self.gorgonzola_path)
             
         logger.info(f"[ramdisk] Building index in RAM: {self.ram_dir} "
-              f"(quota {self.max_bytes / 1024 / 1024:.0f} MB)",
-              file=sys.stderr, flush=True)
+              f"(quota {self.max_bytes / 1024 / 1024:.0f} MB)")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -169,8 +168,7 @@ class RamdiskIndex:
 
             db_size = os.path.getsize(self.ssd_db_path)
             logger.info(f"[ramdisk] Synced DuckDB to SSD: "
-                  f"{db_size / 1024 / 1024:.2f} MB",
-                  file=sys.stderr, flush=True)
+                  f"{db_size / 1024 / 1024:.2f} MB")
 
         # 2. Sync Gorgonzola file (single file, not a directory)
         if os.path.exists(self.gorgonzola_path):
@@ -184,8 +182,7 @@ class RamdiskIndex:
                     os.replace(tmp_gorgonzola, self.ssd_gorgonzola_path)
                     gorg_size = os.path.getsize(self.ssd_gorgonzola_path)
                     logger.info(f"[ramdisk] Synced Gorgonzola to SSD: "
-                          f"{gorg_size / 1024 / 1024:.2f} MB",
-                          file=sys.stderr, flush=True)
+                          f"{gorg_size / 1024 / 1024:.2f} MB")
                 elif os.path.isdir(self.gorgonzola_path):
                     # Fallback: if it's a directory (future Kuzu versions)
                     tmp_gorgonzola = self.ssd_gorgonzola_path + ".tmp"
@@ -196,9 +193,8 @@ class RamdiskIndex:
                         shutil.rmtree(self.ssd_gorgonzola_path)
                     os.rename(tmp_gorgonzola, self.ssd_gorgonzola_path)
                     gorg_size = self._dir_size(self.ssd_gorgonzola_path)
-                    logger.info(f"[ramdisk] Synced Gorgonzola dir to SSD: "
-                          f"{gorg_size / 1024 / 1024:.2f} MB",
-                          file=sys.stderr, flush=True)
+                    logger.info(f"[ramdisk] Synced Gorgonzola (dir) to SSD: "
+                          f"{gorg_size / 1024 / 1024:.2f} MB")
 
                 # Also sync any Gorgonzola WAL
                 gorg_wal = self.gorgonzola_path + ".wal"
@@ -217,12 +213,10 @@ class RamdiskIndex:
         elapsed = time.monotonic() - t0
         total_bytes = self.get_usage_bytes()
         logger.info(f"[ramdisk] SSD sync completed in {elapsed:.2f}s — "
-              f"wrote {total_bytes / 1024 / 1024:.2f} MB to SSD",
-              file=sys.stderr, flush=True)
+              f"wrote {total_bytes / 1024 / 1024:.2f} MB to SSD")
 
     def _cleanup(self):
-        """Remove the ramdisk session directory."""
-        if os.path.isdir(self.ram_dir):
-            shutil.rmtree(self.ram_dir, ignore_errors=True)
-            logger.info(f"[ramdisk] Cleaned up: {self.ram_dir}",
-                  file=sys.stderr, flush=True)
+        """Remove the ramdisk directory and its contents."""
+        if os.path.exists(self.ram_dir):
+            shutil.rmtree(self.ram_dir)
+            logger.info(f"[ramdisk] Cleaned up: {self.ram_dir}")
