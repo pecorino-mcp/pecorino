@@ -175,7 +175,7 @@ def test_ramdisk_index_copy_on_enter(tmp_path):
     from src.mcp_server.ramdisk import RamdiskIndex
 
     # 1. Create simulated files on SSD path
-    ssd_db = tmp_path / "index.duckdb"
+    ssd_db = tmp_path / "index_code_search.duckdb"
     ssd_db.write_text("dummy database content")
 
     ssd_graph = tmp_path / "index_gorgonzola"

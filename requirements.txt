@@ -28,3 +28,4 @@ httpx2
 -e ./modules/pecorino-utils
 
 # trigger update
+filelock

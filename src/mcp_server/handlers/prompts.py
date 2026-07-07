@@ -7,50 +7,74 @@ from mcp.server import ServerRequestContext
 
 from src.core.constants import SUPPORTED_EXTENSIONS as SUPPORTED
 
+from src.mcp_server.context_helper import PecorinoContext
+
 logger = logging.getLogger(__name__)
 
 async def handle_list_prompts(
     ctx: ServerRequestContext,
     params: types.PaginatedRequestParams | None = None
 ) -> types.ListPromptsResult:
-    return types.ListPromptsResult(
-        prompts=[
+    helper = PecorinoContext(ctx)
+    role = helper.role
+
+    prompts = [
+        types.Prompt(
+            name="browse",
+            description="Browse codebase structure (tree, deps, summary, classes, functions).",
+            arguments=[
+                types.PromptArgument(name="target", description="Target path to browse", required=False),
+                types.PromptArgument(name="view", description="View type (summary, classes, deps, tree)", required=False)
+            ]
+        ),
+        types.Prompt(
+            name="search",
+            description="Search the codebase for symbols or keywords. Use include_source=True to retrieve source code.",
+            arguments=[
+                types.PromptArgument(name="query", description="The search query or keyword", required=False),
+                types.PromptArgument(name="target", description="Target path (file or directory)", required=False),
+                types.PromptArgument(name="include_source", description="Include source code in results", required=False)
+            ]
+        ),
+        types.Prompt(
+            name="analyze",
+            description="Run graph analysis such as callers, callees, impact analysis, or pagerank.",
+            arguments=[
+                types.PromptArgument(name="analysis", description="Analysis type (callers, callees, impact, pagerank)", required=True),
+                types.PromptArgument(name="target", description="Target path", required=False),
+                types.PromptArgument(name="symbol", description="Symbol name for callers/callees", required=False)
+            ]
+        ),
+        types.Prompt(
+            name="query_codebase",
+            description="Execute a JSON-based DSL query against the codebase AST and graph.",
+            arguments=[
+                types.PromptArgument(name="query_json", description="JSON string of the query DSL", required=True),
+                types.PromptArgument(name="target", description="Target path", required=False)
+            ]
+        ),
+        types.Prompt(
+            name="update_index",
+            description="Update the AST index for the codebase and return a structural summary.",
+            arguments=[
+                types.PromptArgument(name="target", description="Target path to update index for", required=False)
+            ]
+        )
+    ]
+    
+    if role == "admin":
+        prompts.append(
             types.Prompt(
-                name="browse",
-                description="Browse codebase structure (tree, deps, summary, classes, functions).",
+                name="metrics",
+                description="Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis. (Admin only)",
                 arguments=[
-                    types.PromptArgument(name="target", description="Target path to browse", required=False),
-                    types.PromptArgument(name="view", description="View type (summary, classes, deps, tree)", required=False)
-                ]
-            ),
-            types.Prompt(
-                name="search",
-                description="Search the codebase for symbols or keywords. Use include_source=True to retrieve source code.",
-                arguments=[
-                    types.PromptArgument(name="query", description="The search query or keyword", required=False),
-                    types.PromptArgument(name="target", description="Target path (file or directory)", required=False),
-                    types.PromptArgument(name="include_source", description="Include source code in results", required=False)
-                ]
-            ),
-            types.Prompt(
-                name="analyze",
-                description="Run graph analysis such as callers, callees, impact analysis, or pagerank.",
-                arguments=[
-                    types.PromptArgument(name="analysis", description="Analysis type (callers, callees, impact, pagerank)", required=True),
-                    types.PromptArgument(name="target", description="Target path", required=False),
-                    types.PromptArgument(name="symbol", description="Symbol name for callers/callees", required=False)
-                ]
-            ),
-            types.Prompt(
-                name="query_codebase",
-                description="Execute a JSON-based DSL query against the codebase AST and graph.",
-                arguments=[
-                    types.PromptArgument(name="query_json", description="JSON string of the query DSL", required=True),
-                    types.PromptArgument(name="target", description="Target path", required=False)
+                    types.PromptArgument(name="target", description="Target path", required=True),
+                    types.PromptArgument(name="what", description="Which analyses to run (oop, complexity, hotspots, all)", required=False)
                 ]
             )
-        ]
-    )
+        )
+        
+    return types.ListPromptsResult(prompts=prompts)
 
 async def handle_get_prompt(
     ctx: ServerRequestContext,
@@ -92,6 +116,19 @@ async def handle_get_prompt(
         return types.GetPromptResult(
             description="Query the codebase using JSON DSL.",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please execute the following JSON query on target '{target}':\n{query_json}"))]
+        )
+    elif name == "update_index":
+        target = arguments.get("target", "")
+        return types.GetPromptResult(
+            description="Update codebase index.",
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the update_index tool on target '{target}'."))]
+        )
+    elif name == "metrics":
+        target = arguments.get("target", "")
+        what = arguments.get("what", "all")
+        return types.GetPromptResult(
+            description="Calculate metrics.",
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please calculate {what} metrics on target '{target}'."))]
         )
     raise ValueError(f"Prompt not found: {name}")
 
