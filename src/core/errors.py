@@ -3,8 +3,22 @@ class PecorinoError(Exception):
     pass
 
 class SecurityValidationError(PecorinoError):
-    """Raised when a path validation or security guard fails."""
-    pass
+    """Raised when a path validation or security guard fails.
+
+    Optional ``valid_values`` and ``suggestion`` let the error handler
+    build structured JSON responses that help LLMs self-correct.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        valid_values: list[str] | None = None,
+        suggestion: str | None = None,
+    ):
+        super().__init__(message)
+        self.valid_values = valid_values
+        self.suggestion = suggestion
 
 class TargetNotFoundError(PecorinoError, FileNotFoundError):
     """Raised when a target file or directory is not found."""

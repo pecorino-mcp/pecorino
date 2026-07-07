@@ -11,15 +11,58 @@ from src.mcp_server.dsl.compiler import DSLCompiler
 logger = logging.getLogger(__name__)
 from mcp.server import ServerRequestContext
 
+# ── Intent-based presets ──────────────────────────────────────
+# The server translates these into correct DSL queries so LLMs
+# don't need to know the exact JSON schema.
+
+INTENT_PRESETS: dict[str, dict] = {
+    "all_classes": {
+        "select": "nodes",
+        "where": {"node_type": {"in": ["class", "interface"]}},
+        "limit": 50,
+    },
+    "all_functions": {
+        "select": "nodes",
+        "where": {"node_type": {"in": ["function", "method"]}},
+        "limit": 50,
+    },
+    "files_by_language": {
+        "select": "files",
+        "limit": 100,
+    },
+    # Graph-dependent intents (handled specially in do_query)
+    "entry_points": {
+        "_graph_intent": "entry_points",
+        "select": "nodes",
+        "where": {"node_type": {"in": ["function", "method"]}},
+        "limit": 20,
+    },
+    "dead_code": {
+        "_graph_intent": "dead_code",
+        "select": "nodes",
+        "where": {"node_type": {"in": ["function", "method"]}},
+        "limit": 50,
+    },
+}
+
 async def do_query(target: str, query_json: str | Dict[str, Any], allow_external: bool = False, ctx: Optional[ServerRequestContext] = None) -> dict:
     if isinstance(query_json, str):
         try:
             query_json = json.loads(query_json)
         except json.JSONDecodeError:
-            raise SecurityValidationError("Invalid JSON in query_json parameter")
+            raise SecurityValidationError(
+                "Invalid JSON in query_json parameter",
+                suggestion="Provide valid JSON, or use the 'intent' parameter instead for common queries.",
+            )
             
     if not isinstance(query_json, dict):
-        raise SecurityValidationError("query_json must be a JSON object")
+        raise SecurityValidationError(
+            "query_json must be a JSON object",
+            suggestion="Provide a JSON object like {\"select\": \"nodes\", \"where\": {\"node_type\": \"function\"}}",
+        )
+
+    # Extract and strip internal graph intent marker
+    graph_intent = query_json.pop("_graph_intent", None)
 
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
@@ -37,6 +80,55 @@ async def do_query(target: str, query_json: str | Dict[str, Any], allow_external
     from src.mcp_server.middleware.sync import _auto_sync_stale
     await _auto_sync_stale(repo_root, db_path, str(path))
 
+    # ── Graph-dependent intents ───────────────────────────────
+    if graph_intent in ("entry_points", "dead_code"):
+        try:
+            graph_api = _get_cached_api(repo_root, db_path, "graph")
+        except Exception:
+            return {
+                "status": "error",
+                "error_type": "index_missing",
+                "message": "Graph index not available for this repository.",
+                "suggestion": "Run 'update_index' first to build the graph, then retry this intent.",
+            }
+
+        index = _get_cached_api(repo_root, db_path, "index")
+        # Get all function/method nodes
+        limit = min(query_json.get("limit", 50), 100)
+        nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
+        fn_nodes = [n for n in nodes if n.get("node_type") in ("function", "method")]
+
+        # Build a caller count map from the graph
+        results = []
+        for node in fn_nodes:
+            name = node.get("name", "")
+            try:
+                callers = await asyncio.to_thread(graph_api.find_callers, name)
+                caller_count = len(callers) if callers else 0
+            except Exception:
+                caller_count = 0
+
+            if graph_intent == "entry_points" and caller_count >= 5:
+                results.append({**node, "caller_count": caller_count})
+            elif graph_intent == "dead_code" and caller_count == 0:
+                results.append({**node, "caller_count": 0})
+
+        # Sort entry_points by most-called first
+        if graph_intent == "entry_points":
+            results.sort(key=lambda x: x.get("caller_count", 0), reverse=True)
+
+        # Strip body_text for token efficiency
+        for r in results:
+            r.pop("body_text", None)
+
+        return {
+            "status": "ok",
+            "intent": graph_intent,
+            "results": results[:limit],
+            "total_candidates": len(fn_nodes),
+        }
+
+    # ── Standard DSL path ─────────────────────────────────────
     sql_query, cypher_query, sql_params = DSLCompiler.compile(query_json, db_path="main")
     
     index = _get_cached_api(repo_root, db_path, "index")
