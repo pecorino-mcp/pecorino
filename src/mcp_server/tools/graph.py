@@ -18,7 +18,11 @@ from mcp.server import ServerRequestContext
 async def do_analyze(target: str, analysis: str, symbol: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, allow_external: bool = False, ctx: Optional[ServerRequestContext] = None) -> dict:
     analysis = analysis.strip().lower()
     if analysis not in ALLOWED_ANALYSES:
-        raise SecurityValidationError(f"Invalid analysis type: {analysis}")
+        raise SecurityValidationError(
+            f"Invalid analysis type: '{analysis}'",
+            valid_values=sorted(ALLOWED_ANALYSES),
+            suggestion="Use one of the listed analysis types.",
+        )
 
     limit = max(1, min(int(limit), MAX_LIMIT))
     offset = max(0, int(offset))
@@ -50,15 +54,64 @@ async def do_analyze(target: str, analysis: str, symbol: Optional[str] = None, l
 
     if analysis == "callers":
         callers = await asyncio.to_thread(api.find_callers, symbol)
-        return {"target": symbol, "analysis": analysis, "callers": callers[offset:offset+limit]}
+        page = callers[offset:offset+limit]
+        result = {"target": symbol, "analysis": analysis, "callers": page}
+        # Auto-expand: include source signatures when few results
+        if len(page) <= 5 and page:
+            index = _get_cached_api(repo_root, db_path, "index")
+            for c in page:
+                fp = c.get("filepath") or c.get("file")
+                if fp:
+                    try:
+                        file_nodes = await asyncio.to_thread(index.get_file_nodes, fp)
+                        cname = c.get("name", "")
+                        for n in file_nodes:
+                            if n.get("name") == cname:
+                                body = n.get("body_text", "")
+                                # Include just the first 5 lines (the signature)
+                                sig_lines = body.split("\n")[:5] if body else []
+                                c["signature_preview"] = "\n".join(sig_lines)
+                                break
+                    except Exception:
+                        pass
+            result["auto_expanded"] = True
+        if len(callers) > limit:
+            result["total_count"] = len(callers)
+        return result
 
     if analysis == "callees":
         callees = await asyncio.to_thread(api.find_callees, symbol)
-        return {"target": symbol, "analysis": analysis, "callees": callees[offset:offset+limit]}
+        page = callees[offset:offset+limit]
+        result = {"target": symbol, "analysis": analysis, "callees": page}
+        if len(callees) > limit:
+            result["total_count"] = len(callees)
+        return result
 
     if analysis == "impact":
         deps = await asyncio.to_thread(api.impact_analysis, path.as_posix(), max_depth)
-        return {"target": path.as_posix(), "analysis": analysis, "dependent_files": deps[offset:offset+limit]}
+        page = deps[offset:offset+limit]
+        result = {"target": path.as_posix(), "analysis": analysis, "dependent_files": page}
+        # Adaptive summary when results exceed page size
+        if len(deps) > limit:
+            # Group by top-level package directory
+            pkg_counts: dict[str, int] = {}
+            for d in deps:
+                fp = d if isinstance(d, str) else (d.get("filepath", "") if isinstance(d, dict) else str(d))
+                parts = fp.split("/")
+                # Use first 2 meaningful path segments as package identifier
+                pkg = "/".join(parts[:3]) if len(parts) >= 3 else fp
+                pkg_counts[pkg] = pkg_counts.get(pkg, 0) + 1
+            top_packages = sorted(pkg_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            result["summary"] = {
+                "total_impacted_files": len(deps),
+                "top_impacted_packages": [
+                    {"package": pkg, "file_count": count}
+                    for pkg, count in top_packages
+                ],
+                "max_depth_reached": max_depth,
+                "hint": "Use offset/limit to paginate, or narrow target to a specific subdirectory.",
+            }
+        return result
 
     if analysis == "functional-analysis":
         result = await asyncio.to_thread(api.analyze_functional_purity)
@@ -76,8 +129,14 @@ async def do_analyze(target: str, analysis: str, symbol: Optional[str] = None, l
                     if node_id and node_id.startswith(path.as_posix())
                 ]
             filtered_pr.sort(key=lambda x: x["score"], reverse=True)
-            top_pr = filtered_pr[offset:offset+limit]
-            return {"target": path.as_posix(), "analysis": analysis, "pagerank": top_pr}
+            page = filtered_pr[offset:offset+limit]
+            result = {"target": path.as_posix(), "analysis": analysis, "pagerank": page}
+            if len(filtered_pr) > limit:
+                result["summary"] = {
+                    "total_ranked_files": len(filtered_pr),
+                    "hint": "Use offset/limit to paginate.",
+                }
+            return result
         except Exception as e:
             raise AnalysisError(f"PageRank calculation failed: {e}")
 

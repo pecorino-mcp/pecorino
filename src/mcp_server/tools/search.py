@@ -26,13 +26,16 @@ def _cap_body(body: str) -> str:
         return '\n'.join(lines[:MAX_CODE_LINES]) + f"\n... (truncated at {MAX_CODE_LINES} lines)"
     return body
 
-async def do_search(target: str, query: Optional[str] = None, limit: int = 10, offset: int = 0, output_file: Optional[str] = None, allow_external: bool = False, include_source: bool = False, ctx: Optional[ServerRequestContext] = None) -> dict:
+async def do_search(target: str, query: Optional[str] = None, limit: int = 10, offset: int = 0, output_file: Optional[str] = None, allow_external: bool = False, include_source: bool = False, auto_expand_source: bool = True, ctx: Optional[ServerRequestContext] = None) -> dict:
     """Unified search and code retrieval tool.
     
     When include_source=False (default): returns metadata-only search results.
     When include_source=True: returns results with source code (body_text), capped at 300 lines.
     When target is a file: returns nodes from that file (query is optional filter).
     When target is a directory: query is required for FTS search.
+    
+    Auto-expansion: when ≤3 results and auto_expand_source=True (default),
+    source code is automatically included to reduce round-trips.
     """
     if query:
         query = query.strip()[:MAX_QUERY_LEN]
@@ -65,17 +68,31 @@ async def do_search(target: str, query: Optional[str] = None, limit: int = 10, o
             q_lower = query.lower()
             nodes = [n for n in nodes if q_lower in n['name'].lower()]
         nodes = nodes[offset:offset+limit]
-        if include_source:
+
+        # Auto-expand: include source when few results
+        auto_expanded = False
+        effective_include = include_source
+        if not include_source and auto_expand_source and len(nodes) <= 3:
+            effective_include = True
+            auto_expanded = True
+
+        if effective_include:
             for n in nodes:
                 n['body_text'] = _cap_body(n.get('body_text', ''))
         else:
             for n in nodes:
                 n.pop('body_text', None)
-        return {"query": query, "results": nodes, "search_status": "ok"}
+        result = {"query": query, "results": nodes, "search_status": "ok"}
+        if auto_expanded:
+            result["auto_expanded"] = True
+        return result
 
     # --- Directory target: FTS search ---
     if not query:
-        raise SecurityValidationError("Query is required when searching a directory")
+        raise SecurityValidationError(
+            "Query is required when searching a directory",
+            suggestion="Provide a search query string, or target a specific file path instead.",
+        )
 
     # Lazy FTS rebuild if stale
     if not index.has_fts_index() or index.is_fts_dirty():
@@ -107,11 +124,20 @@ async def do_search(target: str, query: Optional[str] = None, limit: int = 10, o
                 
     results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset)
 
+    # Auto-expand: include source when few results
+    auto_expanded = False
+    if not include_source and auto_expand_source and len(results) <= 3 and not output_file:
+        include_source = True
+        auto_expanded = True
+
     if include_source:
         for r in results:
             r['body_text'] = _cap_body(r.get('body_text', ''))
     elif not output_file:
         for r in results:
             r.pop("body_text", None)
-            
-    return {"query": query, "results": results, "search_status": "ok"}
+
+    result = {"query": query, "results": results, "search_status": "ok"}
+    if auto_expanded:
+        result["auto_expanded"] = True
+    return result

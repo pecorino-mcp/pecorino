@@ -39,6 +39,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     # context manager. Keep as a safety net for other potential leaked connections.
     import gc
     gc.collect()
+    helper = PecorinoContext(ctx)
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root
     from src.mcp_server.index_pipeline import CodebaseIndexer
@@ -92,7 +93,6 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
                             start_time=start_time
                         )
                         
-                        helper = PecorinoContext(ctx)
                         await helper.report_progress(
                             progress=current,
                             total=total,
@@ -129,6 +129,9 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
         duck_path = get_db_path_for_repo(repo_root)
         graph_path = get_graph_path_for_repo(duck_path)
         registry.register_repo(repo_root, duck_path, graph_path)
+
+        # Notify client that resources have been updated
+        await helper.notify_resource_list_changed()
 
         # Surface FTS errors from the subprocess
         if final_res.get("status") == "partial" and final_res.get("fts_error"):
