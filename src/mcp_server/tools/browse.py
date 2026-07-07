@@ -35,7 +35,11 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     # --- Input validation ---
     view = view.strip().lower()
     if view not in ALLOWED_VIEWS:
-        raise SecurityValidationError(f"Invalid view: {view}")
+        raise SecurityValidationError(
+            f"Invalid view: '{view}'",
+            valid_values=sorted(ALLOWED_VIEWS),
+            suggestion="Use one of the listed view values.",
+        )
     limit = max(1, min(int(limit), MAX_LIMIT))
     offset = max(0, int(offset))
 
@@ -184,10 +188,32 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
 
             node_preview = [n['name'] for n in nodes[:20]]
 
+            # Architectural grouping: cluster files by top-level subdirectory
+            architectural_groups = {}
+            try:
+                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
+                all_files = index._conn.execute('''
+                    SELECT filepath FROM files WHERE filepath LIKE ?
+                ''', (f"{prefix}%",)).fetchall()
+                for (fp,) in all_files:
+                    rel = fp[len(prefix):]
+                    parts = rel.split("/")
+                    group_name = parts[0] if len(parts) > 1 else "(root)"
+                    if group_name not in architectural_groups:
+                        architectural_groups[group_name] = {"file_count": 0, "path": f"{prefix}{group_name}/"}
+                    architectural_groups[group_name]["file_count"] += 1
+                # Sort by file count descending, keep top 15
+                architectural_groups = dict(
+                    sorted(architectural_groups.items(), key=lambda x: x[1]["file_count"], reverse=True)[:15]
+                )
+            except Exception:
+                pass
+
             result["structure"] = {
                 "indexed_files_count": indexed_files,
                 "total_files_on_disk": on_disk_count,
                 "language_breakdown": lang_breakdown,
+                "architectural_groups": architectural_groups,
                 "top_level_symbols_preview": node_preview
             }
         else:

@@ -31,10 +31,28 @@ async def handle_list_tools(
     helper = PecorinoContext(ctx)
     role = helper.role
     
+    # Shared annotation presets
+    _READ_ONLY = types.ToolAnnotations(
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    )
+    _MUTATING = types.ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    )
+
     tools = [
         types.Tool(
             name="browse",
             description="Browse codebase structure (tree, deps, summary, classes, functions).",
+            annotations=types.ToolAnnotations(
+                title="Browse Codebase",
+                **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -68,7 +86,11 @@ async def handle_list_tools(
         ),
         types.Tool(
             name="search",
-            description="Search the codebase for symbols or keywords. Can also retrieve source code when include_source=True. Works on both files (returns nodes) and directories (FTS search).",
+            description="Search the codebase for symbols or keywords. Can also retrieve source code when include_source=True. Works on both files (returns nodes) and directories (FTS search). Automatically includes source code when 3 or fewer results are found.",
+            annotations=types.ToolAnnotations(
+                title="Search Code",
+                **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -83,7 +105,7 @@ async def handle_list_tools(
                     "include_source": {
                         "type": "boolean",
                         "default": False,
-                        "description": "If True, include source code (body_text) in results, capped at 300 lines per result."
+                        "description": "If True, include source code (body_text) in results, capped at 300 lines per result. Auto-enabled when ≤3 results."
                     },
                     "limit": {
                         "type": "integer",
@@ -103,6 +125,10 @@ async def handle_list_tools(
         types.Tool(
             name="analyze",
             description="Run graph analysis such as callers, callees, impact analysis, or pagerank.",
+            annotations=types.ToolAnnotations(
+                title="Analyze Code Graph",
+                **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -143,6 +169,10 @@ async def handle_list_tools(
         types.Tool(
             name="update_index",
             description="Update the AST index for the codebase and return a structural summary.",
+            annotations=types.ToolAnnotations(
+                title="Update Index",
+                **{k: v for k, v in _MUTATING.model_dump(exclude_none=True).items() if k != "title"},
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -159,13 +189,22 @@ async def handle_list_tools(
         ),
         types.Tool(
             name="query_codebase",
-            description="Execute a JSON-based DSL query against the codebase AST and graph.",
+            description="Query the codebase AST and graph. Use 'intent' for common queries (recommended) or 'query_json' for custom DSL. Provide one or the other.",
+            annotations=types.ToolAnnotations(
+                title="Query AST",
+                **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["all_classes", "all_functions", "files_by_language", "entry_points", "dead_code"],
+                        "description": "High-level analysis intent. Use this instead of query_json for common queries (recommended). The server translates intents into correct, optimized queries."
+                    },
                     "query_json": {
                         "type": "string",
-                        "description": "JSON string of the query DSL (e.g. {\"select\": \"nodes\", \"where\": {\"node_type\": \"function\"}})"
+                        "description": "JSON string of the query DSL (e.g. {\"select\": \"nodes\", \"where\": {\"node_type\": \"function\"}}). Use 'intent' instead for common queries."
                     },
                     "target": {
                         "type": "string",
@@ -175,8 +214,7 @@ async def handle_list_tools(
                         "type": "boolean",
                         "default": False
                     }
-                },
-                "required": ["query_json"]
+                }
             }
         )
     ]
@@ -186,6 +224,13 @@ async def handle_list_tools(
             types.Tool(
                 name="metrics",
                 description="Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis. (Admin only)",
+                annotations=types.ToolAnnotations(
+                    title="Calculate Metrics",
+                    read_only_hint=True,
+                    destructive_hint=False,
+                    idempotent_hint=False,
+                    open_world_hint=False,
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -226,7 +271,7 @@ async def handle_call_tool(
 
     safe_args = json.dumps(arguments, ensure_ascii=True)[:2000]
     safe_name = str(name).replace('\n', '').replace('\r', '')[:50]
-    logger.info(f'Tool={safe_name} args={safe_args}')
+    logger.info('Tool=%s args=%s', safe_name, safe_args)
 
     TOOL_CALLS.labels(tool=name).inc()
 
@@ -312,6 +357,27 @@ async def handle_call_tool(
             output_path = arguments.get("output_path")
             if output_path:
                 check_suspicious(output_path, "output_path")
+
+            # Admin-only: confirm via elicitation if the client supports it
+            if helper.supports_elicitation:
+                elicit_result = await helper.elicit(
+                    message=f"Run metrics analysis on '{os.path.basename(target)}'?",
+                    requested_schema={
+                        "type": "object",
+                        "properties": {
+                            "confirm": {
+                                "type": "boolean",
+                                "description": "Confirm running metrics analysis",
+                                "default": True,
+                            }
+                        },
+                    },
+                )
+                if elicit_result and hasattr(elicit_result, "action") and elicit_result.action == "reject":
+                    return types.CallToolResult(
+                        content=[types.TextContent(type="text", text=json.dumps({"status": "cancelled", "reason": "User declined metrics analysis"}))]
+                    )
+
             res = await do_metrics(
                 target=target,
                 what=arguments.get("what", ["all"]),
@@ -326,12 +392,32 @@ async def handle_call_tool(
                 ctx=ctx,
                 allow_external=arguments.get("allow_external", False)
             )
+            # Notify client that resources have changed after re-indexing
+            await helper.notify_resource_list_changed()
         elif name == "query_codebase":
             target = await _detect_directory(_normalize_target(arguments.get("target")))
             check_suspicious(target, "target")
+            intent = arguments.get("intent")
+            query_json = arguments.get("query_json")
+            if intent and not query_json:
+                # Translate intent to DSL query
+                from src.mcp_server.tools.query import INTENT_PRESETS
+                if intent not in INTENT_PRESETS:
+                    raise SecurityValidationError(
+                        f"Unknown intent: '{intent}'",
+                        valid_values=list(INTENT_PRESETS.keys()),
+                        suggestion="Use one of the listed intent values, or provide query_json for custom queries.",
+                    )
+                query_json = INTENT_PRESETS[intent]
+            elif not intent and not query_json:
+                raise SecurityValidationError(
+                    "Either 'intent' or 'query_json' is required.",
+                    valid_values=["all_classes", "all_functions", "files_by_language", "entry_points", "dead_code"],
+                    suggestion="Use 'intent' for common queries (recommended), or 'query_json' for custom DSL.",
+                )
             res = await do_query(
                 target=target,
-                query_json=arguments.get("query_json"),
+                query_json=query_json,
                 allow_external=arguments.get("allow_external", False),
                 ctx=ctx
             )
@@ -339,7 +425,7 @@ async def handle_call_tool(
             raise SecurityValidationError(f"Unknown tool: {name}")
 
         duration = time.time() - start_time
-        logger.info("MCP Tool Success: '%s' in %.4fs", name, duration)
+        logger.info("Tool '%s' completed in %.4fs", name, duration)
 
         TOOL_DURATION.labels(tool=name).observe(duration)
 
