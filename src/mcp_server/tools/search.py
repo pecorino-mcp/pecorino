@@ -66,7 +66,13 @@ async def do_search(target: str, query: Optional[str] = None, limit: int = 10, o
         nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
         if query:
             q_lower = query.lower()
-            nodes = [n for n in nodes if q_lower in n['name'].lower()]
+            filtered_nodes = []
+            for n in nodes:
+                if q_lower in n['name'].lower():
+                    filtered_nodes.append(n)
+                elif q_lower in n.get('body_text', '').lower():
+                    filtered_nodes.append(n)
+            nodes = filtered_nodes
         nodes = nodes[offset:offset+limit]
 
         # Auto-expand: include source when few results

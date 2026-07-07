@@ -150,30 +150,32 @@ class GraphAPI:
             '''
             MATCH (caller:Method)-[r:CALLS]->(s:Symbol), (target:Method {name: s.name})
             MERGE (caller)-[:CALLS]->(target)
+            DELETE r
             ''',
             '''
             MATCH (caller:Method)-[r:CALLS]->(s:Symbol), (target:Function {name: s.name})
             MERGE (caller)-[:CALLS]->(target)
+            DELETE r
             ''',
             '''
             MATCH (caller:Function)-[r:CALLS]->(s:Symbol), (target:Method {name: s.name})
             MERGE (caller)-[:CALLS]->(target)
+            DELETE r
             ''',
             '''
             MATCH (caller:Function)-[r:CALLS]->(s:Symbol), (target:Function {name: s.name})
             MERGE (caller)-[:CALLS]->(target)
+            DELETE r
             ''',
             '''
             MATCH (c:Class)-[r:EXTENDS]->(s:Symbol), (target:Class {name: s.name})
             MERGE (c)-[:EXTENDS]->(target)
+            DELETE r
             ''',
             '''
             MATCH (c:Class)-[r:IMPLEMENTS]->(s:Symbol), (target:Interface {name: s.name})
             MERGE (c)-[:IMPLEMENTS]->(target)
-            ''',
-            '''
-            MATCH (s:Symbol)
-            DETACH DELETE s
+            DELETE r
             '''
         ]
         
