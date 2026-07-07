@@ -71,8 +71,8 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     for query in migrations:
         try:
             conn.execute(query)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Migration query failed (likely already applied): %s", e)
 
     # Files tracking table for incremental indexing
     conn.execute('''
@@ -93,24 +93,17 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         )
     ''')
 
-    # FTS schema migration: ensure 4-column FTS index (id, name, node_type, filepath)
+    # FTS schema migration: ensure index exists and uses correct columns
     try:
-        conn.execute("INSTALL fts")
-        conn.execute("LOAD fts")
-        # Check if FTS index exists with the expected columns
-        fts_info = conn.execute(
-            "SELECT sql FROM duckdb_indexes() WHERE index_name = 'fts_main_code_nodes'"
-        ).fetchone()
-        if fts_info:
-            fts_sql = fts_info[0] or ""
-            if 'relationships' not in fts_sql:
-                try:
-                    conn.execute("PRAGMA drop_fts_index('code_nodes')")
-                except Exception:
-                    conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
-                conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
+        try:
+            conn.execute("LOAD fts")
+        except duckdb.Error:
+            conn.execute("INSTALL fts")
+            conn.execute("LOAD fts")
+        
+        # We don't create the FTS index here anymore. It will be created lazily by ensure_fts().
     except Exception:
-        pass  # FTS not installed or index doesn't exist yet
+        logger.exception("Failed to initialize FTS extension during migration")
 
 def migrate_all():
     """Scan the indexes directory and safely run migrations."""
@@ -167,12 +160,12 @@ class CodeSearchIndex:
         else:
             try:
                 self._conn.execute("LOAD fts")
-            except Exception:
+            except duckdb.Error:
                 try:
                     self._conn.execute("INSTALL fts")
                     self._conn.execute("LOAD fts")
                 except Exception:
-                    pass
+                    logger.exception("Failed to LOAD/INSTALL fts in read-only mode")
         
         if not read_only:
             self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
@@ -203,75 +196,23 @@ class CodeSearchIndex:
         self.close()
 
     def rebuild_fts(self):
-        """Rebuild the FTS index, forcefully cleaning up all stale artifacts first."""
+        """Rebuild the FTS index using DuckDB's overwrite parameter."""
         import logging
         logger = logging.getLogger(__name__)
 
         conn = self._conn
-        conn.execute("INSTALL fts")
-        conn.execute("LOAD fts")
-
-        # --- Phase 1: Drop via pragma (cleanest path) ---
-        drop_success = False
         try:
-            conn.execute("PRAGMA drop_fts_index('code_nodes')")
-            drop_success = True
+            conn.execute("LOAD fts")
+        except duckdb.Error:
+            conn.execute("INSTALL fts")
+            conn.execute("LOAD fts")
+
+        # Let the FTS extension manage the overwrite internally
+        # which avoids the catalog dependency bookkeeping bugs
+        try:
+            conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships', overwrite=1)")
         except Exception as e:
-            logger.debug("PRAGMA drop_fts_index failed: %s", e)
-
-        if not drop_success:
-            # --- Phase 2: Force-drop the FTS schema and all its internal tables ---
-            try:
-                conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
-            except Exception:
-                pass
-
-            # --- Phase 3: Hunt and destroy orphaned FTS internal tables ---
-            # DuckDB's FTS extension creates internal tables (stopwords, docs, fields,
-            # etc.) inside its schema. If the schema drop partially fails or the DB
-            # was corrupted, these can linger and block the next create_fts_index.
-            try:
-                orphans = conn.execute("""
-                    SELECT table_name, schema_name
-                    FROM information_schema.tables
-                    WHERE schema_name LIKE 'fts_main_code_nodes%'
-                """).fetchall()
-                for table_name, schema_name in orphans:
-                    try:
-                        conn.execute(f'DROP TABLE IF EXISTS "{schema_name}"."{table_name}" CASCADE')
-                    except Exception:
-                        pass
-                # Final attempt to drop the schema if orphans existed
-                if orphans:
-                    try:
-                        conn.execute("DROP SCHEMA IF EXISTS fts_main_code_nodes CASCADE")
-                    except Exception:
-                        pass
-            except Exception:
-                pass  # information_schema query itself failed — DB is very fresh, nothing to clean
-
-
-        # --- Phase 3.5: Commit cleanup before re-creation ---
-        # DuckDB's FTS extension creates internal tables (stopwords, docs, etc.)
-        # that are tracked as catalog dependencies. Dropping them and immediately
-        # re-creating the FTS index within the same implicit transaction causes a
-        # "Could not commit creation of dependency, subject has been deleted" error.
-        # Force a commit boundary so the catalog is clean before create_fts_index.
-        try:
-            conn.commit()
-        except Exception:
-            pass
-        try:
-            conn.execute("COMMIT")
-        except Exception:
-            pass
-        try:
-            conn.execute("CHECKPOINT")
-        except Exception:
-            pass
-
-        # --- Phase 4: Create fresh index ---
-        conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships')")
+            logger.warning("FTS rebuild failed: %s", e)
 
         try:
             self.clear_fts_dirty()
@@ -313,17 +254,16 @@ class CodeSearchIndex:
     def has_fts_index(self) -> bool:
         """Check whether the FTS index exists on code_nodes.
 
-        DuckDB's FTS pragma creates internal tables (docs, terms, dict, etc.)
-        rather than a regular index visible in duckdb_indexes(). We detect FTS
-        by checking for the 'docs' table which is always created.
+        DuckDB's FTS extension creates its internal tables inside a 
+        generated schema like fts_main_code_nodes.
         """
         try:
-            self._conn.execute("LOAD fts")
             res = self._conn.execute(
-                "SELECT 1 FROM information_schema.tables WHERE table_name = 'docs'"
+                "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'fts_main_code_nodes'"
             ).fetchone()
             return res is not None
-        except (duckdb.CatalogException, duckdb.ParserException, duckdb.IOException):
+        except Exception as e:
+            logger.warning("Failed to check for FTS index: %s", e)
             return False
 
     def _lazy_load_body(self, filepath: str, start_line: int, end_line: int) -> str:

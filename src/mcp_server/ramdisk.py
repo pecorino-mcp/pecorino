@@ -48,11 +48,9 @@ class RamdiskIndex:
         self.ssd_db_path = os.path.abspath(ssd_db_path)
         self.max_bytes = max_bytes
 
-        # Derive the Gorgonzola dir name from the DuckDB path
-        if ssd_db_path.endswith(".duckdb"):
-            self.ssd_gorgonzola_path = ssd_db_path[:-7] + "_gorgonzola"
-        else:
-            self.ssd_gorgonzola_path = ssd_db_path + "_gorgonzola"
+        # Derive the Gorgonzola dir name exactly as index_db does
+        from src.mcp_server.index_db import get_graph_path_for_repo
+        self.ssd_gorgonzola_path = get_graph_path_for_repo(self.ssd_db_path)
 
         # Session directory under /dev/shm
         session_id = f"pecorino_{uuid.uuid4().hex[:12]}"
@@ -213,6 +211,8 @@ class RamdiskIndex:
                     ssd_gwal = self.ssd_gorgonzola_path + ".wal"
                     if os.path.exists(ssd_gwal):
                         os.remove(ssd_gwal)
+        else:
+            logger.warning(f"[ramdisk] Expected Gorgonzola graph at {self.gorgonzola_path} but it was not found. Graph data will be missing on SSD.", file=sys.stderr, flush=True)
 
         elapsed = time.monotonic() - t0
         total_bytes = self.get_usage_bytes()
