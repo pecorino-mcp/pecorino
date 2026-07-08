@@ -232,6 +232,22 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
         except Exception as e:
             logger.warning("Graph database query failed: %s", e)
 
+    if view == "tree":
+        result["next_steps"] = "Use analyze(analysis='impact') on interesting files, or metrics(what=['hotspots']) for repo risk triage."
+    elif view == "deps":
+        result["next_steps"] = "Use analyze(analysis='callers') or explain_symbol to trace specific dependencies."
+    elif view in ("classes", "functions"):
+        result["next_steps"] = "Use search(query=name) or get_code_range to see the implementation."
+
+    if not output_file and view in ("tree", "deps"):
+        try:
+            import time
+            dumped = json.dumps(result)
+            if len(dumped) > 50000:
+                output_file = f".mcp_outputs/browse_{view}_{int(time.time())}.json"
+        except Exception:
+            pass
+
     if output_file:
         try:
             out_path = safe_output_path(output_file)
