@@ -536,6 +536,15 @@ class CodebaseIndexer:
         try:
             with self.graph:
                 self.graph.query_batch(queries)
+                
+            # After graph relationships are resolved, calculate and build PageRank
+            try:
+                pr_scores = self.graph.pagerank()
+                if pr_scores:
+                    self.search_index.update_pagerank_bulk(pr_scores)
+            except Exception as e:
+                logger.warning("Failed to calculate or build PageRank: %s", e)
+                
         except Exception as e:
             logger.warning("Failed to post-process graph: %s", e)
             logger.debug(traceback.format_exc())

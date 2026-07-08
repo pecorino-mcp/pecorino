@@ -61,7 +61,12 @@ async def do_metrics(target: str, what: List[str] = ["all"], output_path: Option
     repo_root = find_repo_root(str(path))
     what_set = {w.lower() for w in what if w.lower() in ALLOWED_WHAT}
     if not what_set or "all" in what_set:
-        what_set = {"oop", "complexity", "hotspots"}
+        if path.is_file():
+            what_set = {"complexity"}
+        elif path.is_dir() and (path / ".git").exists():
+            what_set = {"hotspots"}
+        else:
+            what_set = {"oop", "complexity", "hotspots"}
 
     result: dict[str, Any] = {"target": path.as_posix(), "type": "file" if path.is_file() else "directory"}
 

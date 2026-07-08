@@ -115,7 +115,28 @@ async def do_analyze(target: str, analysis: str, symbol: Optional[str] = None, l
 
     if analysis == "functional-analysis":
         result = await asyncio.to_thread(api.analyze_functional_purity)
-        return {"target": path.as_posix(), "analysis": analysis, "functional_analysis": result}
+        ret = {"target": path.as_posix(), "analysis": analysis, "functional_analysis": result}
+        
+        try:
+            import json
+            import time
+            dumped = json.dumps(ret)
+            if len(dumped) > 50000:
+                output_file = f".mcp_outputs/analyze_{analysis}_{int(time.time())}.json"
+                from src.mcp_server.middleware.security import safe_output_path
+                out_path = safe_output_path(output_file)
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    f.write(dumped)
+                return {
+                    "target": path.as_posix(),
+                    "analysis": analysis,
+                    "saved_to": str(out_path),
+                    "summary": f"Functional analysis output is too large ({len(dumped)} chars). Results saved to file.",
+                    "next_steps": "Review the saved JSON file for detailed functional purity metrics."
+                }
+        except Exception:
+            pass
+        return ret
 
     if analysis == "pagerank":
         try:
