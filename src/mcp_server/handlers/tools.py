@@ -63,7 +63,7 @@ async def handle_list_tools(
     tools = [
         types.Tool(
             name="browse",
-            description="Browse codebase structure (tree, deps, summary, classes, functions). Use this for structural viewing, not for searching or precise code retrieval.",
+            description="Browse codebase structure (tree, deps, classes, functions). Use this for structural viewing, not for searching or precise code retrieval.",
             annotations=types.ToolAnnotations(
                 title="Browse Codebase",
                 **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
@@ -77,9 +77,9 @@ async def handle_list_tools(
                     },
                     "view": {
                         "type": "string",
-                        "default": "summary",
-                        "enum": ["summary", "classes", "functions", "deps", "tree"],
-                        "description": "The type of structure view to return."
+                        "default": "tree",
+                        "enum": ["tree", "classes", "functions", "deps", "all"],
+                        "description": "The type of structure view to return. Use 'all' to get all views combined."
                     },
                     "limit": {
                         "type": "integer",

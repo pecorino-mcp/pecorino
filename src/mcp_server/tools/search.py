@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import threading
+import time
 from typing import Optional
 
 from src.core.errors import AnalysisError, SecurityValidationError, IndexNotFoundError
 from src.mcp_server.middleware.caching import _get_cached_api, clear_index_cache
 from src.mcp_server.middleware.security import safe_path, check_suspicious
 from src.mcp_server.middleware.sync import _auto_sync_stale
+from src.mcp_server.prometheus_metrics import FTS_SCAN_DURATION
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +130,9 @@ async def do_search(target: str, query: Optional[str] = None, limit: int = 10, o
                 clear_index_cache()
                 index = _get_cached_api(repo_root, db_path, "index")
                 
+    _fts_start = time.time()
     results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset)
+    FTS_SCAN_DURATION.observe(time.time() - _fts_start)
 
     # Auto-expand: include source when few results
     auto_expanded = False
