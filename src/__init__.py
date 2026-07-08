@@ -4,6 +4,8 @@ Pecorino - Modular Git Repository Statistics Package
 This package provides comprehensive git repository analysis and HTML report generation.
 All functionality is organized into focused modules for better maintainability.
 """
+__path__ = __import__('pkgutil').extend_path(__path__, __name__)
+
 
 # Configuration
 # Parsers

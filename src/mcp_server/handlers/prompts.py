@@ -21,10 +21,10 @@ async def handle_list_prompts(
     prompts = [
         types.Prompt(
             name="browse",
-            description="Browse codebase structure (tree, deps, summary, classes, functions).",
+            description="Browse codebase structure (tree, deps, classes, functions).",
             arguments=[
                 types.PromptArgument(name="target", description="Target path to browse", required=False),
-                types.PromptArgument(name="view", description="View type (summary, classes, deps, tree)", required=False)
+                types.PromptArgument(name="view", description="View type (tree, classes, deps, all)", required=False)
             ]
         ),
         types.Prompt(
@@ -85,7 +85,7 @@ async def handle_get_prompt(
     
     if name == "browse":
         target = arguments.get("target", "")
-        view = arguments.get("view", "summary")
+        view = arguments.get("view", "tree")
         return types.GetPromptResult(
             description="Browse codebase structure.",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the browse tool on target '{target}' with view '{view}'."))]
@@ -164,7 +164,7 @@ async def handle_completion(
             return _complete_target_path(val)
             
         elif ref.name == "browse" and argument.name == "view":
-            views = ["summary", "classes", "functions", "deps", "tree"]
+            views = ["classes", "functions", "deps", "tree", "all"]
             val = (context or {}).get("view", "")
             return types.Completion(
                 values=[v for v in views if v.startswith(val.lower())],

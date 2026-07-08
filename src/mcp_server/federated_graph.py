@@ -76,7 +76,14 @@ class FederatedGraphAPI(GraphAPI):
                 for table, pairs in rel_pairs.items():
                     for from_table, to_table in pairs:
                         merged_csvs[f"{table}_{from_table}_{to_table}"] = os.path.join(temp_dir, f"{table}_{from_table}_{to_table}_merged.csv")
+                import csv
                 
+                seen_node_ids = {t: set() for t in node_tables}
+                seen_edges = {}
+                for table, pairs in rel_pairs.items():
+                    for from_table, to_table in pairs:
+                        seen_edges[f"{table}_{from_table}_{to_table}"] = set()
+
                 for repo in repos:
                     logger.debug("Exporting graph for %s", repo['name'])
                     graph_path = repo['kuzu_path']
@@ -93,14 +100,19 @@ class FederatedGraphAPI(GraphAPI):
                                 try:
                                     conn.execute(f"COPY (MATCH (a:{table}) RETURN a.*) TO '{out_csv}'")
                                     if os.path.exists(out_csv):
-                                        with open(merged_csvs[table], 'a') as outfile:
-                                            with open(out_csv, 'r') as infile:
-                                                # Skip header if outfile already has content
-                                                if os.path.getsize(merged_csvs[table]) > 0:
-                                                    next(infile, None) 
-                                                shutil.copyfileobj(infile, outfile)
+                                        with open(out_csv, 'r', newline='') as infile:
+                                            with open(merged_csvs[table], 'a', newline='') as outfile:
+                                                reader = csv.reader(infile)
+                                                writer = csv.writer(outfile)
+                                                for row in reader:
+                                                    if not row: continue
+                                                    node_id = row[0]
+                                                    if node_id not in seen_node_ids[table]:
+                                                        seen_node_ids[table].add(node_id)
+                                                        writer.writerow(row)
                                 except Exception as e:
                                     # Ignore if table is empty or doesn't exist
+                                    logger.warning("Failed to export nodes for %s: %s", table, e)
                                     pass
                                     
                             # Export rels per valid pair
@@ -110,10 +122,19 @@ class FederatedGraphAPI(GraphAPI):
                                     try:
                                         conn.execute(f"COPY (MATCH (a:{from_table})-[e:{table}]->(b:{to_table}) RETURN a.id, b.id, e.*) TO '{out_csv}'")
                                         if os.path.exists(out_csv):
-                                            with open(merged_csvs[f"{table}_{from_table}_{to_table}"], 'a') as outfile:
-                                                with open(out_csv, 'r') as infile:
-                                                    # For relationships using MATCH we don't output headers, so no need to skip
-                                                    shutil.copyfileobj(infile, outfile)
+                                            key = f"{table}_{from_table}_{to_table}"
+                                            with open(out_csv, 'r', newline='') as infile:
+                                                with open(merged_csvs[key], 'a', newline='') as outfile:
+                                                    reader = csv.reader(infile)
+                                                    writer = csv.writer(outfile)
+                                                    
+                                                    for row in reader:
+                                                        if not row: continue
+                                                        if len(row) >= 2:
+                                                            edge_id = (row[0], row[1])
+                                                            if edge_id not in seen_edges[key]:
+                                                                seen_edges[key].add(edge_id)
+                                                                writer.writerow(row)
                                     except Exception as e:
                                         pass
                     except Exception as e:
@@ -125,7 +146,7 @@ class FederatedGraphAPI(GraphAPI):
                     for table in node_tables:
                         if os.path.exists(merged_csvs[table]) and os.path.getsize(merged_csvs[table]) > 0:
                             try:
-                                conn.execute(f"COPY {table} FROM '{merged_csvs[table]}' (HEADER=true)")
+                                conn.execute(f"COPY {table} FROM '{merged_csvs[table]}'")
                             except Exception as e:
                                 logger.warning("Failed to import %s: %s", table, e)
                                 

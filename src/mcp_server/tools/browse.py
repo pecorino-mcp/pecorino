@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _fts_rebuild_lock = threading.Lock()
 
-ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree"})
+ALLOWED_VIEWS = frozenset({"classes", "functions", "deps", "tree", "all"})
 MAX_LIMIT = 100
 MAX_DEPTH = 10
 MAX_QUERY_LEN = 200
@@ -31,7 +31,7 @@ MAX_CODE_LINES = 300
 INDEX_TIMEOUT_S = 300
 from mcp.server import ServerRequestContext
 
-async def do_browse(target: str, view: str = "summary", query: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False, ctx: Optional[ServerRequestContext] = None) -> dict:
+async def do_browse(target: str, view: str = "tree", query: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False, ctx: Optional[ServerRequestContext] = None) -> dict:
     # --- Input validation ---
     view = view.strip().lower()
     if view not in ALLOWED_VIEWS:
@@ -43,23 +43,74 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     limit = max(1, min(int(limit), MAX_LIMIT))
     offset = max(0, int(offset))
 
+    if view == "all":
+        views_to_query = ["classes", "functions", "deps", "tree"]
+        tasks = [
+            do_browse(target, v, query, limit, offset, max_depth, None, allow_external, ctx)
+            for v in views_to_query
+        ]
+        sub_results = await asyncio.gather(*tasks)
+        
+        combined_structure = {}
+        target_path = target
+        target_type = "unknown"
+        
+        for v, res in zip(views_to_query, sub_results):
+            target_path = res.get("target", target_path)
+            target_type = res.get("type", target_type)
+            if "structure" in res:
+                combined_structure[v] = res["structure"]
+            else:
+                data = {k: val for k, val in res.items() if k not in ("target", "type", "view", "index_staleness")}
+                if data:
+                    combined_structure[v] = data
+                    
+        result = {
+            "target": target_path,
+            "type": target_type,
+            "view": "all",
+            "structure": combined_structure
+        }
+        
+        if output_file:
+            try:
+                out_path = safe_output_path(output_file)
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, indent=2)
+                return {"saved_to": str(out_path), "target": target_path, "type": target_type, "view": "all"}
+            except Exception as e:
+                logger.error("Failed to write browse output: %s", e)
+                
+        def truncate_lists(obj):
+            if isinstance(obj, dict):
+                return {k: truncate_lists(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                if len(obj) > limit:
+                    truncated_list = [truncate_lists(v) for v in obj[:limit]]
+                    truncated_list.append(f"... (truncated {len(obj) - limit} more items, use output_file parameter to view full results)")
+                    return truncated_list
+                return [truncate_lists(v) for v in obj]
+            return obj
+            
+        return truncate_lists(result)
+
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
     
-    # Require explicit indexing for external repositories
-    if allow_external and not os.path.exists(db_path):
-        raise IndexNotFoundError(
-            f"External repository at '{repo_root}' has not been indexed yet. "
-            f"Please run the 'update_index' tool with allow_external=True on this target first."
-        )
-
-    index = _get_cached_api(repo_root, db_path, "index")
+    # Remove explicit index requirement
+    try:
+        index = _get_cached_api(repo_root, db_path, "index")
+    except Exception:
+        index = None
     
     api = None
-    if view in ("summary", "deps"):
-        api = _get_cached_api(repo_root, db_path, "graph")
+    if view in ("deps",):
+        try:
+            api = _get_cached_api(repo_root, db_path, "graph")
+        except Exception:
+            api = None
 
 
     # ── Structural views: classes, functions, deps, tree, summary ──
@@ -91,18 +142,33 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             result["structure"] = {"tree": tree_str}
         else:
             # Directory: indexed file listing grouped by language
-            try:
-                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
-                db_res = index._conn.execute('''
-                    SELECT filepath, lang
-                    FROM files
-                    WHERE filepath LIKE ?
-                    ORDER BY filepath
-                ''', (f"{prefix}%",)).fetchall()
-                file_entries = [{"path": row[0][len(prefix):], "lang": row[1]} for row in db_res]
-            except Exception:
+            if index is None:
                 file_entries = []
-            result["structure"] = {"file_tree": file_entries, "total_indexed_files": len(file_entries)}
+                try:
+                    for root, dirs, fnames in os.walk(str(path)):
+                        dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}]
+                        for fname in fnames:
+                            file_entries.append({"path": os.path.relpath(os.path.join(root, fname), str(path)), "lang": "unknown"})
+                            if len(file_entries) >= 1000:
+                                break
+                        if len(file_entries) >= 1000:
+                            break
+                except Exception:
+                    pass
+                result["structure"] = {"file_tree": file_entries, "total_files": len(file_entries), "note": "Dynamic scan (unindexed)"}
+            else:
+                try:
+                    prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
+                    db_res = index._conn.execute('''
+                        SELECT filepath, lang
+                        FROM files
+                        WHERE filepath LIKE ?
+                        ORDER BY filepath
+                    ''', (f"{prefix}%",)).fetchall()
+                    file_entries = [{"path": row[0][len(prefix):], "lang": row[1]} for row in db_res]
+                except Exception:
+                    file_entries = []
+                result["structure"] = {"file_tree": file_entries, "total_indexed_files": len(file_entries)}
 
     elif view == "deps":
         if is_file:
@@ -110,7 +176,8 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             tree = await asyncio.to_thread(parse, content, path.suffix)
             result["structure"] = [{"module": i.module, "names": i.names} for i in tree.imports]
         else:
-            # Directory: aggregate outgoing dependencies from the graph
+            if index is None or api is None:
+                raise IndexNotFoundError("Dependency view for unindexed directory requires running 'update_index' first.")
             prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
             try:
                 db_res = index._conn.execute('''
@@ -139,6 +206,8 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
             ]
 
     elif view in ("classes", "functions"):
+        if index is None:
+            raise IndexNotFoundError(f"'{view}' view requires running 'update_index' first.")
         if is_dir:
             nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
         else:
@@ -155,113 +224,11 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
         ]
         result["structure"] = filtered
 
-    else:  # summary
-        if is_dir:
-            nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
-            indexed_files = len(set(n['filepath'] for n in nodes))
-
-            # Capped on-disk scan
-            on_disk_count = 0
-            try:
-                for root, dirs, fnames in os.walk(str(path)):
-                    # Ignore common ignored dirs to match indexer
-                    dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}]
-                    on_disk_count += len(fnames)
-                    if on_disk_count > 1000:
-                        on_disk_count = "1000+"
-                        break
-            except Exception:
-                on_disk_count = "unknown"
-
-            # Language breakdown and total files from the database files table
-            try:
-                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
-                db_res = index._conn.execute('''
-                    SELECT lang, count(*)
-                    FROM files
-                    WHERE filepath LIKE ?
-                    GROUP BY lang
-                ''', (f"{prefix}%",)).fetchall()
-                lang_breakdown = {row[0]: row[1] for row in db_res}
-            except Exception:
-                lang_breakdown = {}
-
-            node_preview = [n['name'] for n in nodes[:20]]
-
-            # Architectural grouping: cluster files by top-level subdirectory
-            architectural_groups = {}
-            try:
-                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
-                all_files = index._conn.execute('''
-                    SELECT filepath FROM files WHERE filepath LIKE ?
-                ''', (f"{prefix}%",)).fetchall()
-                for (fp,) in all_files:
-                    rel = fp[len(prefix):]
-                    parts = rel.split("/")
-                    group_name = parts[0] if len(parts) > 1 else "(root)"
-                    if group_name not in architectural_groups:
-                        architectural_groups[group_name] = {"file_count": 0, "path": f"{prefix}{group_name}/"}
-                    architectural_groups[group_name]["file_count"] += 1
-                # Sort by file count descending, keep top 15
-                architectural_groups = dict(
-                    sorted(architectural_groups.items(), key=lambda x: x[1]["file_count"], reverse=True)[:15]
-                )
-            except Exception:
-                pass
-
-            result["structure"] = {
-                "indexed_files_count": indexed_files,
-                "total_files_on_disk": on_disk_count,
-                "language_breakdown": lang_breakdown,
-                "architectural_groups": architectural_groups,
-                "top_level_symbols_preview": node_preview
-            }
-        else:
-            nodes = await asyncio.to_thread(index.get_file_nodes, str(path))
-            classes = sum(1 for n in nodes if n['node_type'] in ('class', 'interface'))
-            functions_nodes = [n for n in nodes if n['node_type'] in ('function', 'method')]
-
-            top_level = 0
-            nested = 0
-            methods = 0
-
-            # O(n log n) nesting detection: sort by (start_line, -end_line) to enable
-            # single-pass scope tracking with a stack.
-            sorted_nodes = sorted(nodes, key=lambda n: (n['start_line'], -n['end_line']))
-            scope_stack = []
-            for node in sorted_nodes:
-                # Pop scopes that ended before this node starts
-                while scope_stack and scope_stack[-1]['end_line'] < node['start_line']:
-                    scope_stack.pop()
-                if node['node_type'] in ('function', 'method'):
-                    if not scope_stack:
-                        top_level += 1
-                    else:
-                        innermost = scope_stack[-1]
-                        if innermost['node_type'] in ('function', 'method'):
-                            nested += 1
-                        elif innermost['node_type'] in ('class', 'interface'):
-                            methods += 1
-                        else:
-                            top_level += 1
-                scope_stack.append(node)
-
-            result["structure"] = {
-                "classes": classes,
-                "top_level_functions": top_level,
-                "nested_functions": nested,
-                "methods": methods,
-            }
-
     # Graph database dependency and PageRank retrieval (file-level only)
-    if view in ("summary", "deps") and is_file:
+    if view in ("deps",) and is_file and api is not None:
         try:
             graph_metrics = await asyncio.to_thread(api.get_file_dependencies, path.as_posix())
-            if view == "summary":
-                if "structure" in result and isinstance(result["structure"], dict):
-                    result["structure"]["graph_metrics"] = graph_metrics
-            else:  # view == "deps"
-                result["graph_metrics"] = graph_metrics
+            result["graph_metrics"] = graph_metrics
         except Exception as e:
             logger.warning("Graph database query failed: %s", e)
 
@@ -328,12 +295,13 @@ async def do_browse(target: str, view: str = "summary", query: Optional[str] = N
     _SYNC_VIEWS_SET = frozenset({"search", "code", "callers", "callees", "impact", "pagerank", "functional-analysis"})
     if view not in _SYNC_VIEWS_SET:
         try:
-            stale_count = len(index.get_stale_files(str(path)))
-            if stale_count > 0:
-                result["index_staleness"] = {
-                    "stale_file_count": stale_count,
-                    "hint": "Run update_index to refresh. Search/graph views auto-sync."
-                }
+            if index is not None:
+                stale_count = len(index.get_stale_files(str(path)))
+                if stale_count > 0:
+                    result["index_staleness"] = {
+                        "stale_file_count": stale_count,
+                        "hint": "Run update_index to refresh. Search/graph views auto-sync."
+                    }
         except Exception:
             pass
 

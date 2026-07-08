@@ -1,12 +1,15 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Dict, Any, Optional
 
 from src.core.errors import SecurityValidationError, IndexNotFoundError
 from src.mcp_server.middleware.caching import _get_cached_api
 from src.mcp_server.middleware.security import safe_path, check_suspicious
 from src.mcp_server.dsl.compiler import DSLCompiler
+from src.mcp_server.prometheus_metrics import GRAPH_DB_SIZE
+from src.mcp_server.index_db import get_graph_path_for_repo
 
 logger = logging.getLogger(__name__)
 from mcp.server import ServerRequestContext
@@ -98,15 +101,24 @@ async def do_query(target: str, query_json: str | Dict[str, Any], allow_external
         nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
         fn_nodes = [n for n in nodes if n.get("node_type") in ("function", "method")]
 
-        # Build a caller count map from the graph
+        # Build a caller count map from the graph in one query
+        caller_counts = {}
+        try:
+            cypher = '''
+            MATCH (caller)-[:CALLS]->(callee)
+            RETURN callee.name AS name, COUNT(caller) AS caller_count
+            '''
+            rows = await asyncio.to_thread(graph_api.graph.query, cypher)
+            for r in rows:
+                if r.get('name'):
+                    caller_counts[r['name']] = r['caller_count']
+        except Exception as e:
+            logger.warning(f"Bulk caller count query failed: {e}")
+
         results = []
         for node in fn_nodes:
             name = node.get("name", "")
-            try:
-                callers = await asyncio.to_thread(graph_api.find_callers, name)
-                caller_count = len(callers) if callers else 0
-            except Exception:
-                caller_count = 0
+            caller_count = caller_counts.get(name, 0)
 
             if graph_intent == "entry_points" and caller_count >= 5:
                 results.append({**node, "caller_count": caller_count})
@@ -140,6 +152,24 @@ async def do_query(target: str, query_json: str | Dict[str, Any], allow_external
         # If there's a graph join, we need to query Kuzu first to get the matching node IDs
         graph_api = _get_cached_api(repo_root, db_path, "graph")
         graph_res = await asyncio.to_thread(graph_api.graph.query, cypher_query)
+        
+        # Track graph DB size
+        def get_dir_size(path: str) -> int:
+            total = 0
+            try:
+                for dirpath, _, filenames in os.walk(path):
+                    for f in filenames:
+                        fp = os.path.join(dirpath, f)
+                        if not os.path.islink(fp):
+                            total += os.path.getsize(fp)
+            except Exception as e:
+                logger.warning(f"Failed to get graph db size: {e}")
+            return total
+            
+        graph_db_dir = get_graph_path_for_repo(db_path)
+        if os.path.exists(graph_db_dir):
+            GRAPH_DB_SIZE.set(get_dir_size(graph_db_dir))
+            
         # Extract node IDs
         matching_ids = []
         for row in graph_res:
