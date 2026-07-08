@@ -22,6 +22,8 @@ from src.mcp_server.tools.metrics_tool import do_metrics
 from src.mcp_server.tools.update_index import do_update_index
 from src.mcp_server.tools.query import do_query
 from src.mcp_server.tools.code import do_get_code_range
+from src.mcp_server.tools.risk_triage import do_risk_triage
+from src.mcp_server.tools.explain_symbol import do_explain_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +65,7 @@ async def handle_list_tools(
     tools = [
         types.Tool(
             name="browse",
-            description="Browse codebase structure (tree, deps, classes, functions). Use this for structural viewing, not for searching or precise code retrieval.",
+            description="Browse codebase structure (tree, deps, classes, functions, all). Use this for structural viewing, not for searching or precise code retrieval. Prefer 'risk_triage' for high-level risk analysis, or 'explain_symbol' to understand a specific symbol.",
             annotations=types.ToolAnnotations(
                 title="Browse Codebase",
                 **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
@@ -93,7 +95,7 @@ async def handle_list_tools(
                     },
                     "allow_external": {
                         "type": "boolean",
-                        "default": False,
+                        "default": True,
                         "description": "If True, allows accessing relative paths outside the standard workspace root."
                     }
                 }
@@ -101,7 +103,7 @@ async def handle_list_tools(
         ),
         types.Tool(
             name="search",
-            description="Search the codebase for symbols or keywords using Full-Text Search. Works on both files (returns nodes) and directories (FTS search). Do NOT use this for AST structure queries (use query_codebase) or exact line-range snippet extraction (use get_code_range). Automatically includes source code when 3 or fewer results are found.",
+            description="Search the codebase for symbols or keywords using Full-Text Search. Works on both files (returns nodes) and directories (FTS search). Do NOT use this for AST structure queries (use query_codebase) or exact line-range snippet extraction (use get_code_range). Use this when the user asks 'where is X?' or 'find usages of X'. Automatically includes source code when 3 or fewer results are found.",
             annotations=types.ToolAnnotations(
                 title="Search Code",
                 **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
@@ -132,14 +134,14 @@ async def handle_list_tools(
                     },
                     "allow_external": {
                         "type": "boolean",
-                        "default": False
+                        "default": True
                     }
                 }
             }
         ),
         types.Tool(
             name="analyze",
-            description="Run graph analysis such as callers, callees, impact analysis, or pagerank.",
+            description="Run graph analysis such as callers, callees, impact analysis, or pagerank. Use callers/callees when the user asks 'who calls X?' or 'what does X call?'. Use impact to trace deep dependencies.",
             annotations=types.ToolAnnotations(
                 title="Analyze Code Graph",
                 **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
@@ -175,7 +177,7 @@ async def handle_list_tools(
                     },
                     "allow_external": {
                         "type": "boolean",
-                        "default": False
+                        "default": True
                     }
                 },
                 "required": ["analysis"]
@@ -183,7 +185,7 @@ async def handle_list_tools(
         ),
         types.Tool(
             name="update_index",
-            description="Update the AST index for the codebase and return a structural summary.",
+            description="Update the AST index for the codebase and return a structural summary. Call this once after cloning or after significant changes. Many features (search, callers/callees, impact, pagerank) require an up-to-date index.",
             annotations=types.ToolAnnotations(
                 title="Update Index",
                 **{k: v for k, v in _MUTATING.model_dump(exclude_none=True).items() if k != "title"},
@@ -197,7 +199,7 @@ async def handle_list_tools(
                     },
                     "allow_external": {
                         "type": "boolean",
-                        "default": False
+                        "default": True
                     }
                 }
             }
@@ -227,7 +229,7 @@ async def handle_list_tools(
                     },
                     "allow_external": {
                         "type": "boolean",
-                        "default": False
+                        "default": True
                     }
                 }
             }
@@ -256,7 +258,7 @@ async def handle_list_tools(
                     },
                     "allow_external": {
                         "type": "boolean",
-                        "default": False
+                        "default": True
                     }
                 },
                 "required": ["target", "start_line", "end_line"]
@@ -279,6 +281,53 @@ async def handle_list_tools(
                 },
                 "required": ["path"]
             }
+        ),
+        types.Tool(
+            name="risk_triage",
+            description="Run a basic risk triage on a repository. Prefer this for repo-level risk triage. It automatically updates the index and calculates hotspots.",
+            annotations=types.ToolAnnotations(
+                title="Risk Triage",
+                **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute path to the target directory. Optional. Defaults to workspace root."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": True
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="explain_symbol",
+            description="Explain a specific symbol by searching for it and finding its callers. Prefer this over raw browse when the user asks 'explain X', 'trace Y', or 'what does Z do?'",
+            annotations=types.ToolAnnotations(
+                title="Explain Symbol",
+                **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute path to the target directory or file. Optional. Defaults to workspace root."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "The symbol or keyword to explain."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": True
+                    }
+                },
+                "required": ["query"]
+            }
         )
     ]
     
@@ -286,7 +335,7 @@ async def handle_list_tools(
         tools.append(
             types.Tool(
                 name="metrics",
-                description="Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis. (Admin only)",
+                description="Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis. (Admin only). Prefer what: [hotspots] for repo-level risk triage; use what: [complexity] or [oop] on single files or small packages.",
                 annotations=types.ToolAnnotations(
                     title="Calculate Metrics",
                     read_only_hint=True,
@@ -402,7 +451,7 @@ async def handle_call_tool(
                 view=arguments.get("view", "summary"),
                 limit=arguments.get("limit", 10),
                 offset=arguments.get("offset", 0),
-                allow_external=arguments.get("allow_external", False),
+                allow_external=arguments.get("allow_external", True),
                 ctx=ctx
             )
         elif name == "search":
@@ -413,7 +462,7 @@ async def handle_call_tool(
                 query=arguments.get("query"),
                 limit=arguments.get("limit", 10),
                 offset=arguments.get("offset", 0),
-                allow_external=arguments.get("allow_external", False),
+                allow_external=arguments.get("allow_external", True),
                 include_source=arguments.get("include_source", False),
                 ctx=ctx
             )
@@ -427,7 +476,7 @@ async def handle_call_tool(
                 max_depth=arguments.get("max_depth", 3),
                 limit=arguments.get("limit", 10),
                 offset=arguments.get("offset", 0),
-                allow_external=arguments.get("allow_external", False),
+                allow_external=arguments.get("allow_external", True),
                 ctx=ctx
             )
         elif name == "metrics":
@@ -461,7 +510,7 @@ async def handle_call_tool(
                 target=target,
                 what=arguments.get("what", ["all"]),
                 output_path=output_path,
-                allow_external=arguments.get("allow_external", False)
+                allow_external=arguments.get("allow_external", True)
             )
         elif name == "update_index":
             target = await _detect_directory(_normalize_target(arguments.get("target")))
@@ -469,7 +518,7 @@ async def handle_call_tool(
             res = await do_update_index(
                 target=target,
                 ctx=ctx,
-                allow_external=arguments.get("allow_external", False)
+                allow_external=arguments.get("allow_external", True)
             )
             # Notify client that resources have changed after re-indexing
             await helper.notify_resource_list_changed()
@@ -497,7 +546,7 @@ async def handle_call_tool(
             res = await do_query(
                 target=target,
                 query_json=query_json,
-                allow_external=arguments.get("allow_external", False),
+                allow_external=arguments.get("allow_external", True),
                 ctx=ctx
             )
         elif name == "get_code_range":
@@ -511,7 +560,7 @@ async def handle_call_tool(
                 target=target,
                 start_line=int(start_line),
                 end_line=int(end_line),
-                allow_external=arguments.get("allow_external", False),
+                allow_external=arguments.get("allow_external", True),
                 ctx=ctx
             )
         elif name == "set_workspace":
@@ -542,6 +591,26 @@ async def handle_call_tool(
             await helper.notify_resource_list_changed()
             
             res = [{"type": "text", "text": f"Workspace root successfully changed to: {new_path}"}]
+        elif name == "risk_triage":
+            target = await _detect_directory(_normalize_target(arguments.get("target")))
+            check_suspicious(target, "target")
+            res = await do_risk_triage(
+                target=target,
+                allow_external=arguments.get("allow_external", True),
+                ctx=ctx
+            )
+        elif name == "explain_symbol":
+            target = await _detect_directory(_normalize_target(arguments.get("target")))
+            check_suspicious(target, "target")
+            query = arguments.get("query")
+            if not query:
+                raise SecurityValidationError("Missing required argument 'query'")
+            res = await do_explain_symbol(
+                target=target,
+                query=query,
+                allow_external=arguments.get("allow_external", True),
+                ctx=ctx
+            )
         else:
             raise SecurityValidationError(f"Unknown tool: {name}")
 
@@ -559,6 +628,19 @@ async def handle_call_tool(
             content=[types.TextContent(type="text", text=json.dumps(wrapped, indent=2))]
         )
     except Exception as e:
+        from src.core.errors import IndexNotFoundError
+        if isinstance(e, IndexNotFoundError) or "IndexNotFoundError" in str(type(e)):
+            return types.CallToolResult(
+                content=[types.TextContent(
+                    type="text", 
+                    text=json.dumps({
+                        "error_type": "IndexNotFoundError",
+                        "message": f"No index found. {e}",
+                        "suggestion": f"Call update_index(target='{arguments.get('target', 'workspace_root')}') first, then retry."
+                    })
+                )],
+                isError=True
+            )
         return handle_mcp_error(name, e, start_time)
     finally:
         limiter.release()

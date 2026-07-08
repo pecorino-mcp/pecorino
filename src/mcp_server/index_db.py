@@ -66,7 +66,8 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     migrations = [
         'ALTER TABLE code_nodes DROP COLUMN body_text',
         'ALTER TABLE code_nodes ADD COLUMN relationships VARCHAR',
-        'ALTER TABLE code_nodes DROP COLUMN metrics_json'
+        'ALTER TABLE code_nodes DROP COLUMN metrics_json',
+        'ALTER TABLE code_nodes ADD COLUMN pagerank DOUBLE DEFAULT 0.0'
     ]
     for query in migrations:
         try:
@@ -288,14 +289,15 @@ class CodeSearchIndex:
                 n['filepath'],
                 n['start_line'],
                 n['end_line'],
-                n.get('relationships', '')
+                n.get('relationships', ''),
+                0.0
             ))
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
                 # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?)", data)
+                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?)", data)
                 conn.execute('''
                     INSERT INTO code_nodes
                     SELECT * FROM temp_code_nodes
@@ -446,6 +448,43 @@ class CodeSearchIndex:
         except Exception:
             pass
 
+    def update_pagerank_bulk(self, scores: List[Dict[str, Any]]):
+        """Bulk update pagerank scores for code nodes."""
+        if not scores:
+            return
+        conn = self._conn
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            data = []
+            for s in scores:
+                node_id = s.get("node_id", "")
+                score = s.get("score", 0.0)
+                if "::" not in node_id:
+                    continue # Likely a File node
+                parts = node_id.split("::")
+                filepath = parts[0]
+                if len(parts) == 2:
+                    name = parts[1] # Class or Function
+                elif len(parts) == 3:
+                    name = f"{parts[1]}.{parts[2]}" # Method
+                else:
+                    continue
+                data.append((filepath, name, score))
+
+            conn.execute("CREATE TEMP TABLE temp_pr (filepath VARCHAR, name VARCHAR, pagerank DOUBLE)")
+            conn.executemany("INSERT INTO temp_pr VALUES (?, ?, ?)", data)
+            conn.execute('''
+                UPDATE code_nodes 
+                SET pagerank = temp_pr.pagerank 
+                FROM temp_pr 
+                WHERE code_nodes.filepath = temp_pr.filepath AND code_nodes.name = temp_pr.name
+            ''')
+            conn.execute("DROP TABLE temp_pr")
+            conn.execute("COMMIT")
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.warning("Failed to bulk update pagerank: %s", e)
+
     def get_file_hash(self, filepath: str) -> str:
         """Retrieve the stored hash for a given file, or None if not found."""
         conn = self._conn
@@ -508,7 +547,7 @@ class CodeSearchIndex:
             # WHERE clause for filtering and in the SELECT clause to retrieve the score.
             res = conn.execute(f'''
                 SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line,
-                       fts_main_code_nodes.match_bm25(c.id, ?) AS score
+                       (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
                 FROM code_nodes c
                 WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
                 {path_filter}
