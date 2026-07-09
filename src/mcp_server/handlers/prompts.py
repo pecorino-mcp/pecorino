@@ -21,10 +21,10 @@ async def handle_list_prompts(
     prompts = [
         types.Prompt(
             name="browse",
-            description="Browse codebase structure (tree, deps, classes, functions).",
+            description="Browse codebase structure (tree, deps, classes, functions, pagerank, summary).",
             arguments=[
                 types.PromptArgument(name="target", description="Target path to browse", required=False),
-                types.PromptArgument(name="view", description="View type (tree, classes, deps, all)", required=False)
+                types.PromptArgument(name="view", description="View type (tree, classes, deps, all, pagerank, summary)", required=False)
             ]
         ),
         types.Prompt(
@@ -86,26 +86,28 @@ async def handle_get_prompt(
     if name == "browse":
         target = arguments.get("target", "")
         view = arguments.get("view", "tree")
+        target_str = f" on target '{target}'" if target else ""
         return types.GetPromptResult(
             description="Browse codebase structure.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the browse tool on target '{target}' with view '{view}'."))]
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the browse tool{target_str} with view '{view}'."))]
         )
     elif name == "search":
         target = arguments.get("target", "")
         query = arguments.get("query", "")
+        target_str = f" on target '{target}'" if target else ""
         return types.GetPromptResult(
             description="Search the codebase.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool on target '{target}' for query '{query}'."))]
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} for query '{query}'."))]
         )
     elif name == "analyze":
         target = arguments.get("target", "")
         analysis = arguments.get("analysis", "")
         symbol = arguments.get("symbol", "")
-        msg = f"Please run {analysis} analysis"
+        msg = f"Please run {analysis} analysis" if analysis else "Please run analysis"
         if target:
-            msg += f" on {target}"
+            msg += f" on '{target}'"
         if symbol:
-            msg += f" for symbol {symbol}"
+            msg += f" for symbol '{symbol}'"
         return types.GetPromptResult(
             description="Analyze the codebase.",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=msg))]
@@ -113,22 +115,25 @@ async def handle_get_prompt(
     elif name == "query_codebase":
         target = arguments.get("target", "")
         query_json = arguments.get("query_json", "")
+        target_str = f" on target '{target}'" if target else ""
         return types.GetPromptResult(
             description="Query the codebase using JSON DSL.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please execute the following JSON query on target '{target}':\n{query_json}"))]
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please execute the following JSON query{target_str}:\n{query_json}"))]
         )
     elif name == "update_index":
         target = arguments.get("target", "")
+        target_str = f" on target '{target}'" if target else ""
         return types.GetPromptResult(
             description="Update codebase index.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the update_index tool on target '{target}'."))]
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the update_index tool{target_str}."))]
         )
     elif name == "metrics":
         target = arguments.get("target", "")
         what = arguments.get("what", "all")
+        target_str = f" on target '{target}'" if target else ""
         return types.GetPromptResult(
             description="Calculate metrics.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please calculate {what} metrics on target '{target}'."))]
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please calculate {what} metrics{target_str}."))]
         )
     raise ValueError(f"Prompt not found: {name}")
 
@@ -164,7 +169,7 @@ async def handle_completion(
             return _complete_target_path(val)
             
         elif ref.name == "browse" and argument.name == "view":
-            views = ["classes", "functions", "deps", "tree", "all"]
+            views = ["classes", "functions", "deps", "tree", "all", "pagerank", "summary"]
             val = (context or {}).get("view", "")
             return types.Completion(
                 values=[v for v in views if v.startswith(val.lower())],
