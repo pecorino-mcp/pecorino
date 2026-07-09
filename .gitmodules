@@ -10,7 +10,7 @@
 	ignore = dirty
 [submodule "modules/gorgonzola"]
 	path = modules/gorgonzola
-	url = https://github.com/lechibang-1512/gorgonzola
+	url = https://github.com/gorgonzola-graph-db/gorgonzola
 	ignore = dirty
 [submodule "modules/py-tree-sitter"]
 	path = modules/py-tree-sitter
@@ -19,7 +19,9 @@
 [submodule "modules/pecorino-utils"]
 	path = modules/pecorino-utils
 	url = https://github.com/pecorino-mcp/pecorino-utils.git
+	ignore = dirty
 [submodule "modules/docs"]
 	path = modules/docs
 	url = https://github.com/pecorino-mcp/pecorino-docs
+	ignore = dirty
 

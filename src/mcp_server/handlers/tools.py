@@ -80,7 +80,7 @@ async def handle_list_tools(
                     "view": {
                         "type": "string",
                         "default": "tree",
-                        "enum": ["tree", "classes", "functions", "deps", "all"],
+                        "enum": ["tree", "classes", "functions", "deps", "all", "pagerank", "summary"],
                         "description": "The type of structure view to return. Use 'all' to get all views combined."
                     },
                     "limit": {
