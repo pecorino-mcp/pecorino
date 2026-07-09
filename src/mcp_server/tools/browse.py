@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _fts_rebuild_lock = threading.Lock()
 
-ALLOWED_VIEWS = frozenset({"classes", "functions", "deps", "tree", "all"})
+ALLOWED_VIEWS = frozenset({"classes", "functions", "deps", "tree", "all", "pagerank", "summary"})
 MAX_LIMIT = 100
 MAX_DEPTH = 10
 MAX_QUERY_LEN = 200
@@ -44,7 +44,7 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
     offset = max(0, int(offset))
 
     if view == "all":
-        views_to_query = ["classes", "functions", "deps", "tree"]
+        views_to_query = ["classes", "functions", "deps", "tree", "pagerank"]
         tasks = [
             do_browse(target, v, query, limit, offset, max_depth, None, allow_external, ctx)
             for v in views_to_query
@@ -106,7 +106,7 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
         index = None
     
     api = None
-    if view in ("deps",):
+    if view in ("deps", "pagerank"):
         try:
             api = _get_cached_api(repo_root, db_path, "graph")
         except Exception:
@@ -224,6 +224,52 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
         ]
         result["structure"] = filtered
 
+    elif view == "pagerank":
+        if index is None or api is None:
+            raise IndexNotFoundError(f"'{view}' view requires running 'update_index' first.")
+        if is_dir:
+            pr_scores = []
+            if api._pagerank_cache is None:
+                pr_scores = await asyncio.to_thread(api.graph.pagerank)
+                api._pagerank_cache = {pr.get("node_id"): pr.get("score", 0.0) for pr in pr_scores}
+            
+            prefix = path.as_posix()
+            if not prefix.endswith('/'):
+                prefix += '/'
+                
+            top_files = []
+            for node_id, score in api._pagerank_cache.items():
+                if node_id.startswith(prefix):
+                    rel_path = node_id[len(prefix):]
+                    top_files.append({"path": rel_path, "score": score})
+            
+            top_files.sort(key=lambda x: x["score"], reverse=True)
+            result["structure"] = top_files
+        else:
+            try:
+                graph_metrics = await asyncio.to_thread(api.get_file_dependencies, path.as_posix())
+                result["structure"] = {"pagerank_score": graph_metrics.get("pagerank_score", 0.0)}
+            except Exception as e:
+                logger.warning("Graph database query failed: %s", e)
+                result["structure"] = {"pagerank_score": 0.0}
+
+    elif view == "summary":
+        if is_file:
+            result["structure"] = {"note": "Summary not available for files."}
+        else:
+            if index is not None:
+                try:
+                    prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
+                    db_res = index._conn.execute('''
+                        SELECT COUNT(*) FROM files WHERE filepath LIKE ?
+                    ''', (f"{prefix}%",)).fetchone()
+                    total_files = db_res[0] if db_res else 0
+                    result["structure"] = {"total_indexed_files": total_files, "note": "Summary overview."}
+                except Exception:
+                    result["structure"] = {"total_indexed_files": 0}
+            else:
+                result["structure"] = {"total_indexed_files": 0, "note": "Unindexed directory."}
+
     # Graph database dependency and PageRank retrieval (file-level only)
     if view in ("deps",) and is_file and api is not None:
         try:
@@ -238,8 +284,10 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
         result["next_steps"] = "Use analyze(analysis='callers') or explain_symbol to trace specific dependencies."
     elif view in ("classes", "functions"):
         result["next_steps"] = "Use search(query=name) or get_code_range to see the implementation."
+    elif view == "pagerank":
+        result["next_steps"] = "Use analyze(analysis='impact') on top-ranked files to understand critical dependencies."
 
-    if not output_file and view in ("tree", "deps"):
+    if not output_file and view in ("tree", "deps", "pagerank"):
         try:
             import time
             dumped = json.dumps(result)
