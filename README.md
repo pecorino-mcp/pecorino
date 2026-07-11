@@ -65,7 +65,7 @@ Add Pecorino to your `claude_desktop_config.json`:
 Once connected, your AI assistant can use the following tools:
 
 ### 1. `browse`
-Browse codebase structure (tree, deps, classes, functions, pagerank, summary). Use this for structural viewing, not for searching or analysis.
+Browse codebase structure (tree, deps, classes, functions, pagerank, summary) or retrieve specific lines of code with `view="code"`. Use this for structural viewing and code retrieval.
 
 ### 2. `search`
 Unified search and analysis tool with multiple modes:
