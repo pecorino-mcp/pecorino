@@ -1,13 +1,12 @@
+import logging
 import os
 import shutil
 import tempfile
 import threading
-from typing import List, Dict
 
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
-from src.mcp_server.registry import registry
 from src.mcp_server.graph_api import GraphAPI
-import logging
+from src.mcp_server.registry import registry
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +23,7 @@ class FederatedGraphAPI(GraphAPI):
         with self._federated_lock:
             repos = registry.get_all_repos()
             current_hashes = {r['hash'] for r in repos}
-            
+
             # If we already built a federated graph for this exact set of repos, reuse it.
             if FederatedGraphAPI._cached_instance and current_hashes == FederatedGraphAPI._cached_hashes:
                 # Use the cached in-memory graph
@@ -35,7 +34,7 @@ class FederatedGraphAPI(GraphAPI):
             logger.info("Building federated graph for %d repositories...", len(repos))
             from src.mcp_server.config import settings
             federated_path = os.path.join(settings.index_dir, "federated_kuzu")
-            
+
             # Wipe old federated graph to rebuild cleanly
             if os.path.exists(federated_path):
                 if os.path.isdir(federated_path):
@@ -45,7 +44,7 @@ class FederatedGraphAPI(GraphAPI):
                         os.remove(federated_path)
                     except OSError:
                         pass
-                
+
             in_memory_graph = GorgonzolaGraph(federated_path)
             # Ensure schema is created
             with in_memory_graph:
@@ -54,7 +53,7 @@ class FederatedGraphAPI(GraphAPI):
             temp_dir = tempfile.mkdtemp(prefix="pecorino_federated_")
             try:
                 node_tables = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module", "ControlFlow", "Lambda", "Variable"]
-                
+
                 from src.mcp_server.gorgonzola_graph import _RELATIONSHIP_SCHEMA
                 rel_pairs = {}
                 rel_tables = []
@@ -68,16 +67,16 @@ class FederatedGraphAPI(GraphAPI):
                         if len(parts) >= 4 and parts[0] == "FROM" and parts[2] == "TO":
                             parsed_pairs.append((parts[1], parts[3]))
                     rel_pairs[table_name] = parsed_pairs
-                
+
                 # We will merge CSVs from all repos into single CSVs per table, then load them once.
-                # To avoid ID collisions (if any, though IDs are usually hash-based or file-based), 
+                # To avoid ID collisions (if any, though IDs are usually hash-based or file-based),
                 # we just append them.
                 merged_csvs = {t: os.path.join(temp_dir, f"{t}_merged.csv") for t in node_tables}
                 for table, pairs in rel_pairs.items():
                     for from_table, to_table in pairs:
                         merged_csvs[f"{table}_{from_table}_{to_table}"] = os.path.join(temp_dir, f"{table}_{from_table}_{to_table}_merged.csv")
                 import csv
-                
+
                 seen_node_ids = {t: set() for t in node_tables}
                 seen_edges = {}
                 for table, pairs in rel_pairs.items():
@@ -89,7 +88,7 @@ class FederatedGraphAPI(GraphAPI):
                     graph_path = repo['kuzu_path']
                     if not os.path.exists(graph_path):
                         continue
-                        
+
                     on_disk_graph = GorgonzolaGraph(graph_path)
                     try:
                         with on_disk_graph:
@@ -100,7 +99,7 @@ class FederatedGraphAPI(GraphAPI):
                                 try:
                                     conn.execute(f"COPY (MATCH (a:{table}) RETURN a.*) TO '{out_csv}'")
                                     if os.path.exists(out_csv):
-                                        with open(out_csv, 'r', newline='') as infile:
+                                        with open(out_csv, newline='') as infile:
                                             with open(merged_csvs[table], 'a', newline='') as outfile:
                                                 reader = csv.reader(infile)
                                                 writer = csv.writer(outfile)
@@ -114,7 +113,7 @@ class FederatedGraphAPI(GraphAPI):
                                     # Ignore if table is empty or doesn't exist
                                     logger.warning("Failed to export nodes for %s: %s", table, e)
                                     pass
-                                    
+
                             # Export rels per valid pair
                             for table, pairs in rel_pairs.items():
                                 for from_table, to_table in pairs:
@@ -123,11 +122,11 @@ class FederatedGraphAPI(GraphAPI):
                                         conn.execute(f"COPY (MATCH (a:{from_table})-[e:{table}]->(b:{to_table}) RETURN a.id, b.id, e.*) TO '{out_csv}'")
                                         if os.path.exists(out_csv):
                                             key = f"{table}_{from_table}_{to_table}"
-                                            with open(out_csv, 'r', newline='') as infile:
+                                            with open(out_csv, newline='') as infile:
                                                 with open(merged_csvs[key], 'a', newline='') as outfile:
                                                     reader = csv.reader(infile)
                                                     writer = csv.writer(outfile)
-                                                    
+
                                                     for row in reader:
                                                         if not row: continue
                                                         if len(row) >= 2:
@@ -135,7 +134,7 @@ class FederatedGraphAPI(GraphAPI):
                                                             if edge_id not in seen_edges[key]:
                                                                 seen_edges[key].add(edge_id)
                                                                 writer.writerow(row)
-                                    except Exception as e:
+                                    except Exception:
                                         pass
                     except Exception as e:
                         logger.warning("Failed to export graph for %s: %s", repo['name'], e)
@@ -149,7 +148,7 @@ class FederatedGraphAPI(GraphAPI):
                                 conn.execute(f"COPY {table} FROM '{merged_csvs[table]}'")
                             except Exception as e:
                                 logger.warning("Failed to import %s: %s", table, e)
-                                
+
                     for table, pairs in rel_pairs.items():
                         for from_table, to_table in pairs:
                             merged_csv = merged_csvs[f"{table}_{from_table}_{to_table}"]
@@ -167,7 +166,7 @@ class FederatedGraphAPI(GraphAPI):
                         pass
                 FederatedGraphAPI._cached_instance = in_memory_graph
                 FederatedGraphAPI._cached_hashes = current_hashes
-                
+
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -1,10 +1,11 @@
-import os
-import duckdb
-from pathlib import Path
-from typing import List, Dict, Optional
 import hashlib
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import duckdb
 
 from src.mcp_server.config import settings
+
 
 class RegistryDB:
     """

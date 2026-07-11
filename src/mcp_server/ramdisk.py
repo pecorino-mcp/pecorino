@@ -1,4 +1,5 @@
 import logging
+
 """
 RAM-backed index builder.
 
@@ -16,10 +17,11 @@ Usage as a context manager:
 """
 
 import os
-import sys
 import shutil
-import uuid
+import sys
 import time
+import uuid
+
 from filelock import FileLock
 
 logger = logging.getLogger(__name__)
@@ -72,13 +74,13 @@ class RamdiskIndex:
     def __enter__(self):
         os.makedirs(self.ram_dir, exist_ok=True)
         self._active = True
-        
+
         # Copy existing database and graph files from SSD to RAM disk if they exist
         if os.path.exists(self.ssd_db_path):
             shutil.copy2(self.ssd_db_path, self.db_path)
         if os.path.exists(self.ssd_gorgonzola_path) and os.path.isdir(self.ssd_gorgonzola_path):
             shutil.copytree(self.ssd_gorgonzola_path, self.gorgonzola_path)
-            
+
         logger.info(f"[ramdisk] Building index in RAM: {self.ram_dir} "
               f"(quota {self.max_bytes / 1024 / 1024:.0f} MB)")
         return self
@@ -146,13 +148,13 @@ class RamdiskIndex:
         if os.path.exists(self.db_path):
             ssd_dir = os.path.dirname(self.ssd_db_path)
             os.makedirs(ssd_dir, exist_ok=True)
-            
+
             with FileLock(self.ssd_db_path + ".lock"):
                 # Copy to a temp name first, then atomic rename
                 tmp_ssd = self.ssd_db_path + ".tmp"
                 shutil.copy2(self.db_path, tmp_ssd)
                 os.replace(tmp_ssd, self.ssd_db_path)
-                
+
                 # Also copy any DuckDB WAL files (.duckdb.wal)
                 wal_path = self.db_path + ".wal"
                 if os.path.exists(wal_path):
@@ -174,7 +176,7 @@ class RamdiskIndex:
         if os.path.exists(self.gorgonzola_path):
             ssd_parent = os.path.dirname(self.ssd_gorgonzola_path)
             os.makedirs(ssd_parent, exist_ok=True)
-            
+
             with FileLock(self.ssd_gorgonzola_path + ".lock"):
                 if os.path.isfile(self.gorgonzola_path):
                     tmp_gorgonzola = self.ssd_gorgonzola_path + ".tmp"

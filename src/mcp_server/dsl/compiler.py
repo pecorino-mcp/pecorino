@@ -1,6 +1,5 @@
-import json
-from typing import Dict, Any, Tuple, Optional
 import logging
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -8,7 +7,7 @@ class DSLCompiler:
     """
     Compiles JSON DSL queries into DuckDB SQL and Kùzu Cypher queries.
     """
-    
+
     @staticmethod
     def compile(query_json: Dict[str, Any], db_path: str = "main") -> Tuple[Optional[str], Optional[str], Optional[list]]:
         """
@@ -30,7 +29,7 @@ class DSLCompiler:
             base_query = f"SELECT id, name, node_type, filepath, start_line, end_line FROM {db_path}.code_nodes WHERE 1=1"
         else:
             base_query = f"SELECT filepath, lang, mtime FROM {db_path}.files WHERE 1=1"
-            
+
         sql_parts.append(base_query)
 
         # Parse WHERE clauses
@@ -39,7 +38,7 @@ class DSLCompiler:
                 continue
             if select == "files" and key not in ("filepath", "lang"):
                 continue
-                
+
             if isinstance(condition, str):
                 sql_parts.append(f"AND {key} = ?")
                 sql_params.append(condition)
@@ -60,9 +59,9 @@ class DSLCompiler:
                         sql_params.extend(val)
 
         sql_parts.append(f"LIMIT {limit} OFFSET {offset}")
-        
+
         final_sql = " ".join(sql_parts)
-        
+
         # Parse graph joins (requires Cypher translation later)
         # For Phase 3, we just return the cypher string we would run, but the query tool
         # will handle the actual execution.
@@ -72,5 +71,5 @@ class DSLCompiler:
             target_name = join_graph.get("target_name")
             if target_name:
                 cypher_query = f"MATCH (n)-[:{rel}]->(target) WHERE target.name = '{target_name}' RETURN n.id AS id"
-                
+
         return final_sql, cypher_query, sql_params

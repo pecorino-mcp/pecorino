@@ -1,10 +1,12 @@
+import functools
 import hashlib
-import json
 import logging
 import os
-import duckdb
 from pathlib import Path
 from typing import Any, Dict, List
+
+import duckdb
+
 from src.core.errors import SecurityValidationError
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
@@ -24,7 +26,7 @@ def find_repo_root(filepath: str, max_depth: int = 20) -> str:
 
         if (parent / ".git").is_dir():
             return str(parent)
-            
+
         if len(visited) > max_depth:
             break
 
@@ -67,7 +69,9 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes DROP COLUMN body_text',
         'ALTER TABLE code_nodes ADD COLUMN relationships VARCHAR',
         'ALTER TABLE code_nodes DROP COLUMN metrics_json',
-        'ALTER TABLE code_nodes ADD COLUMN pagerank DOUBLE DEFAULT 0.0'
+        'ALTER TABLE code_nodes ADD COLUMN pagerank DOUBLE DEFAULT 0.0',
+        'ALTER TABLE code_nodes ADD COLUMN start_byte INTEGER',
+        'ALTER TABLE code_nodes ADD COLUMN end_byte INTEGER'
     ]
     for query in migrations:
         try:
@@ -101,7 +105,7 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         except duckdb.Error:
             conn.execute("INSTALL fts")
             conn.execute("LOAD fts")
-        
+
         # We don't create the FTS index here anymore. It will be created lazily by ensure_fts().
     except Exception:
         logger.exception("Failed to initialize FTS extension during migration")
@@ -118,6 +122,11 @@ def migrate_all():
             except Exception as e:
                 logger.warning("Failed to migrate %s: %s", fname, e)
 
+@functools.lru_cache(maxsize=32)
+def _get_file_content(filepath: str, mtime: float) -> bytes:
+    with open(filepath, 'rb') as f:
+        return f.read()
+
 class CodeSearchIndex:
     """DuckDB-backed Semantic Code Search Index."""
 
@@ -129,10 +138,10 @@ class CodeSearchIndex:
             repo_path = find_repo_root(os.getcwd())
             db_path = get_db_path_for_repo(repo_path)
         self.db_path = db_path
-        
+
         try:
             self._conn = duckdb.connect(self.db_path, read_only=read_only)
-            
+
             # ATTACH other repos for federated querying if we are in read-only mode
             if read_only:
                 try:
@@ -167,7 +176,7 @@ class CodeSearchIndex:
                     self._conn.execute("LOAD fts")
                 except Exception:
                     logger.exception("Failed to LOAD/INSTALL fts in read-only mode")
-        
+
         if not read_only:
             self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
 
@@ -185,7 +194,7 @@ class CodeSearchIndex:
             except Exception:
                 pass
             self._conn = None
-            
+
         if getattr(self, 'graph', None):
             try:
                 self.graph.close()
@@ -267,12 +276,17 @@ class CodeSearchIndex:
             logger.warning("Failed to check for FTS index: %s", e)
             return False
 
-    def _lazy_load_body(self, filepath: str, start_line: int, end_line: int) -> str:
-        """Lazy-load source code from disk using filepath + line range."""
+    def _lazy_load_body(self, filepath: str, start_line: int, end_line: int, start_byte: int = 0, end_byte: int = 0) -> str:
+        """Lazy-load source code from disk using filepath + line range or byte offset."""
         try:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-                return ''.join(lines[max(0, start_line-1):end_line])
+            if start_byte > 0 and end_byte > start_byte:
+                mtime = os.path.getmtime(filepath)
+                content = _get_file_content(filepath, mtime)
+                return content[start_byte:end_byte].decode('utf-8', errors='ignore')
+            else:
+                with open(filepath, encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
+                    return ''.join(lines[max(0, start_line-1):end_line])
         except (FileNotFoundError, OSError):
             return ''
 
@@ -290,14 +304,16 @@ class CodeSearchIndex:
                 n['start_line'],
                 n['end_line'],
                 n.get('relationships', ''),
-                0.0
+                0.0,
+                n.get('start_byte', 0),
+                n.get('end_byte', 0)
             ))
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
                 # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?)", data)
+                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
                 conn.execute('''
                     INSERT INTO code_nodes
                     SELECT * FROM temp_code_nodes
@@ -307,7 +323,9 @@ class CodeSearchIndex:
                         filepath=excluded.filepath,
                         start_line=excluded.start_line,
                         end_line=excluded.end_line,
-                        relationships=excluded.relationships
+                        relationships=excluded.relationships,
+                        start_byte=excluded.start_byte,
+                        end_byte=excluded.end_byte
                 ''')
                 conn.execute("DROP TABLE temp_code_nodes")
                 conn.execute("COMMIT")
@@ -320,7 +338,7 @@ class CodeSearchIndex:
         conn = self._conn
         conn.execute('DELETE FROM code_nodes WHERE filepath = ?', (filepath,))
         conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
-            
+
         try:
             graph = self._ensure_graph()
             with graph:
@@ -345,7 +363,7 @@ class CodeSearchIndex:
             placeholders = ",".join(["?"] * len(chunk))
             conn.execute(f'DELETE FROM code_nodes WHERE filepath IN ({placeholders})', chunk)
             conn.execute(f'DELETE FROM files WHERE filepath IN ({placeholders})', chunk)
-            
+
         for i in range(0, len(filepaths), chunk_size):
             chunk = filepaths[i:i+chunk_size]
             try:
@@ -383,7 +401,7 @@ class CodeSearchIndex:
         except Exception as e:
             conn.execute("ROLLBACK")
             raise e
-            
+
         chunk_size = 500
         for i in range(0, len(files_data), chunk_size):
             chunk = files_data[i:i+chunk_size]
@@ -406,7 +424,7 @@ class CodeSearchIndex:
                     f"mtime_{j}": float(mtime),
                     f"lang_{j}": lang
                 })
-                
+
             if queries:
                 try:
                     graph = self._ensure_graph()
@@ -426,7 +444,7 @@ class CodeSearchIndex:
                 mtime=excluded.mtime,
                 lang=excluded.lang
         ''', (filepath, content_hash, mtime, lang))
-            
+
         name = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1]
         query = """
@@ -543,10 +561,10 @@ class CodeSearchIndex:
                     params.append(f"{prefix}%")
             params.extend([limit, offset])
 
-            # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the 
+            # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
             # WHERE clause for filtering and in the SELECT clause to retrieve the score.
             res = conn.execute(f'''
-                SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line,
+                SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                        (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
                 FROM code_nodes c
                 WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
@@ -554,14 +572,14 @@ class CodeSearchIndex:
                 ORDER BY score DESC
                 LIMIT ? OFFSET ?
             ''', params).fetchall()
-            
+
             results = []
             for row in res:
                 results.append({
                     'name': row[0],
                     'node_type': row[1],
                     'filepath': row[2],
-                    'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                    'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                     'metrics': {},
                     'start_line': row[3],
                     'end_line': row[4]
@@ -579,18 +597,18 @@ class CodeSearchIndex:
         """Get all nodes for a specific file."""
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line
+            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte
             FROM code_nodes
             WHERE filepath = ?
         ''', (filepath,)).fetchall()
-        
+
         results = []
         for row in res:
             results.append({
                 'name': row[0],
                 'node_type': row[1],
                 'filepath': row[2],
-                'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'metrics': {},
                 'start_line': row[3],
                 'end_line': row[4]
@@ -602,18 +620,18 @@ class CodeSearchIndex:
         prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line
+            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte
             FROM code_nodes
             WHERE filepath LIKE ?
         ''', (f"{prefix}%",)).fetchall()
-        
+
         results = []
         for row in res:
             results.append({
                 'name': row[0],
                 'node_type': row[1],
                 'filepath': row[2],
-                'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'metrics': {},
                 'start_line': row[3],
                 'end_line': row[4]

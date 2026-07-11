@@ -20,7 +20,7 @@ async def _auto_sync_stale(repo_root: str, db_path: str, scope_path: str):
 
     def _sync():
         with _auto_sync_lock:
-            # If the proactive background watcher is running, it handles stale files 
+            # If the proactive background watcher is running, it handles stale files
             # as they change. No need to block queries with an inline check.
             from src.mcp_server.middleware.file_watcher import get_file_watcher
             if get_file_watcher() is not None:

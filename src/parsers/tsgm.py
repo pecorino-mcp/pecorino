@@ -58,7 +58,7 @@ class TreeSitterGrammarManager:
         module_name = self.grammars[language]
         try:
             module = importlib.import_module(module_name)
-            
+
             # Dynamically handle packages with multiple grammars (e.g., typescript)
             if hasattr(module, "language"):
                 lang_ptr = module.language()
@@ -66,7 +66,7 @@ class TreeSitterGrammarManager:
                 lang_ptr = getattr(module, f"language_{language}")()
             else:
                 raise AttributeError(f"No language function found in {module_name}")
-                
+
             lang = tree_sitter.Language(lang_ptr)
             self.loaded_languages[language] = lang
             return lang

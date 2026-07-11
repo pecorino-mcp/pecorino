@@ -4,15 +4,16 @@ from typing import Any, List, Optional, Set
 
 import tree_sitter
 
+
 def get_ast_classes():
     from src.parsers.ast import (
         AttributeDef,
         ClassDef,
+        ControlFlowDef,
         FunctionDef,
         ImportDef,
         InterfaceDef,
         ModuleDef,
-        ControlFlowDef,
     )
     return ModuleDef, ClassDef, InterfaceDef, FunctionDef, ImportDef, AttributeDef, ControlFlowDef
 
@@ -178,7 +179,7 @@ class TreeSitterExtractor:
             query_path = os.path.join(os.path.dirname(__file__), 'queries', f'{self.language}.scm')
             if os.path.exists(query_path):
                 try:
-                    with open(query_path, 'r', encoding='utf-8') as f:
+                    with open(query_path, encoding='utf-8') as f:
                         query_str = f.read()
                     self.metrics_query = tree_sitter.Query(self.lang_obj, query_str)
                 except Exception:
@@ -201,18 +202,18 @@ class TreeSitterExtractor:
     def _extract_types(self, node) -> List[str]:
         if not node or getattr(self, 'metrics_query', None) is None:
             return []
-            
+
         types = []
         try:
             cursor = tree_sitter.QueryCursor(self.metrics_query)
             captures = cursor.captures(node)
-            
+
             compound_nodes = captures.get("type.compound", [])
             leaf_nodes = captures.get("type.leaf", [])
-            
+
             for c_node in compound_nodes:
                 types.append(self._get_text(c_node))
-                
+
             for leaf in leaf_nodes:
                 is_inside = False
                 for c_node in compound_nodes:
@@ -223,7 +224,7 @@ class TreeSitterExtractor:
                     types.append(self._get_text(leaf))
         except Exception:
             pass
-            
+
         return types
 
     def _parse_class(self, node) -> Any:
@@ -278,7 +279,9 @@ class TreeSitterExtractor:
             lineno=node.start_point[0] + 1,
             col_offset=node.start_point[1],
             end_lineno=node.end_point[0] + 1,
-            end_col_offset=node.end_point[1]
+            end_col_offset=node.end_point[1],
+            start_byte=node.start_byte,
+            end_byte=node.end_byte
         )
 
     def _parse_interface(self, node) -> Any:
@@ -309,7 +312,9 @@ class TreeSitterExtractor:
             name=name,
             extends=extends,
             lineno=node.start_point[0] + 1,
-            col_offset=node.start_point[1]
+            col_offset=node.start_point[1],
+            start_byte=node.start_byte,
+            end_byte=node.end_byte
         )
 
     def _parse_function(self, node) -> Any:
@@ -418,7 +423,9 @@ class TreeSitterExtractor:
             lineno=node.start_point[0] + 1,
             col_offset=node.start_point[1],
             end_lineno=node.end_point[0] + 1,
-            end_col_offset=node.end_point[1]
+            end_col_offset=node.end_point[1],
+            start_byte=node.start_byte,
+            end_byte=node.end_byte
         )
 
     def _count_complexity(self, node) -> int:
@@ -538,7 +545,9 @@ class TreeSitterExtractor:
                     if child.type in ('dotted_name', 'aliased_name'):
                         imports.append(self.ImportDef(
                             module=self._get_text(child),
-                            lineno=node.start_point[0] + 1
+                            lineno=node.start_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte
                         ))
             elif node.type == 'import_from_statement':
                 module_node = node.child_by_field_name('module_name')
@@ -557,7 +566,9 @@ class TreeSitterExtractor:
                     module=module,
                     names=names,
                     is_from=True,
-                    lineno=node.start_point[0] + 1
+                    lineno=node.start_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte
                 ))
         elif self.language == 'java':
             text = self._get_text(node)
@@ -567,7 +578,9 @@ class TreeSitterExtractor:
                 imports.append(self.ImportDef(
                     module=module,
                     names=[name],
-                    lineno=node.start_point[0] + 1
+                    lineno=node.start_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte
                 ))
         elif self.language in ('javascript', 'typescript'):
             source = node.child_by_field_name('source')
@@ -575,7 +588,9 @@ class TreeSitterExtractor:
                 module = self._get_text(source).strip("'\"")
                 imports.append(self.ImportDef(
                     module=module,
-                    lineno=node.start_point[0] + 1
+                    lineno=node.start_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte
                 ))
         elif self.language == 'cpp':
             path_node = node.child_by_field_name('path')
@@ -583,7 +598,9 @@ class TreeSitterExtractor:
                 module = self._get_text(path_node).strip('<>"')
                 imports.append(self.ImportDef(
                     module=module,
-                    lineno=node.start_point[0] + 1
+                    lineno=node.start_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte
                 ))
         elif self.language == 'go':
             for spec in self._find_children_by_type(node, 'import_spec'):
@@ -591,7 +608,9 @@ class TreeSitterExtractor:
                 if path:
                     imports.append(self.ImportDef(
                         module=self._get_text(path).strip('"'),
-                        lineno=node.start_point[0] + 1
+                        lineno=node.start_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte
                     ))
         elif self.language == 'rust':
             text = self._get_text(node)
@@ -599,7 +618,9 @@ class TreeSitterExtractor:
                 module = text[4:].rstrip(';').strip()
                 imports.append(self.ImportDef(
                     module=module,
-                    lineno=node.start_point[0] + 1
+                    lineno=node.start_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte
                 ))
         elif self.language == 'swift':
             text = self._get_text(node)
@@ -607,7 +628,9 @@ class TreeSitterExtractor:
                 module = text[7:].strip()
                 imports.append(self.ImportDef(
                     module=module,
-                    lineno=node.start_point[0] + 1
+                    lineno=node.start_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte
                 ))
         return imports
 
@@ -636,7 +659,9 @@ class TreeSitterExtractor:
                             type_annotation=type_annot,
                             visibility=visibility,
                             lineno=node.start_point[0] + 1,
-                            col_offset=node.start_point[1]
+                            col_offset=node.start_point[1],
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte
                         ))
         elif self.language in ('javascript', 'typescript'):
             name_node = node.child_by_field_name('name')
@@ -648,7 +673,9 @@ class TreeSitterExtractor:
                     name=self._get_text(name_node),
                     type_annotation=type_annot,
                     lineno=node.start_point[0] + 1,
-                    col_offset=node.start_point[1]
+                    col_offset=node.start_point[1],
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte
                 ))
         elif self.language == 'cpp':
             type_node = node.child_by_field_name('type')
@@ -660,7 +687,9 @@ class TreeSitterExtractor:
                         name=self._get_text(child),
                         type_annotation=type_annot,
                         lineno=node.start_point[0] + 1,
-                        col_offset=node.start_point[1]
+                        col_offset=node.start_point[1],
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte
                     ))
         return attrs
 
@@ -750,7 +779,9 @@ class TreeSitterExtractor:
             lineno=node.start_point[0] + 1,
             col_offset=node.start_point[1],
             end_lineno=node.end_point[0] + 1,
-            end_col_offset=node.end_point[1]
+            end_col_offset=node.end_point[1],
+            start_byte=node.start_byte,
+            end_byte=node.end_byte
         )
         stmt.called_methods = self._find_called_methods(node)
         reads, mutations, taints = self._find_state_accesses(node)
@@ -762,7 +793,7 @@ class TreeSitterExtractor:
     def _parse_lambda(self, node, parent_name) -> Any:
         name = f"{parent_name}$lambda_{node.start_point[0] + 1}_{node.start_point[1]}"
         reads, mutations, taints = self._find_state_accesses(node)
-        
+
         from src.parsers.ast import LambdaDef
         lmd = LambdaDef(
             name=name,
@@ -773,7 +804,9 @@ class TreeSitterExtractor:
             lineno=node.start_point[0] + 1,
             col_offset=node.start_point[1],
             end_lineno=node.end_point[0] + 1,
-            end_col_offset=node.end_point[1]
+            end_col_offset=node.end_point[1],
+            start_byte=node.start_byte,
+            end_byte=node.end_byte
         )
         return lmd
 
@@ -830,7 +863,7 @@ class TreeSitterExtractor:
             c_obj, c_type = get_container(node.start_byte, node.end_byte)
             if c_type in ('function', 'statement', 'lambda'):
                 c_obj.statements.append(stmt)
-                
+
         # Now process lambdas since they need their parent function name
         # We process from smallest to largest to handle nested lambdas correctly?
         # Actually just find container
@@ -839,15 +872,15 @@ class TreeSitterExtractor:
             parent_name = "global"
             if c_obj and hasattr(c_obj, "name"):
                 parent_name = c_obj.name
-            
+
             lmd = self._parse_lambda(node, parent_name)
-            
+
             # Replace the node in containers with the actual LambdaDef object so nested things can find it
             for i, (cs, ce, co, ct) in enumerate(containers):
                 if ct == 'lambda_node' and cs == node.start_byte and ce == node.end_byte:
                     containers[i] = (cs, ce, lmd, 'lambda')
                     break
-                    
+
             if c_type in ('function', 'statement', 'lambda'):
                 c_obj.lambdas.append(lmd)
 
@@ -1049,9 +1082,9 @@ def parse_with_tree_sitter(source: str, extension: str) -> Optional[Any]:
 
     extractor = TreeSitterExtractor(source_bytes, language, lang_obj=lang_obj)
     extractor.extract_with_queries(tree.root_node)
-    
+
     module = extractor.module
-    
+
     # Apply language-specific strategy if available to extract richer semantics
     from src.parsers.strategies import StrategyFactory
     strategy = StrategyFactory.get_strategy(ts_lang_name)

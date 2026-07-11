@@ -15,16 +15,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict
 
 from src.core.config import conf
-from src.utils.export import DateTimeEncoder, MetricsExporter, export_to_json
+from src.core.gitdatacollector import GitDataCollector
+from src.core.repository import discover_repositories
 from src.git.commands import (
 	get_exectime_external,
 	getpipeoutput,
 	is_git_repository,
 )
-from src.core.gitdatacollector import GitDataCollector
-from src.utils.helpers import time_start
 from src.metrics.hotspot import HotspotDetector
-from src.core.repository import discover_repositories
+from src.utils.export import DateTimeEncoder, MetricsExporter, export_to_json
+from src.utils.helpers import time_start
 
 
 def usage():

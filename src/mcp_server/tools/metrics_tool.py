@@ -94,8 +94,9 @@ async def do_metrics(target: str, what: List[str] = ["all"], output_path: Option
                     fp = Path(r) / fname
                     if fp.suffix in SUPPORTED:
                         files.append(fp)
-            from src.utils.helpers import print_progress_bar
             import time
+
+            from src.utils.helpers import print_progress_bar
             total_files = len(files)
             start_time = time.time()
             for idx, fp in enumerate(files):

@@ -20,8 +20,3 @@
 	path = modules/pecorino-utils
 	url = https://github.com/pecorino-mcp/pecorino-utils.git
 	ignore = dirty
-[submodule "modules/docs"]
-	path = modules/docs
-	url = https://github.com/pecorino-mcp/pecorino-docs
-	ignore = dirty
-

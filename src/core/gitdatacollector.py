@@ -6,8 +6,8 @@ Contains the GitDataCollector class that extends DataCollector with git-specific
 
 import datetime
 import gc
-import os
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,6 @@ import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from src.metrics.analyzers import analyzesloc, getnumoffilesfromrev, getnumoflinesinblob
 from src.core.config import conf
 from src.core.datacollector import DataCollector
 from src.git.commands import (
@@ -25,6 +24,7 @@ from src.git.commands import (
 	getlogrange,
 	getpipeoutput,
 )
+from src.metrics.analyzers import analyzesloc, getnumoffilesfromrev, getnumoflinesinblob
 from src.utils.helpers import (
 	getkeyssortedbyvaluekey,
 	getstatsummarycounts,

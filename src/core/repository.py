@@ -5,8 +5,8 @@ Contains functions for discovering and validating git repositories.
 """
 
 import fnmatch
-import os
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 

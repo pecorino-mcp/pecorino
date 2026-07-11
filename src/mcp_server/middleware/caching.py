@@ -15,21 +15,21 @@ def _get_cached_api(repo_root: str, db_path: str, api_type: str):
         if key in _API_CACHE:
             _API_CACHE.move_to_end(key)
             return _API_CACHE[key]
-        
+
     if api_type == "index":
         from src.mcp_server.index_db import CodeSearchIndex
         new_api = CodeSearchIndex(db_path=db_path, read_only=True)
     elif api_type == "graph":
         from src.mcp_server.federated_graph import FederatedGraphAPI
         new_api = FederatedGraphAPI(repo_root)
-        
+
     with _API_CACHE_LOCK:
         if key in _API_CACHE:
             if hasattr(new_api, 'close'):
                 new_api.close()
             return _API_CACHE[key]
         _API_CACHE[key] = new_api
-        
+
         if len(_API_CACHE) > _API_CACHE_MAX_SIZE:
             oldest_key, oldest_api = _API_CACHE.popitem(last=False)
             if hasattr(oldest_api, 'close'):
@@ -37,7 +37,7 @@ def _get_cached_api(repo_root: str, db_path: str, api_type: str):
                     oldest_api.close()
                 except Exception:
                     pass
-                
+
     return new_api
 
 def clear_api_cache():

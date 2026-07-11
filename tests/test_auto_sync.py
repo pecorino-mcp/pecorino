@@ -151,7 +151,8 @@ class TestAutoSyncIntegration:
             encoding="utf-8",
         )
 
-        from src.mcp_server.core import _auto_sync_stale, clear_api_cache
+        from src.mcp_server.middleware.sync import _auto_sync_stale
+        from src.mcp_server.middleware.caching import clear_api_cache
         await _auto_sync_stale(str(repo), db_path, str(repo))
 
         # Verify the new function is now in the index
@@ -169,7 +170,7 @@ class TestAutoSyncIntegration:
         """_auto_sync_stale should be a no-op when nothing has changed."""
         repo, db_path = indexed_repo
 
-        from src.mcp_server.core import _auto_sync_stale
+        from src.mcp_server.middleware.sync import _auto_sync_stale
         # Should not raise or modify anything
         await _auto_sync_stale(str(repo), db_path, str(repo))
 

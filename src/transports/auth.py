@@ -1,8 +1,11 @@
 import sys
+
 import jwt
 from fastapi import Request
 from fastapi.exceptions import HTTPException
+
 from src.mcp_server.config import settings
+
 
 def verify_oauth_token(request: Request) -> dict:
     if not settings.oauth_required:
@@ -13,7 +16,7 @@ def verify_oauth_token(request: Request) -> dict:
         sys.stderr.write("[AUTH ERROR] Missing authorization token\n")
         sys.stderr.flush()
         raise HTTPException(
-            status_code=401, 
+            status_code=401,
             detail="Bearer token required",
             headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Bearer token required"'}
         )
@@ -26,7 +29,7 @@ def verify_oauth_token(request: Request) -> dict:
         sys.stderr.write("[AUTH ERROR] Token expired\n")
         sys.stderr.flush()
         raise HTTPException(
-            status_code=401, 
+            status_code=401,
             detail="Token expired",
             headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Token expired"'}
         )
@@ -34,7 +37,7 @@ def verify_oauth_token(request: Request) -> dict:
         sys.stderr.write(f"[AUTH ERROR] Invalid token: {str(e)}\n")
         sys.stderr.flush()
         raise HTTPException(
-            status_code=401, 
+            status_code=401,
             detail="Invalid token",
             headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Invalid token"'}
         )
@@ -43,7 +46,7 @@ def verify_oauth_token(request: Request) -> dict:
         sys.stderr.write("[AUTH ERROR] Issuer mismatch\n")
         sys.stderr.flush()
         raise HTTPException(
-            status_code=401, 
+            status_code=401,
             detail="Issuer mismatch",
             headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Issuer mismatch"'}
         )
@@ -56,7 +59,7 @@ def verify_oauth_token(request: Request) -> dict:
         sys.stderr.write("[AUTH ERROR] Resource mismatch\n")
         sys.stderr.flush()
         raise HTTPException(
-            status_code=403, 
+            status_code=403,
             detail="Invalid resource indicator (resource mismatch)",
             headers={"www-authenticate": 'Bearer error="invalid_target", error_description="Invalid resource indicator (resource mismatch)"'}
         )

@@ -1,7 +1,6 @@
-import logging
 import csv
+import logging
 import os
-import sys
 import threading
 
 logger = logging.getLogger(__name__)
@@ -76,16 +75,16 @@ class GorgonzolaGraph:
         self._schema_initialized = False
         # Normalize path
         from src.mcp_server.index_db import get_graph_path_for_repo
-        
+
         if db_path.endswith(".duckdb"):
             self.gorgonzola_db_path = get_graph_path_for_repo(db_path)
         else:
             self.gorgonzola_db_path = db_path
-        
+
         parent_dir = os.path.dirname(self.gorgonzola_db_path)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
-        
+
         import gorgonzola
         self.gorgonzola = gorgonzola
 
@@ -155,7 +154,7 @@ class GorgonzolaGraph:
     def query(self, query: str, parameters: dict = None) -> list:
         if parameters is None:
             parameters = {}
-        
+
         if self._in_context:
             return self._query_conn(query, parameters, self._conn)
         else:
@@ -167,7 +166,7 @@ class GorgonzolaGraph:
     def _query_conn(self, query: str, parameters: dict, conn) -> list:
         res = conn.execute(query, parameters)
         res.rows_as_dict(True)
-        
+
         results = []
         while res.has_next():
             row = res.get_next()
@@ -320,7 +319,7 @@ class GorgonzolaGraph:
                         row.append(str(props.get("is_mutation", False)).lower())
                         row.append(str(props.get("is_taint", False)).lower())
                     rows.append(row)
-                
+
                 copy_query = f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
                 self._write_and_copy_csv(conn, csv_path, rows, copy_query)
             except Exception as e:
@@ -352,38 +351,38 @@ class GorgonzolaGraph:
             with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
-                    
+
                     # Load the algo extension dynamically
                     ext_path = os.path.join(
                         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                         "modules", "gorgonzola", "extension", "algo", "build", "libalgo.gorgonzola_extension"
                     )
                     conn.execute(f"LOAD EXTENSION '{ext_path}';")
-                    
+
                     # Project graph
                     try:
                         conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
                     except Exception:
                         pass
-                        
+
                     conn.execute("""
                         CALL PROJECT_GRAPH('CodeGraph', 
                             ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable'],
                             ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS']
                         );
                     """)
-                    
+
                     res = conn.execute("CALL page_rank('CodeGraph') RETURN node.id AS node_id, rank AS score;")
                     while res.has_next():
                         row = res.get_next()
                         results.append({"node_id": row[0], "score": row[1]})
                     res.close()
-                    
+
                     try:
                         conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
                     except Exception:
                         pass
-                        
+
             return results
         except Exception as e:
             logger.warning("PageRank calculation failed: %s", e)
