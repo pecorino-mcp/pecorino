@@ -25,8 +25,8 @@ if str(workspace_root) not in sys.path:
 
 # --- Security constants (Moved to middleware/security.py) ---
 
-ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree", "search",
-                           "callers", "callees", "impact", "pagerank", "functional-analysis", "code"})
+ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree",
+                           "pagerank", "all"})
 ALLOWED_WHAT = frozenset({"oop", "complexity", "hotspots", "all"})
 ALLOWED_API_TYPES = frozenset({"index", "graph"})
 MAX_LIMIT = 100
