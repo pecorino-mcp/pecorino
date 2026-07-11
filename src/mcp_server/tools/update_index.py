@@ -9,7 +9,6 @@ from mcp.server import ServerRequestContext
 
 from src.core.constants import SUPPORTED_EXTENSIONS as SUPPORTED
 from src.core.errors import AnalysisError, SecurityValidationError
-from src.mcp_server.config import settings
 from src.mcp_server.context_helper import PecorinoContext
 from src.mcp_server.middleware.caching import _API_CACHE, _API_CACHE_LOCK, clear_api_cache
 from src.mcp_server.middleware.security import is_safe_path, read_limited, safe_path
@@ -23,7 +22,8 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     # Invalidate pagerank cache on the existing GraphAPI if cached, before clearing
     _update_path = Path(target).expanduser().resolve()
     try:
-        from src.mcp_server.index_db import find_repo_root as _find_repo_root, get_db_path_for_repo as _get_db_path
+        from src.mcp_server.index_db import find_repo_root as _find_repo_root
+        from src.mcp_server.index_db import get_db_path_for_repo as _get_db_path
         _repo_root = _find_repo_root(str(_update_path))
         _db_path = _get_db_path(_repo_root)
         with _API_CACHE_LOCK:
@@ -52,7 +52,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     if path.is_dir():
         # Spawn index_pipeline.py in a subprocess using same python executable
         python_bin = sys.executable or "python"
-        
+
         proc = await asyncio.create_subprocess_exec(
             python_bin, "-m", "src.mcp_server.index_pipeline", repo_root, str(path),
             stdout=asyncio.subprocess.PIPE,
@@ -61,10 +61,10 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
         )
 
         final_res = {}
-        
+
         import time
         start_time = time.time()
-        
+
         async def read_stdout():
             nonlocal final_res
             while True:
@@ -92,7 +92,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
                             stream=sys.stderr,
                             start_time=start_time
                         )
-                        
+
                         await helper.report_progress(
                             progress=current,
                             total=total,
@@ -141,7 +141,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
             final_res["summary"] = summary_res.get("structure", summary_res)
         except Exception as e:
             logger.warning("Failed to generate summary after indexing: %s", e)
-            
+
         return final_res
 
     if path.suffix not in SUPPORTED:

@@ -20,14 +20,14 @@ This repository requires:
 To completely fix or rebuild the workspace environment, execute the provided setup script:
 
 ```bash
-./bin/setup_env.sh
+./scripts/setup_env.sh
 ```
 
 This script automates:
 1. Removing the broken `.venv` and initializing a clean one.
 2. Installing requirements (including `mcp-types` from git).
-3. Running `make -C modules/gorgonzola python` to compile the C++ database library.
-4. Safely copying the compiled `gorgonzola` Python module directory to the active `.venv` `site-packages`.
+3. Searching for a compiled `gorgonzola` Python package (e.g., `_gorgonzola*.so`). If not found, running `make -C modules/gorgonzola python EXTENSION_LIST=""` to compile the C++ database library in lite configuration.
+4. Safely copying the compiled `gorgonzola` Python module directory to the active `.venv` `site-packages` (if not already present).
 5. Running `pip install -e .` to register `pecorino-mcp` in the `.venv/bin/` folder.
 
 ## Verification

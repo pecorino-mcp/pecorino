@@ -6,8 +6,8 @@ Provides JSON and YAML export functionality for all collected metrics.
 
 import datetime
 import json
-import os
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 

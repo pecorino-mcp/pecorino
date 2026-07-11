@@ -1,7 +1,8 @@
 import os
 from pathlib import Path
+
+from src.core.errors import SecurityValidationError, TargetNotFoundError
 from src.mcp_server.config import settings
-from src.core.errors import TargetNotFoundError, SecurityValidationError
 
 workspace_root = Path(__file__).resolve().parent.parent.parent.parent
 ALLOWED_OUTPUT = workspace_root / ".mcp_outputs"
@@ -21,22 +22,22 @@ def is_project_workspace(path: Path) -> bool:
     try:
         current = path if path.is_dir() else path.parent
         visited = set()
-        
+
         while current and current != current.parent:
             current_resolved = current.resolve()
             if current_resolved in visited:
                 break
             visited.add(current_resolved)
-            
+
             if (current / ".git").is_dir() or (current / ".vscode").is_dir() or (current / ".idea").is_dir():
                 return True
-                
+
             for marker in ("pyproject.toml", "package.json", "Cargo.toml", "go.mod", "Makefile", "requirements.txt", "setup.py"):
                 if (current / marker).is_file():
                     return True
-                    
+
             current = current.parent
-            
+
         return False
     except Exception:
         return False
@@ -53,11 +54,11 @@ def is_safe_path(p: str, allow_external: bool = False) -> bool:
     """
     try:
         target = Path(p).expanduser().resolve()
-        
+
         # 1. Check if within workspace (always allowed)
         if target.is_relative_to(settings.workspace_root):
             return True
-            
+
         # 2. Check if within current working directory (always allowed)
         try:
             if target.is_relative_to(Path.cwd().resolve()):
@@ -81,7 +82,7 @@ def is_safe_path(p: str, allow_external: bool = False) -> bool:
                 except ValueError:
                     continue
             return False
-        
+
         return False
     except Exception:
         return False

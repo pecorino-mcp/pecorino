@@ -1,13 +1,13 @@
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, JSONResponse
 from fastapi.exceptions import HTTPException
-
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src.mcp_server.config import settings
 from src.mcp_server.prometheus_metrics import ACTIVE_SESSIONS
 from src.transports.auth import verify_oauth_token
+
 
 async def oauth_middleware(request: Request, call_next):
     try:
@@ -23,17 +23,17 @@ async def oauth_middleware(request: Request, call_next):
 def create_base_app(title: str) -> FastAPI:
     app = FastAPI(title=title)
     app.middleware("http")(oauth_middleware)
-    
+
     @app.get("/metrics")
     async def handle_metrics(request: Request):
         data = generate_latest()
         return Response(content=data, media_type=CONTENT_TYPE_LATEST)
-        
+
     return app
 
 async def run_sse(mcp_server):
     from mcp.server.sse import SseServerTransport
-    
+
     transport = SseServerTransport("/messages/")
     app = create_base_app("pecorino MCP Server (SSE)")
 

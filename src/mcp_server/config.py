@@ -1,12 +1,12 @@
 import os
-import json
 from pathlib import Path
+
 
 class Config:
     def __init__(self):
         # Determine Transport Mode (stdio, sse, streamable-http)
         self.transport = os.getenv("MCP_TRANSPORT", "stdio")
-        
+
         # Determine Host/Port for Network Transports
         self.host = os.getenv("HOST", "127.0.0.1")
         self.port = int(os.getenv("PORT", "8000"))
@@ -14,13 +14,13 @@ class Config:
         # Concurrency controls
         self.max_concurrent_tools = int(os.getenv("MCP_MAX_CONCURRENT", "3"))
         self.tool_queue_timeout = int(os.getenv("MCP_QUEUE_TIMEOUT", "60"))
-        
+
         # OAuth 2.1 Configurations
         self.oauth_jwt_secret = os.getenv("OAUTH_JWT_SECRET", "pecorino-secret-key-change-in-prod")
         self.oauth_resource = os.getenv("OAUTH_RESOURCE", "pecorino://mcp-server")
         self.oauth_issuer = os.getenv("OAUTH_ISSUER", "https://auth.pecorino.com")
         self.oauth_required = os.getenv("OAUTH_REQUIRED", "true").lower() in ("true", "1", "yes")
-        
+
         # Workspace and Index Storage Configurations
         workspace_root_env = os.getenv("PECORINO_WORKSPACE_ROOT")
         if workspace_root_env:

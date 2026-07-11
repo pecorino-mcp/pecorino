@@ -1,8 +1,8 @@
-import logging
-import sys
-import asyncio
 import argparse
+import asyncio
+import logging
 import signal
+import sys
 from pathlib import Path
 
 # Add the workspace root (parent of 'src') to sys.path so we can import via 'src.xyz' package namespace
@@ -22,13 +22,13 @@ def _setup_signal_handlers():
 
     def sigterm_handler(signum, frame):
         logger.info("Received SIGTERM - shutting down gracefully")
-        
+
         # Stop file watcher if running
         from src.mcp_server.middleware.file_watcher import get_file_watcher
         watcher = get_file_watcher()
         if watcher:
             watcher.stop()
-            
+
         sys.exit(0)
 
     if hasattr(signal, 'SIGINT'):
@@ -70,8 +70,8 @@ def main():
         asyncio.run(run_stdio(mcp_server))
     elif settings.transport == "sse":
         try:
-            import uvicorn  # noqa: F401
             import fastapi  # noqa: F401
+            import uvicorn  # noqa: F401
         except ImportError:
             logger.warning("Error: fastapi and uvicorn must be installed to use SSE transport.")
             sys.exit(1)
@@ -79,8 +79,8 @@ def main():
         asyncio.run(run_sse(mcp_server))
     elif settings.transport == "streamable-http":
         try:
-            import uvicorn  # noqa: F401
             import fastapi  # noqa: F401
+            import uvicorn  # noqa: F401
         except ImportError:
             logger.warning("Error: fastapi and uvicorn must be installed to use streamable-http transport.")
             sys.exit(1)

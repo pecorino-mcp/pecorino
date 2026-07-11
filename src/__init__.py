@@ -9,18 +9,6 @@ __path__ = __import__('pkgutil').extend_path(__path__, __name__)
 
 # Configuration
 # Parsers
-from src.parsers.ast import (
-    ASTNode,
-    AttributeDef,
-    ClassDef,
-    FunctionDef,
-    ImportDef,
-    InterfaceDef,
-    ModuleDef,
-    iter_child_nodes,
-    walk,
-)
-
 # CLI
 from src.cli.main import GitStats, usage
 from src.core.config import (
@@ -41,9 +29,14 @@ from src.core.constants import (
 
 # Collectors
 from src.core.datacollector import DataCollector
+from src.core.gitdatacollector import GitDataCollector
 
-# Export
-from src.utils.export import MetricsExporter, export_to_json, export_to_yaml
+# Repository discovery
+from src.core.repository import (
+    _discover_repositories_concurrent,
+    _is_bare_repository,
+    discover_repositories,
+)
 
 # Git commands
 from src.git.commands import (
@@ -59,20 +52,6 @@ from src.git.commands import (
     is_git_repository,
     reset_exectime_external,
 )
-from src.core.gitdatacollector import GitDataCollector
-
-# Utilities
-from src.utils.helpers import (
-    ON_LINUX,
-    WEEKDAYS,
-    format_duration,
-    getkeyssortedbyvaluekey,
-    getkeyssortedbyvalues,
-    getstatsummarycounts,
-    parse_timestamp,
-    sanitize_filename,
-    should_include_file,
-)
 
 # Hotspot Detection
 from src.metrics.hotspot import HotspotDetector, analyze_hotspots
@@ -86,16 +65,36 @@ from src.metrics.maintainability import (
     interpret_maintainability_index,
 )
 from src.metrics.oopmetrics import OOPMetricsAnalyzer, format_oop_report
-
-# Repository discovery
-from src.core.repository import (
-    _discover_repositories_concurrent,
-    _is_bare_repository,
-    discover_repositories,
+from src.parsers.ast import (
+    ASTNode,
+    AttributeDef,
+    ClassDef,
+    FunctionDef,
+    ImportDef,
+    InterfaceDef,
+    ModuleDef,
+    iter_child_nodes,
+    walk,
 )
 
 # Tree-sitter Grammar Manager
 from src.parsers.tsgm import TreeSitterGrammarManager
+
+# Export
+from src.utils.export import MetricsExporter, export_to_json, export_to_yaml
+
+# Utilities
+from src.utils.helpers import (
+    ON_LINUX,
+    WEEKDAYS,
+    format_duration,
+    getkeyssortedbyvaluekey,
+    getkeyssortedbyvalues,
+    getstatsummarycounts,
+    parse_timestamp,
+    sanitize_filename,
+    should_include_file,
+)
 
 __all__ = [
     # Config
