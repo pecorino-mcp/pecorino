@@ -20,7 +20,7 @@ This repository requires:
 To completely fix or rebuild the workspace environment, execute the provided setup script:
 
 ```bash
-./bin/setup_env.sh
+./scripts/setup_env.sh
 ```
 
 This script automates:
