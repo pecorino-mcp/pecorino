@@ -28,28 +28,13 @@ async def handle_list_prompts(
         ),
         types.Prompt(
             name="search",
-            description="Search the codebase for symbols or keywords. Use include_source=True to retrieve source code.",
+            description="Unified search and analysis. Supports FTS, callers/callees, impact, usages, intent presets, and DSL queries.",
             arguments=[
-                types.PromptArgument(name="query", description="The search query or keyword", required=False),
+                types.PromptArgument(name="query", description="Search query, keyword, or symbol name", required=False),
                 types.PromptArgument(name="target", description="Target path (file or directory)", required=False),
+                types.PromptArgument(name="mode", description="Search mode (fts, callers, callees, impact, usages, intent, dsl, functional-analysis)", required=False),
+                types.PromptArgument(name="intent", description="Preset query intent (all_classes, all_functions, entry_points, dead_code, files_by_language)", required=False),
                 types.PromptArgument(name="include_source", description="Include source code in results", required=False)
-            ]
-        ),
-        types.Prompt(
-            name="analyze",
-            description="Run graph analysis such as callers, callees, impact analysis, or pagerank.",
-            arguments=[
-                types.PromptArgument(name="analysis", description="Analysis type (callers, callees, impact, pagerank)", required=True),
-                types.PromptArgument(name="target", description="Target path", required=False),
-                types.PromptArgument(name="symbol", description="Symbol name for callers/callees", required=False)
-            ]
-        ),
-        types.Prompt(
-            name="query_codebase",
-            description="Execute a JSON-based DSL query against the codebase AST and graph.",
-            arguments=[
-                types.PromptArgument(name="query_json", description="JSON string of the query DSL", required=True),
-                types.PromptArgument(name="target", description="Target path", required=False)
             ]
         ),
         types.Prompt(
@@ -58,7 +43,14 @@ async def handle_list_prompts(
             arguments=[
                 types.PromptArgument(name="target", description="Target path to update index for", required=False)
             ]
-        )
+        ),
+        types.Prompt(
+            name="set_workspace",
+            description="Change the server's workspace root directory at runtime.",
+            arguments=[
+                types.PromptArgument(name="path", description="Absolute path to the new workspace directory", required=True)
+            ]
+        ),
     ]
 
     if role == "admin":
@@ -93,38 +85,36 @@ async def handle_get_prompt(
     elif name == "search":
         target = arguments.get("target", "")
         query = arguments.get("query", "")
+        mode = arguments.get("mode", "fts")
+        intent = arguments.get("intent", "")
         target_str = f" on target '{target}'" if target else ""
-        return types.GetPromptResult(
-            description="Search the codebase.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} for query '{query}'."))]
-        )
-    elif name == "analyze":
-        target = arguments.get("target", "")
-        analysis = arguments.get("analysis", "")
-        symbol = arguments.get("symbol", "")
-        msg = f"Please run {analysis} analysis" if analysis else "Please run analysis"
-        if target:
-            msg += f" on '{target}'"
-        if symbol:
-            msg += f" for symbol '{symbol}'"
-        return types.GetPromptResult(
-            description="Analyze the codebase.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=msg))]
-        )
-    elif name == "query_codebase":
-        target = arguments.get("target", "")
-        query_json = arguments.get("query_json", "")
-        target_str = f" on target '{target}'" if target else ""
-        return types.GetPromptResult(
-            description="Query the codebase using JSON DSL.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please execute the following JSON query{target_str}:\n{query_json}"))]
-        )
+        if mode == "intent" and intent:
+            return types.GetPromptResult(
+                description="Search the codebase.",
+                messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} with mode='intent' and intent='{intent}'."))]
+            )
+        elif mode in ("callers", "callees", "usages"):
+            return types.GetPromptResult(
+                description="Search the codebase.",
+                messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} with mode='{mode}' for symbol '{query}'."))]
+            )
+        else:
+            return types.GetPromptResult(
+                description="Search the codebase.",
+                messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} with mode='{mode}' for query '{query}'."))]
+            )
     elif name == "update_index":
         target = arguments.get("target", "")
         target_str = f" on target '{target}'" if target else ""
         return types.GetPromptResult(
             description="Update codebase index.",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the update_index tool{target_str}."))]
+        )
+    elif name == "set_workspace":
+        path = arguments.get("path", "")
+        return types.GetPromptResult(
+            description="Set the workspace directory.",
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the set_workspace tool with path '{path}'."))]
         )
     elif name == "metrics":
         target = arguments.get("target", "")
@@ -163,9 +153,13 @@ async def handle_completion(
                     break
             return types.Completion(values=sorted(files)[:20], has_more=len(files) > 20)
 
-        if ref.name in ("browse", "search", "analyze", "metrics", "update_index", "query_codebase") and argument.name == "target":
+        if ref.name in ("browse", "search", "metrics", "update_index") and argument.name == "target":
             val = (context or {}).get("target", "")
             return _complete_target_path(val)
+
+        elif ref.name == "set_workspace" and argument.name == "path":
+            val = (context or {}).get("path", "")
+            return _complete_target_path(val, filter_supported=False)
 
         elif ref.name == "browse" and argument.name == "view":
             views = ["classes", "functions", "deps", "tree", "all", "pagerank", "summary"]
@@ -175,11 +169,19 @@ async def handle_completion(
                 has_more=False
             )
 
-        elif ref.name == "analyze" and argument.name == "analysis":
-            analyses = ["callers", "callees", "impact", "pagerank", "functional-analysis"]
-            val = (context or {}).get("analysis", "")
+        elif ref.name == "search" and argument.name == "mode":
+            modes = ["fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis"]
+            val = (context or {}).get("mode", "")
             return types.Completion(
-                values=[a for a in analyses if a.startswith(val.lower())],
+                values=[m for m in modes if m.startswith(val.lower())],
+                has_more=False
+            )
+
+        elif ref.name == "search" and argument.name == "intent":
+            intents = ["all_classes", "all_functions", "files_by_language", "entry_points", "dead_code"]
+            val = (context or {}).get("intent", "")
+            return types.Completion(
+                values=[i for i in intents if i.startswith(val.lower())],
                 has_more=False
             )
 

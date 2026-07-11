@@ -2,7 +2,7 @@ import asyncio
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from src.core.errors import AnalysisError, IndexNotFoundError, SecurityValidationError
 from src.mcp_server.middleware.caching import _get_cached_api, clear_index_cache
@@ -17,7 +17,50 @@ INDEX_TIMEOUT_S = 300
 MAX_QUERY_LEN = 200
 MAX_LIMIT = 100
 MAX_CODE_LINES = 300
+MAX_DEPTH = 10
 from mcp.server import ServerRequestContext
+
+# ── Search modes ──────────────────────────────────────────────
+ALLOWED_MODES = frozenset({
+    "fts",              # Full-text keyword search (default)
+    "callers",          # Who calls symbol X?
+    "callees",          # What does symbol X call?
+    "impact",           # Deep dependency trace
+    "usages",           # Combined: search + callers (replaces explain_symbol)
+    "intent",           # Preset AST queries (all_classes, dead_code, etc.)
+    "dsl",              # Custom JSON DSL query
+    "functional-analysis",  # Functional purity analysis
+})
+
+# ── Intent-based presets (from query_codebase) ────────────────
+INTENT_PRESETS: dict[str, dict] = {
+    "all_classes": {
+        "select": "nodes",
+        "where": {"node_type": {"in": ["class", "interface"]}},
+        "limit": 50,
+    },
+    "all_functions": {
+        "select": "nodes",
+        "where": {"node_type": {"in": ["function", "method"]}},
+        "limit": 50,
+    },
+    "files_by_language": {
+        "select": "files",
+        "limit": 100,
+    },
+    "entry_points": {
+        "_graph_intent": "entry_points",
+        "select": "nodes",
+        "where": {"node_type": {"in": ["function", "method"]}},
+        "limit": 20,
+    },
+    "dead_code": {
+        "_graph_intent": "dead_code",
+        "select": "nodes",
+        "where": {"node_type": {"in": ["function", "method"]}},
+        "limit": 50,
+    },
+}
 
 
 def _cap_body(body: str) -> str:
@@ -29,26 +72,93 @@ def _cap_body(body: str) -> str:
         return '\n'.join(lines[:MAX_CODE_LINES]) + f"\n... (truncated at {MAX_CODE_LINES} lines)"
     return body
 
-async def do_search(target: str, query: Optional[str] = None, limit: int = 10, offset: int = 0, output_file: Optional[str] = None, allow_external: bool = False, include_source: bool = False, auto_expand_source: bool = True, ctx: Optional[ServerRequestContext] = None) -> dict:
-    """Unified search and code retrieval tool.
-    
-    When include_source=False (default): returns metadata-only search results.
-    When include_source=True: returns results with source code (body_text), capped at 300 lines.
-    When target is a file: returns nodes from that file (query is optional filter).
-    When target is a directory: query is required for FTS search.
-    
-    Auto-expansion: when ≤3 results and auto_expand_source=True (default),
-    source code is automatically included to reduce round-trips.
+
+# ═══════════════════════════════════════════════════════════════
+#  Unified search entry point
+# ═══════════════════════════════════════════════════════════════
+
+async def do_search(
+    target: str,
+    query: Optional[str] = None,
+    mode: str = "fts",
+    limit: int = 10,
+    offset: int = 0,
+    include_source: bool = False,
+    auto_expand_source: bool = True,
+    max_depth: int = 3,
+    intent: Optional[str] = None,
+    query_json: Optional[str | Dict[str, Any]] = None,
+    allow_external: bool = False,
+    output_file: Optional[str] = None,
+    ctx: Optional[ServerRequestContext] = None
+) -> dict:
+    """Unified search and analysis tool.
+
+    Modes:
+      fts       — Full-text keyword search (default). query required for dirs.
+      callers   — Who calls symbol X? (query = symbol name, required)
+      callees   — What does symbol X call? (query = symbol name, required)
+      impact    — Deep dependency trace from a file/directory.
+      usages    — Combined: FTS search + callers in one call.
+      intent    — Preset AST queries (use 'intent' param).
+      dsl       — Custom JSON DSL query (use 'query_json' param).
+      functional-analysis — Functional purity analysis.
     """
+    mode = mode.strip().lower()
+    if mode not in ALLOWED_MODES:
+        raise SecurityValidationError(
+            f"Invalid search mode: '{mode}'",
+            valid_values=sorted(ALLOWED_MODES),
+            suggestion="Use one of the listed mode values.",
+        )
+
+    limit = max(1, min(int(limit), MAX_LIMIT))
+    offset = max(0, int(offset))
+    max_depth = max(1, min(int(max_depth), MAX_DEPTH))
+
     if query:
         query = query.strip()[:MAX_QUERY_LEN]
         if any(c in query for c in "\x00\n\r"):
             raise SecurityValidationError("Invalid characters in query")
         check_suspicious(query, "query")
 
-    limit = max(1, min(int(limit), MAX_LIMIT))
-    offset = max(0, int(offset))
+    # ── Route to mode-specific handlers ───────────────────────
+    if mode == "fts":
+        return await _do_fts(target, query, limit, offset, include_source,
+                             auto_expand_source, output_file, allow_external, ctx)
+    elif mode in ("callers", "callees"):
+        return await _do_callers_callees(target, mode, query, limit, offset,
+                                         allow_external, ctx)
+    elif mode == "impact":
+        return await _do_impact(target, limit, offset, max_depth,
+                                allow_external, ctx)
+    elif mode == "usages":
+        return await _do_usages(target, query, limit, allow_external, ctx)
+    elif mode == "intent":
+        return await _do_intent(target, intent, allow_external, ctx)
+    elif mode == "dsl":
+        return await _do_dsl(target, query_json, allow_external, ctx)
+    elif mode == "functional-analysis":
+        return await _do_functional_analysis(target, allow_external, ctx)
 
+    return {"error": "Unknown mode"}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: fts (Full-Text Search) — original search logic
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_fts(
+    target: str,
+    query: Optional[str],
+    limit: int,
+    offset: int,
+    include_source: bool,
+    auto_expand_source: bool,
+    output_file: Optional[str],
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
@@ -152,3 +262,405 @@ async def do_search(target: str, query: Optional[str] = None, limit: int = 10, o
     if auto_expanded:
         result["auto_expanded"] = True
     return result
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: callers / callees — from graph.py
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_callers_callees(
+    target: str,
+    mode: str,
+    symbol: Optional[str],
+    limit: int,
+    offset: int,
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    if not symbol:
+        raise SecurityValidationError(f"'query' (symbol name) is required for {mode} mode")
+
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    import os
+    if allow_external and not os.path.exists(db_path):
+        raise IndexNotFoundError(
+            f"External repository at '{repo_root}' has not been indexed yet. "
+            f"Please run the 'update_index' tool with allow_external=True on this target first."
+        )
+
+    await _auto_sync_stale(repo_root, db_path, str(path))
+    api = _get_cached_api(repo_root, db_path, "graph")
+
+    if mode == "callers":
+        callers = await asyncio.to_thread(api.find_callers, symbol)
+        page = callers[offset:offset+limit]
+        result = {"target": symbol, "mode": mode, "callers": page}
+        # Auto-expand: include source signatures when few results
+        if len(page) <= 5 and page:
+            index = _get_cached_api(repo_root, db_path, "index")
+            for c in page:
+                fp = c.get("filepath") or c.get("file")
+                if fp:
+                    try:
+                        file_nodes = await asyncio.to_thread(index.get_file_nodes, fp)
+                        cname = c.get("name", "")
+                        for n in file_nodes:
+                            if n.get("name") == cname:
+                                body = n.get("body_text", "")
+                                sig_lines = body.split("\n")[:5] if body else []
+                                c["signature_preview"] = "\n".join(sig_lines)
+                                break
+                    except Exception:
+                        pass
+            result["auto_expanded"] = True
+        if len(callers) > limit:
+            result["total_count"] = len(callers)
+        return result
+
+    else:  # callees
+        callees = await asyncio.to_thread(api.find_callees, symbol)
+        page = callees[offset:offset+limit]
+        result = {"target": symbol, "mode": mode, "callees": page}
+        if len(callees) > limit:
+            result["total_count"] = len(callees)
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: impact — from graph.py
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_impact(
+    target: str,
+    limit: int,
+    offset: int,
+    max_depth: int,
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    import os
+    if allow_external and not os.path.exists(db_path):
+        raise IndexNotFoundError(
+            f"External repository at '{repo_root}' has not been indexed yet. "
+            f"Please run the 'update_index' tool with allow_external=True on this target first."
+        )
+
+    await _auto_sync_stale(repo_root, db_path, str(path))
+    api = _get_cached_api(repo_root, db_path, "graph")
+
+    deps = await asyncio.to_thread(api.impact_analysis, path.as_posix(), max_depth)
+    page = deps[offset:offset+limit]
+    result = {"target": path.as_posix(), "mode": "impact", "dependent_files": page}
+    if len(deps) > limit:
+        pkg_counts: dict[str, int] = {}
+        for d in deps:
+            fp = d if isinstance(d, str) else (d.get("filepath", "") if isinstance(d, dict) else str(d))
+            parts = fp.split("/")
+            pkg = "/".join(parts[:3]) if len(parts) >= 3 else fp
+            pkg_counts[pkg] = pkg_counts.get(pkg, 0) + 1
+        top_packages = sorted(pkg_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        result["summary"] = {
+            "total_impacted_files": len(deps),
+            "top_impacted_packages": [
+                {"package": pkg, "file_count": count}
+                for pkg, count in top_packages
+            ],
+            "max_depth_reached": max_depth,
+            "hint": "Use offset/limit to paginate, or narrow target to a specific subdirectory.",
+        }
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: usages — replaces explain_symbol
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_usages(
+    target: str,
+    query: Optional[str],
+    limit: int,
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    """Combined: FTS search + callers in one call."""
+    if not query:
+        raise SecurityValidationError("'query' (symbol name) is required for usages mode")
+
+    # 1. Search for the symbol definition
+    try:
+        search_res = await _do_fts(
+            target=target, query=query, limit=5, offset=0,
+            include_source=True, auto_expand_source=True,
+            output_file=None, allow_external=allow_external, ctx=ctx
+        )
+    except Exception as e:
+        search_res = {"error": f"Search failed: {e}"}
+
+    # 2. Find callers
+    try:
+        callers_res = await _do_callers_callees(
+            target=target, mode="callers", symbol=query,
+            limit=5, offset=0, allow_external=allow_external, ctx=ctx
+        )
+    except Exception as e:
+        callers_res = {"error": f"Callers analysis failed: {e}"}
+
+    return {
+        "symbol": query,
+        "target": target,
+        "search_results": search_res.get("results", search_res),
+        "callers": callers_res.get("callers", callers_res),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: intent — from query_codebase (intent presets)
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_intent(
+    target: str,
+    intent: Optional[str],
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    if not intent:
+        raise SecurityValidationError(
+            "'intent' parameter is required for intent mode",
+            valid_values=list(INTENT_PRESETS.keys()),
+            suggestion="Use one of the listed intent values.",
+        )
+    if intent not in INTENT_PRESETS:
+        raise SecurityValidationError(
+            f"Unknown intent: '{intent}'",
+            valid_values=list(INTENT_PRESETS.keys()),
+            suggestion="Use one of the listed intent values.",
+        )
+
+    query_dict = dict(INTENT_PRESETS[intent])  # copy to avoid mutation
+    return await _do_dsl(target, query_dict, allow_external, ctx)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: dsl — from query_codebase (custom JSON DSL)
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_dsl(
+    target: str,
+    query_json: Optional[str | Dict[str, Any]],
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    import json as json_mod
+    import os
+
+    if query_json is None:
+        raise SecurityValidationError(
+            "'query_json' parameter is required for dsl mode",
+            suggestion="Provide a JSON object like {\"select\": \"nodes\", \"where\": {\"node_type\": \"function\"}}",
+        )
+
+    if isinstance(query_json, str):
+        try:
+            query_json = json_mod.loads(query_json)
+        except json_mod.JSONDecodeError:
+            raise SecurityValidationError(
+                "Invalid JSON in query_json parameter",
+                suggestion="Provide valid JSON, or use mode='intent' for common queries.",
+            )
+
+    if not isinstance(query_json, dict):
+        raise SecurityValidationError(
+            "query_json must be a JSON object",
+            suggestion='Provide a JSON object like {"select": "nodes", "where": {"node_type": "function"}}',
+        )
+
+    # Extract and strip internal graph intent marker
+    graph_intent = query_json.pop("_graph_intent", None)
+
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    if allow_external and not os.path.exists(db_path):
+        raise IndexNotFoundError(
+            f"External repository at '{repo_root}' has not been indexed yet. "
+            f"Please run the 'update_index' tool with allow_external=True on this target first."
+        )
+
+    from src.mcp_server.middleware.sync import _auto_sync_stale
+    await _auto_sync_stale(repo_root, db_path, str(path))
+
+    # ── Graph-dependent intents ───────────────────────────────
+    if graph_intent in ("entry_points", "dead_code"):
+        try:
+            graph_api = _get_cached_api(repo_root, db_path, "graph")
+        except Exception:
+            return {
+                "status": "error",
+                "error_type": "index_missing",
+                "message": "Graph index not available for this repository.",
+                "suggestion": "Run 'update_index' first to build the graph, then retry this intent.",
+            }
+
+        index = _get_cached_api(repo_root, db_path, "index")
+        limit = min(query_json.get("limit", 50), 100)
+        nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
+        fn_nodes = [n for n in nodes if n.get("node_type") in ("function", "method")]
+
+        caller_counts = {}
+        try:
+            cypher = '''
+            MATCH (caller)-[:CALLS]->(callee)
+            RETURN callee.name AS name, COUNT(caller) AS caller_count
+            '''
+            rows = await asyncio.to_thread(graph_api.graph.query, cypher)
+            for r in rows:
+                if r.get('name'):
+                    caller_counts[r['name']] = r['caller_count']
+        except Exception as e:
+            logger.warning(f"Bulk caller count query failed: {e}")
+
+        results = []
+        for node in fn_nodes:
+            name = node.get("name", "")
+            caller_count = caller_counts.get(name, 0)
+
+            if graph_intent == "entry_points" and caller_count >= 5:
+                results.append({**node, "caller_count": caller_count})
+            elif graph_intent == "dead_code" and caller_count == 0:
+                results.append({**node, "caller_count": 0})
+
+        if graph_intent == "entry_points":
+            results.sort(key=lambda x: x.get("caller_count", 0), reverse=True)
+
+        for r in results:
+            r.pop("body_text", None)
+
+        return {
+            "status": "ok",
+            "intent": graph_intent,
+            "results": results[:limit],
+            "total_candidates": len(fn_nodes),
+        }
+
+    # ── Standard DSL path ─────────────────────────────────────
+    from src.mcp_server.dsl.compiler import DSLCompiler
+    from src.mcp_server.index_db import get_graph_path_for_repo
+    from src.mcp_server.prometheus_metrics import GRAPH_DB_SIZE
+
+    sql_query, cypher_query, sql_params = DSLCompiler.compile(query_json, db_path="main")
+
+    index = _get_cached_api(repo_root, db_path, "index")
+    conn = index._conn
+
+    results = []
+
+    if cypher_query:
+        graph_api = _get_cached_api(repo_root, db_path, "graph")
+        graph_res = await asyncio.to_thread(graph_api.graph.query, cypher_query)
+
+        def get_dir_size(dir_path: str) -> int:
+            total = 0
+            try:
+                for dirpath, _, filenames in os.walk(dir_path):
+                    for f in filenames:
+                        fp = os.path.join(dirpath, f)
+                        if not os.path.islink(fp):
+                            total += os.path.getsize(fp)
+            except Exception as e:
+                logger.warning(f"Failed to get graph db size: {e}")
+            return total
+
+        graph_db_dir = get_graph_path_for_repo(db_path)
+        if os.path.exists(graph_db_dir):
+            GRAPH_DB_SIZE.set(get_dir_size(graph_db_dir))
+
+        matching_ids = []
+        for row in graph_res:
+            matching_ids.append(row['id'])
+
+        if not matching_ids:
+            return {"status": "ok", "results": [], "note": "No graph matches found"}
+
+        placeholders = ",".join(["?" for _ in matching_ids])
+        limit_idx = sql_query.upper().rfind("LIMIT")
+        if limit_idx != -1:
+            sql_query = f"{sql_query[:limit_idx]} AND id IN ({placeholders}) {sql_query[limit_idx:]}"
+        else:
+            sql_query = f"{sql_query} AND id IN ({placeholders})"
+
+        sql_params.extend(matching_ids)
+
+    try:
+        df = await asyncio.to_thread(conn.execute, sql_query, sql_params)
+        columns = [desc[0] for desc in df.description]
+        rows = df.fetchall()
+        for r in rows:
+            results.append(dict(zip(columns, r)))
+    except Exception as e:
+        logger.warning(f"DSL SQL query failed: {e}")
+        return {"status": "error", "error": str(e), "sql": sql_query}
+
+    return {
+        "status": "ok",
+        "query": query_json,
+        "results": results
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: functional-analysis — from graph.py
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_functional_analysis(
+    target: str,
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    import json as json_mod
+
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    import os
+    if allow_external and not os.path.exists(db_path):
+        raise IndexNotFoundError(
+            f"External repository at '{repo_root}' has not been indexed yet. "
+            f"Please run the 'update_index' tool with allow_external=True on this target first."
+        )
+
+    await _auto_sync_stale(repo_root, db_path, str(path))
+    api = _get_cached_api(repo_root, db_path, "graph")
+
+    fa_result = await asyncio.to_thread(api.analyze_functional_purity)
+    ret = {"target": path.as_posix(), "mode": "functional-analysis", "functional_analysis": fa_result}
+
+    try:
+        dumped = json_mod.dumps(ret)
+        if len(dumped) > 50000:
+            output_file = f".mcp_outputs/search_functional-analysis_{int(time.time())}.json"
+            from src.mcp_server.middleware.security import safe_output_path
+            out_path = safe_output_path(output_file)
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(dumped)
+            return {
+                "target": path.as_posix(),
+                "mode": "functional-analysis",
+                "saved_to": str(out_path),
+                "summary": f"Functional analysis output is too large ({len(dumped)} chars). Results saved to file.",
+            }
+    except Exception:
+        pass
+    return ret

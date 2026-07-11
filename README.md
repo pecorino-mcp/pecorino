@@ -8,7 +8,7 @@ Pecorino allows Large Language Models (LLMs) and dev tools (such as Claude Deskt
 
 ## ✨ Features
 
-- 🔌 **Model Context Protocol (MCP)**: Exposes 3 unified tools (`browse`, `metrics`, `update_index`) to your AI assistant.
+- 🔌 **Model Context Protocol (MCP)**: Exposes 5 unified tools (`browse`, `search`, `update_index`, `set_workspace`, `metrics`) to your AI assistant.
 - 📊 **Git History Analytics**: Commits, LOC growth, author contributions, activity patterns, and team performance tracking.
 - 📐 **Object-Oriented Design Metrics**: Afferent/efferent coupling (Ca/Ce), instability (I), abstractness (A), and Distance-from-Main-Sequence (D) analysis.
 - 🚨 **Risk Hotspot Detection**: Combines code churn (revision frequency) and complexity to pinpoint high-risk source files.
@@ -64,28 +64,27 @@ Add Pecorino to your `claude_desktop_config.json`:
 
 Once connected, your AI assistant can use the following tools:
 
-### 1. `/browse`
-Inspects directories, files, or performs a semantic FTS search on the indexed codebase.
-- **Parameters**:
-  - `target` *(string, optional)*: Absolute path to the file or directory. Defaults to the current workspace root.
-  - `view` *(string, optional)*: One of:
-    - **Structure**: `"summary"` (default), `"classes"`, `"functions"`, `"deps"` (imports), `"tree"` (AST/directory tree)
-    - **Search**: `"search"` (semantic FTS), `"code"` (source code retrieval)
-    - **Graph**: `"callers"`, `"callees"`, `"impact"`, `"pagerank"`, `"functional-analysis"`
-  - `query` *(string, optional)*: The search term (required for `search`, `callers`, `callees`, and `code` on directories).
-  - `limit` *(integer, optional)*: Maximum results to return (default: 10).
-  - `offset` *(integer, optional)*: Offset for pagination (default: 0).
+### 1. `browse`
+Browse codebase structure (tree, deps, classes, functions, pagerank, summary). Use this for structural viewing, not for searching or analysis.
 
-### 2. `/metrics`
-Computes design metrics, cyclomatic complexity, Halstead metrics, or risk hotspots.
-- **Parameters**:
-  - `target` *(string, required)*: Absolute path to the file or folder.
-  - `what` *(array of strings, optional)*: Metrics to run (`"oop"`, `"complexity"`, `"hotspots"`, or `"all"`).
+### 2. `search`
+Unified search and analysis tool with multiple modes:
+- **`fts`** (default) — Full-text keyword search across the codebase.
+- **`callers`** / **`callees`** — Call graph analysis. Who calls X? What does X call?
+- **`impact`** — Deep dependency trace from a file or directory.
+- **`usages`** — Combined search + callers in one call (find definition and all callers).
+- **`intent`** — Preset AST queries: `all_classes`, `all_functions`, `entry_points`, `dead_code`, `files_by_language`.
+- **`dsl`** — Custom JSON DSL query against the codebase AST and graph.
+- **`functional-analysis`** — Functional purity analysis.
 
-### 3. `/update_index`
-Performs tree-sitter AST analysis and populates the DuckDB codebase index for fast semantic searching.
-- **Parameters**:
-  - `target` *(string, required)*: Absolute path to the file or folder to index.
+### 3. `update_index`
+Update the AST index for the codebase and return a structural summary. Call this once after cloning or after significant changes.
+
+### 4. `set_workspace`
+Change the server's workspace root directory at runtime.
+
+### 5. `metrics` *(Admin only)*
+Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis. Use `what: ['hotspots']` for repo-level risk triage.
 
 ---
 
