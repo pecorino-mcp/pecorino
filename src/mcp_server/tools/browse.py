@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 _fts_rebuild_lock = threading.Lock()
 
-ALLOWED_VIEWS = frozenset({"classes", "functions", "deps", "tree", "all", "pagerank", "summary"})
+ALLOWED_VIEWS = frozenset({"classes", "functions", "deps", "tree", "all", "pagerank", "summary", "code"})
+MAX_LINES_LIMIT = 2000
 MAX_LIMIT = 100
 MAX_DEPTH = 10
 MAX_QUERY_LEN = 200
@@ -27,7 +28,7 @@ INDEX_TIMEOUT_S = 300
 from mcp.server import ServerRequestContext
 
 
-async def do_browse(target: str, view: str = "tree", query: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False, ctx: Optional[ServerRequestContext] = None) -> dict:
+async def do_browse(target: str, view: str = "tree", query: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False, start_line: Optional[int] = None, end_line: Optional[int] = None, ctx: Optional[ServerRequestContext] = None) -> dict:
     # --- Input validation ---
     view = view.strip().lower()
     if view not in ALLOWED_VIEWS:
@@ -271,6 +272,34 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                     result["structure"] = {"total_indexed_files": 0}
             else:
                 result["structure"] = {"total_indexed_files": 0, "note": "Unindexed directory."}
+
+    elif view == "code":
+        if not is_file:
+            raise SecurityValidationError("view='code' requires a file target, not a directory.")
+        if start_line is None or end_line is None:
+            raise SecurityValidationError("'start_line' and 'end_line' are required for view='code'.")
+        if start_line < 1:
+            raise SecurityValidationError("start_line must be >= 1")
+        if end_line < start_line:
+            raise SecurityValidationError("end_line must be >= start_line")
+        if (end_line - start_line) > MAX_LINES_LIMIT:
+            raise SecurityValidationError(f"Requested line range exceeds the maximum limit of {MAX_LINES_LIMIT} lines.")
+
+        def _read_lines():
+            try:
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    lines = f.readlines()
+                    start_idx = start_line - 1
+                    end_idx = min(end_line, len(lines))
+                    selected = lines[start_idx:end_idx]
+                    return "".join(selected) if selected else ""
+            except Exception as e:
+                raise SecurityValidationError(f"Failed to read file {path}: {str(e)}")
+
+        content = await asyncio.to_thread(_read_lines)
+        result["start_line"] = start_line
+        result["end_line"] = end_line
+        result["content"] = content
 
     # Graph database dependency and PageRank retrieval (file-level only)
     if view in ("deps",) and is_file and api is not None:

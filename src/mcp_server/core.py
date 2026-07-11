@@ -23,10 +23,8 @@ workspace_root = Path(__file__).resolve().parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-# --- Security constants (Moved to middleware/security.py) ---
-
 ALLOWED_VIEWS = frozenset({"summary", "classes", "functions", "deps", "tree",
-                           "pagerank", "all"})
+                           "pagerank", "all", "code"})
 ALLOWED_WHAT = frozenset({"oop", "complexity", "hotspots", "all"})
 ALLOWED_API_TYPES = frozenset({"index", "graph"})
 MAX_LIMIT = 100
@@ -34,15 +32,6 @@ MAX_DEPTH = 10
 MAX_QUERY_LEN = 200
 MAX_CODE_LINES = 300  # Max lines of source code returned per result in 'code' view
 INDEX_TIMEOUT_S = 300  # 5 minutes
-
-
-
-
-
-# Core implementation of tools (without decorators)
-
-
-
 
 # Low-level Handlers
 

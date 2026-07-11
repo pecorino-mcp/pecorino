@@ -59,7 +59,7 @@ async def handle_list_tools(
     tools = [
         types.Tool(
             name="browse",
-            description="Browse codebase structure (tree, deps, classes, functions, all). Use this for structural viewing, not for searching or precise code retrieval.",
+            description="Browse codebase structure (tree, deps, classes, functions, all, code). Use this for structural viewing and code retrieval, not for searching.",
             annotations=types.ToolAnnotations(
                 title="Browse Codebase",
                 **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
@@ -74,8 +74,16 @@ async def handle_list_tools(
                     "view": {
                         "type": "string",
                         "default": "tree",
-                        "enum": ["tree", "classes", "functions", "deps", "all", "pagerank", "summary"],
-                        "description": "The type of structure view to return. Use 'all' to get all views combined."
+                        "enum": ["tree", "classes", "functions", "deps", "all", "pagerank", "summary", "code"],
+                        "description": "The type of structure view to return. Use 'code' with start_line/end_line to retrieve specific lines from a file."
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Starting line number (1-indexed, inclusive). Required for view='code'."
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Ending line number (1-indexed, inclusive). Required for view='code'."
                     },
                     "limit": {
                         "type": "integer",
@@ -321,6 +329,8 @@ async def handle_call_tool(
                 limit=arguments.get("limit", 10),
                 offset=arguments.get("offset", 0),
                 allow_external=arguments.get("allow_external", True),
+                start_line=arguments.get("start_line"),
+                end_line=arguments.get("end_line"),
                 ctx=ctx
             )
         elif name == "search":
