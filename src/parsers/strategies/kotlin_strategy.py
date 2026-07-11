@@ -27,6 +27,8 @@ class KotlinStrategy(BaseParsingStrategy):
                         name=name,
                         lineno=node.start_point[0] + 1,
                         end_lineno=node.end_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte,
                     )
                     # Kotlin objects are essentially singletons
                     if node.type == 'object_declaration':
@@ -50,6 +52,8 @@ class KotlinStrategy(BaseParsingStrategy):
                     interface_node = InterfaceDef(
                         name=name,
                         lineno=node.start_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte,
                     )
                     nodes.append(interface_node)
                     
@@ -74,6 +78,8 @@ class KotlinStrategy(BaseParsingStrategy):
                             name=name,
                             lineno=node.start_point[0] + 1,
                             end_lineno=node.end_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte,
                         )
                         # Store docstring in meta or as a custom field if we want to preserve it,
                         # but standard AST doesn't have docstring field directly
@@ -83,6 +89,8 @@ class KotlinStrategy(BaseParsingStrategy):
                             name=name,
                             lineno=node.start_point[0] + 1,
                             end_lineno=node.end_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte,
                         )
                     
                     # Extract body text for further parsing (like called methods)

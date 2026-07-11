@@ -21,6 +21,8 @@ class RustStrategy(BaseParsingStrategy):
                         name=name,
                         lineno=node.start_point[0] + 1,
                         end_lineno=node.end_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte,
                     )
                     
                     if node.type == 'enum_item':
@@ -47,6 +49,8 @@ class RustStrategy(BaseParsingStrategy):
                     interface_node = InterfaceDef(
                         name=name,
                         lineno=node.start_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte,
                     )
                     nodes.append(interface_node)
                     
@@ -71,6 +75,8 @@ class RustStrategy(BaseParsingStrategy):
                             name=name,
                             lineno=node.start_point[0] + 1,
                             end_lineno=node.end_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte,
                         )
                         current_parent.methods.append(func_node)
                     else:
@@ -78,6 +84,8 @@ class RustStrategy(BaseParsingStrategy):
                             name=name,
                             lineno=node.start_point[0] + 1,
                             end_lineno=node.end_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte,
                         )
                     
                     body = next((child for child in node.children if child.type == 'block'), None)

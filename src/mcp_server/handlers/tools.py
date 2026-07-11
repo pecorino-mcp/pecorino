@@ -256,6 +256,16 @@ async def handle_list_tools(
                         "type": "integer",
                         "description": "The ending line number (1-indexed, inclusive)."
                     },
+                    "start_byte": {
+                        "type": "integer",
+                        "description": "Optional starting byte offset. If provided along with end_byte, preferred over line numbers for exact extraction.",
+                        "default": 0
+                    },
+                    "end_byte": {
+                        "type": "integer",
+                        "description": "Optional ending byte offset.",
+                        "default": 0
+                    },
                     "allow_external": {
                         "type": "boolean",
                         "default": True
@@ -560,6 +570,8 @@ async def handle_call_tool(
                 target=target,
                 start_line=int(start_line),
                 end_line=int(end_line),
+                start_byte=int(arguments.get("start_byte", 0)),
+                end_byte=int(arguments.get("end_byte", 0)),
                 allow_external=arguments.get("allow_external", True),
                 ctx=ctx
             )

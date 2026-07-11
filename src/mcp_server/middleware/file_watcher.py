@@ -79,7 +79,7 @@ class FileWatcherService:
         
         # Load .gitignore patterns (simplified version, we rely on the core exclusion logic)
         from src.core.gitdatacollector import GitDataCollector
-        self.git_collector = GitDataCollector(self.workspace_root)
+        self.git_collector = GitDataCollector()
         
         from src.core.constants import SUPPORTED_EXTENSIONS
         self.supported_extensions = SUPPORTED_EXTENSIONS

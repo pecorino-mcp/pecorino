@@ -16,6 +16,8 @@ class ASTNode:
     col_offset: int = 0
     end_lineno: int = 0
     end_col_offset: int = 0
+    start_byte: int = 0
+    end_byte: int = 0
 
     @property
     def _fields(self) -> tuple:

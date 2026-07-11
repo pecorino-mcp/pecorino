@@ -14,10 +14,12 @@ async def do_get_code_range(
     target: str,
     start_line: int,
     end_line: int,
+    start_byte: int = 0,
+    end_byte: int = 0,
     allow_external: bool = False,
     ctx: Optional[ServerRequestContext] = None
 ) -> dict:
-    """Retrieve a precise range of lines from a specific file."""
+    """Retrieve a precise range of lines or bytes from a specific file."""
     if start_line < 1:
         raise SecurityValidationError("start_line must be >= 1")
     if end_line < start_line:
@@ -32,27 +34,34 @@ async def do_get_code_range(
     if not path.is_file():
         raise SecurityValidationError(f"Target is not a file or does not exist: {path}")
     
-    def _read_lines():
+    def _read_content():
         try:
-            with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                lines = f.readlines()
-                # 1-indexed to 0-indexed translation
-                start_idx = start_line - 1
-                end_idx = min(end_line, len(lines))
-                
-                selected = lines[start_idx:end_idx]
-                if not selected:
-                    return ""
-                return "".join(selected)
+            if start_byte > 0 and end_byte > start_byte:
+                with open(path, 'rb') as f:
+                    content_bytes = f.read()
+                    return content_bytes[start_byte:end_byte].decode('utf-8', errors='replace')
+            else:
+                with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                    lines = f.readlines()
+                    # 1-indexed to 0-indexed translation
+                    start_idx = start_line - 1
+                    end_idx = min(end_line, len(lines))
+                    
+                    selected = lines[start_idx:end_idx]
+                    if not selected:
+                        return ""
+                    return "".join(selected)
         except Exception as e:
             raise SecurityValidationError(f"Failed to read file {path}: {str(e)}")
 
-    content = await asyncio.to_thread(_read_lines)
+    content = await asyncio.to_thread(_read_content)
     
     return {
         "target": str(path),
         "start_line": start_line,
         "end_line": end_line,
+        "start_byte": start_byte,
+        "end_byte": end_byte,
         "content": content,
         "status": "ok"
     }

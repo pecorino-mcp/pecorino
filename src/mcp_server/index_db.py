@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import duckdb
+import functools
 from pathlib import Path
 from typing import Any, Dict, List
 from src.core.errors import SecurityValidationError
@@ -67,7 +68,9 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes DROP COLUMN body_text',
         'ALTER TABLE code_nodes ADD COLUMN relationships VARCHAR',
         'ALTER TABLE code_nodes DROP COLUMN metrics_json',
-        'ALTER TABLE code_nodes ADD COLUMN pagerank DOUBLE DEFAULT 0.0'
+        'ALTER TABLE code_nodes ADD COLUMN pagerank DOUBLE DEFAULT 0.0',
+        'ALTER TABLE code_nodes ADD COLUMN start_byte INTEGER',
+        'ALTER TABLE code_nodes ADD COLUMN end_byte INTEGER'
     ]
     for query in migrations:
         try:
@@ -117,6 +120,11 @@ def migrate_all():
                     migrate_codebase(conn)
             except Exception as e:
                 logger.warning("Failed to migrate %s: %s", fname, e)
+
+@functools.lru_cache(maxsize=32)
+def _get_file_content(filepath: str, mtime: float) -> bytes:
+    with open(filepath, 'rb') as f:
+        return f.read()
 
 class CodeSearchIndex:
     """DuckDB-backed Semantic Code Search Index."""
@@ -267,12 +275,17 @@ class CodeSearchIndex:
             logger.warning("Failed to check for FTS index: %s", e)
             return False
 
-    def _lazy_load_body(self, filepath: str, start_line: int, end_line: int) -> str:
-        """Lazy-load source code from disk using filepath + line range."""
+    def _lazy_load_body(self, filepath: str, start_line: int, end_line: int, start_byte: int = 0, end_byte: int = 0) -> str:
+        """Lazy-load source code from disk using filepath + line range or byte offset."""
         try:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-                return ''.join(lines[max(0, start_line-1):end_line])
+            if start_byte > 0 and end_byte > start_byte:
+                mtime = os.path.getmtime(filepath)
+                content = _get_file_content(filepath, mtime)
+                return content[start_byte:end_byte].decode('utf-8', errors='ignore')
+            else:
+                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
+                    return ''.join(lines[max(0, start_line-1):end_line])
         except (FileNotFoundError, OSError):
             return ''
 
@@ -290,14 +303,16 @@ class CodeSearchIndex:
                 n['start_line'],
                 n['end_line'],
                 n.get('relationships', ''),
-                0.0
+                0.0,
+                n.get('start_byte', 0),
+                n.get('end_byte', 0)
             ))
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
                 # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?)", data)
+                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
                 conn.execute('''
                     INSERT INTO code_nodes
                     SELECT * FROM temp_code_nodes
@@ -307,7 +322,9 @@ class CodeSearchIndex:
                         filepath=excluded.filepath,
                         start_line=excluded.start_line,
                         end_line=excluded.end_line,
-                        relationships=excluded.relationships
+                        relationships=excluded.relationships,
+                        start_byte=excluded.start_byte,
+                        end_byte=excluded.end_byte
                 ''')
                 conn.execute("DROP TABLE temp_code_nodes")
                 conn.execute("COMMIT")
@@ -546,7 +563,7 @@ class CodeSearchIndex:
             # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the 
             # WHERE clause for filtering and in the SELECT clause to retrieve the score.
             res = conn.execute(f'''
-                SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line,
+                SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                        (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
                 FROM code_nodes c
                 WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
@@ -561,7 +578,7 @@ class CodeSearchIndex:
                     'name': row[0],
                     'node_type': row[1],
                     'filepath': row[2],
-                    'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                    'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                     'metrics': {},
                     'start_line': row[3],
                     'end_line': row[4]
@@ -579,7 +596,7 @@ class CodeSearchIndex:
         """Get all nodes for a specific file."""
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line
+            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte
             FROM code_nodes
             WHERE filepath = ?
         ''', (filepath,)).fetchall()
@@ -590,7 +607,7 @@ class CodeSearchIndex:
                 'name': row[0],
                 'node_type': row[1],
                 'filepath': row[2],
-                'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'metrics': {},
                 'start_line': row[3],
                 'end_line': row[4]
@@ -602,7 +619,7 @@ class CodeSearchIndex:
         prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line
+            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte
             FROM code_nodes
             WHERE filepath LIKE ?
         ''', (f"{prefix}%",)).fetchall()
@@ -613,7 +630,7 @@ class CodeSearchIndex:
                 'name': row[0],
                 'node_type': row[1],
                 'filepath': row[2],
-                'body_text': self._lazy_load_body(row[2], row[3], row[4]),
+                'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'metrics': {},
                 'start_line': row[3],
                 'end_line': row[4]

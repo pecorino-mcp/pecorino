@@ -317,6 +317,8 @@ class CodebaseIndexer:
                     'filepath': filepath,
                     'start_line': m.lineno,
                     'end_line': m.end_lineno,
+                    'start_byte': getattr(m, 'start_byte', 0),
+                    'end_byte': getattr(m, 'end_byte', 0),
                     'metrics': method_metrics,
                     'relationships': self._build_relationships_text(m)
                 })
@@ -351,6 +353,8 @@ class CodebaseIndexer:
                     'filepath': filepath,
                     'start_line': node.lineno,
                     'end_line': node.end_lineno,
+                    'start_byte': getattr(node, 'start_byte', 0),
+                    'end_byte': getattr(node, 'end_byte', 0),
                     'metrics': metrics,
                     'relationships': self._build_relationships_text(node)
                 })
@@ -383,6 +387,8 @@ class CodebaseIndexer:
                     'filepath': filepath,
                     'start_line': node.lineno,
                     'end_line': node.end_lineno,
+                    'start_byte': getattr(node, 'start_byte', 0),
+                    'end_byte': getattr(node, 'end_byte', 0),
                     'metrics': {},
                     'relationships': self._build_relationships_text(node)
                 })
@@ -410,6 +416,8 @@ class CodebaseIndexer:
                 'filepath': filepath,
                 'start_line': func.lineno,
                 'end_line': func.end_lineno,
+                'start_byte': getattr(func, 'start_byte', 0),
+                'end_byte': getattr(func, 'end_byte', 0),
                 'metrics': func_metrics,
                 'relationships': self._build_relationships_text(func)
             })

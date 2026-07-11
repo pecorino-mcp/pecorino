@@ -219,7 +219,13 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
             type_filter = ('function', 'method')
 
         filtered = [
-            {"name": n['name'], "filepath": n['filepath'], "line": n['start_line']}
+            {
+                "name": n['name'], 
+                "filepath": n['filepath'], 
+                "line": n['start_line'],
+                "start_byte": n.get('start_byte', 0),
+                "end_byte": n.get('end_byte', 0)
+            }
             for n in nodes if n['node_type'] in type_filter
         ]
         result["structure"] = filtered

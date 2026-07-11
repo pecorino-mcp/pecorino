@@ -20,6 +20,8 @@ class CSharpStrategy(BaseParsingStrategy):
                         name=name,
                         lineno=node.start_point[0] + 1,
                         end_lineno=node.end_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte,
                     )
                     
                     if node.type == 'record_declaration':
@@ -39,6 +41,8 @@ class CSharpStrategy(BaseParsingStrategy):
                     interface_node = InterfaceDef(
                         name=name,
                         lineno=node.start_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte,
                     )
                     nodes.append(interface_node)
                     
@@ -68,6 +72,8 @@ class CSharpStrategy(BaseParsingStrategy):
                             name=name,
                             lineno=node.start_point[0] + 1,
                             end_lineno=node.end_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte,
                         )
                         if node.type == 'property_declaration':
                             pass
@@ -80,6 +86,8 @@ class CSharpStrategy(BaseParsingStrategy):
                             name=name,
                             lineno=node.start_point[0] + 1,
                             end_lineno=node.end_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte,
                         )
                     
                     body = next((child for child in node.children if child.type == 'block'), None)
