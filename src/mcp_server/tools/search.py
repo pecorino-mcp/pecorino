@@ -4,9 +4,9 @@ import threading
 import time
 from typing import Optional
 
-from src.core.errors import AnalysisError, SecurityValidationError, IndexNotFoundError
+from src.core.errors import AnalysisError, IndexNotFoundError, SecurityValidationError
 from src.mcp_server.middleware.caching import _get_cached_api, clear_index_cache
-from src.mcp_server.middleware.security import safe_path, check_suspicious
+from src.mcp_server.middleware.security import check_suspicious, safe_path
 from src.mcp_server.middleware.sync import _auto_sync_stale
 from src.mcp_server.prometheus_metrics import FTS_SCAN_DURATION
 
@@ -18,6 +18,7 @@ MAX_QUERY_LEN = 200
 MAX_LIMIT = 100
 MAX_CODE_LINES = 300
 from mcp.server import ServerRequestContext
+
 
 def _cap_body(body: str) -> str:
     """Truncate body_text to MAX_CODE_LINES lines."""
@@ -44,7 +45,7 @@ async def do_search(target: str, query: Optional[str] = None, limit: int = 10, o
         if any(c in query for c in "\x00\n\r"):
             raise SecurityValidationError("Invalid characters in query")
         check_suspicious(query, "query")
-        
+
     limit = max(1, min(int(limit), MAX_LIMIT))
     offset = max(0, int(offset))
 
@@ -52,7 +53,7 @@ async def do_search(target: str, query: Optional[str] = None, limit: int = 10, o
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
-    
+
     import os
     if allow_external and not os.path.exists(db_path):
         raise IndexNotFoundError(
@@ -129,7 +130,7 @@ async def do_search(target: str, query: Optional[str] = None, limit: int = 10, o
                     )
                 clear_index_cache()
                 index = _get_cached_api(repo_root, db_path, "index")
-                
+
     _fts_start = time.time()
     results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset)
     FTS_SCAN_DURATION.observe(time.time() - _fts_start)

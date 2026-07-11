@@ -2,14 +2,14 @@ import asyncio
 import json
 import logging
 import os
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
-from src.core.errors import SecurityValidationError, IndexNotFoundError
-from src.mcp_server.middleware.caching import _get_cached_api
-from src.mcp_server.middleware.security import safe_path, check_suspicious
+from src.core.errors import IndexNotFoundError, SecurityValidationError
 from src.mcp_server.dsl.compiler import DSLCompiler
-from src.mcp_server.prometheus_metrics import GRAPH_DB_SIZE
 from src.mcp_server.index_db import get_graph_path_for_repo
+from src.mcp_server.middleware.caching import _get_cached_api
+from src.mcp_server.middleware.security import safe_path
+from src.mcp_server.prometheus_metrics import GRAPH_DB_SIZE
 
 logger = logging.getLogger(__name__)
 from mcp.server import ServerRequestContext
@@ -57,7 +57,7 @@ async def do_query(target: str, query_json: str | Dict[str, Any], allow_external
                 "Invalid JSON in query_json parameter",
                 suggestion="Provide valid JSON, or use the 'intent' parameter instead for common queries.",
             )
-            
+
     if not isinstance(query_json, dict):
         raise SecurityValidationError(
             "query_json must be a JSON object",
@@ -72,7 +72,6 @@ async def do_query(target: str, query_json: str | Dict[str, Any], allow_external
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
 
-    import os
     if allow_external and not os.path.exists(db_path):
         raise IndexNotFoundError(
             f"External repository at '{repo_root}' has not been indexed yet. "
@@ -142,17 +141,17 @@ async def do_query(target: str, query_json: str | Dict[str, Any], allow_external
 
     # ── Standard DSL path ─────────────────────────────────────
     sql_query, cypher_query, sql_params = DSLCompiler.compile(query_json, db_path="main")
-    
+
     index = _get_cached_api(repo_root, db_path, "index")
     conn = index._conn
-    
+
     results = []
-    
+
     if cypher_query:
         # If there's a graph join, we need to query Kuzu first to get the matching node IDs
         graph_api = _get_cached_api(repo_root, db_path, "graph")
         graph_res = await asyncio.to_thread(graph_api.graph.query, cypher_query)
-        
+
         # Track graph DB size
         def get_dir_size(path: str) -> int:
             total = 0
@@ -165,19 +164,19 @@ async def do_query(target: str, query_json: str | Dict[str, Any], allow_external
             except Exception as e:
                 logger.warning(f"Failed to get graph db size: {e}")
             return total
-            
+
         graph_db_dir = get_graph_path_for_repo(db_path)
         if os.path.exists(graph_db_dir):
             GRAPH_DB_SIZE.set(get_dir_size(graph_db_dir))
-            
+
         # Extract node IDs
         matching_ids = []
         for row in graph_res:
             matching_ids.append(row['id'])
-            
+
         if not matching_ids:
             return {"status": "ok", "results": [], "note": "No graph matches found"}
-            
+
         # Add IN clause for IDs
         placeholders = ",".join(["?" for _ in matching_ids])
         # Inject the IN clause into the SQL query before the LIMIT/OFFSET
@@ -186,9 +185,9 @@ async def do_query(target: str, query_json: str | Dict[str, Any], allow_external
             sql_query = f"{sql_query[:limit_idx]} AND id IN ({placeholders}) {sql_query[limit_idx:]}"
         else:
             sql_query = f"{sql_query} AND id IN ({placeholders})"
-            
+
         sql_params.extend(matching_ids)
-        
+
     try:
         df = await asyncio.to_thread(conn.execute, sql_query, sql_params)
         columns = [desc[0] for desc in df.description]

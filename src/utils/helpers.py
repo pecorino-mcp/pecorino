@@ -191,13 +191,13 @@ def print_progress_bar(iteration: int, total: int, prefix: str = '', suffix: str
     import sys
     if stream is None:
         stream = sys.stderr
-        
+
     if total <= 0:
         return
-        
+
     percent_val = 100 * (iteration / float(total))
     percent = f"{percent_val:.{decimals}f}"
-    
+
     if start_time is not None:
         elapsed = time.time() - start_time
         if iteration > 0:
@@ -206,7 +206,7 @@ def print_progress_bar(iteration: int, total: int, prefix: str = '', suffix: str
         else:
             time_str = f" [Elapsed: {format_duration(elapsed)} | ETA: ?]"
         suffix += time_str
-    
+
     if getattr(stream, 'isatty', lambda: False)():
         filled_length = int(length * iteration // total)
         bar = fill * filled_length + '-' * (length - filled_length)

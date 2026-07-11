@@ -21,7 +21,7 @@ pytest>=7.0.0
 pytest-asyncio
 mypy>=1.0.0
 ruff>=0.1.0
--e /media/lechibang/work/projects/gorgonzola-lite/modules/gorgonzola-api-langs/python_api/
+gorgonzola
 duckdb
 docker
 httpx2

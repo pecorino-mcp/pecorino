@@ -1,22 +1,20 @@
-import os
-import sys
+import hashlib
 import json
 import logging
-import traceback
-import hashlib
-import shutil
+import os
 import pathlib
+import shutil
+import sys
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Any, List, Set, Tuple
+from typing import Any
 
-from src.mcp_server.index_db import CodeSearchIndex, get_db_path_for_repo, find_repo_root
-from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
+from src.core.constants import SUPPORTED_EXTENSIONS, get_language_for_extension
+from src.mcp_server.index_db import CodeSearchIndex, find_repo_root, get_db_path_for_repo
 from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
-
 from src.parsers.ast import ClassDef, InterfaceDef, walk
 from src.parsers.tree_sitter_parser import parse_with_tree_sitter
-from src.core.constants import get_language_for_extension, SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +22,7 @@ class CodebaseIndexer:
     def __init__(self, repo_path: str = None):
         self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
         db_path = get_db_path_for_repo(self.repo_path)
-        
+
         # Let CodeSearchIndex own the graph instance to avoid multiple connection handlers
         self.search_index = CodeSearchIndex(db_path)
         self.graph = self.search_index.graph
@@ -57,7 +55,7 @@ class CodebaseIndexer:
             accesses.append(f"TAINTS: {', '.join(node.tainted_attributes)}")
         if accesses:
             rels.append(" ".join(accesses))
-            
+
         extends_list = []
         if getattr(node, 'bases', None):
             extends_list.extend(node.bases)
@@ -68,10 +66,10 @@ class CodebaseIndexer:
                 extends_list.append(node.extends)
         if extends_list:
             rels.append(f"EXTENDS: {', '.join(extends_list)}")
-            
+
         if getattr(node, 'interfaces', None):
             rels.append(f"IMPLEMENTS: {', '.join(node.interfaces)}")
-            
+
         return " ".join(rels)
 
     def _add_access(self, kind, attrs, parent_id, class_name, graph_nodes_dict, graph_edges, make_id):
@@ -91,12 +89,12 @@ class CodebaseIndexer:
             lmd_id = make_id("Lambda", parent_id, lmd.name, getattr(lmd, 'lineno', 0))
             graph_nodes_dict[lmd_id] = (lmd_id, {"name": lmd.name}, "Lambda")
             graph_edges.append((parent_id, lmd_id, {}, "CONTAINS_LAMBDA"))
-            
+
             for call in getattr(lmd, 'called_methods', set()):
                 symbol_id = f"Symbol::{call}"
                 graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                 graph_edges.append((lmd_id, symbol_id, {}, "CALLS"))
-                
+
             self._add_state_accesses(lmd, lmd_id, class_name, graph_nodes_dict, graph_edges, make_id)
             self._add_lambdas(lmd, lmd_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
 
@@ -104,15 +102,15 @@ class CodebaseIndexer:
         stmt_id = make_id("ControlFlow", statement.name, statement.lineno, statement.col_offset)
         graph_nodes_dict[stmt_id] = (stmt_id, {"name": statement.name, "type": statement.type}, "ControlFlow")
         graph_edges.append((parent_id, stmt_id, {}, "CONTAINS"))
-        
+
         for call in getattr(statement, 'called_methods', set()):
             symbol_id = f"Symbol::{call}"
             graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
             graph_edges.append((stmt_id, symbol_id, {}, "CALLS"))
-            
+
         self._add_state_accesses(statement, stmt_id, class_name, graph_nodes_dict, graph_edges, make_id)
         self._add_lambdas(statement, stmt_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
-            
+
         for child_stmt in getattr(statement, 'statements', []):
             self._add_statement_to_graph(child_stmt, stmt_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
 
@@ -126,7 +124,7 @@ class CodebaseIndexer:
                     d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
                     for fname in fnames:
                         self._repo_files_cache.append(os.path.abspath(os.path.join(r, fname)))
-        
+
         norm_dep = dep_string.replace('\\', '/').lstrip('/')
         for filepath in self._repo_files_cache:
             if filepath.replace('\\', '/').endswith('/' + norm_dep) or filepath.replace('\\', '/').endswith('/' + dep_string):
@@ -166,7 +164,7 @@ class CodebaseIndexer:
                             pkg_json = os.path.join(nm_path, 'package.json')
                             if os.path.exists(pkg_json):
                                 try:
-                                    with open(pkg_json, 'r', encoding='utf-8') as f:
+                                    with open(pkg_json, encoding='utf-8') as f:
                                         pkg_data = json.load(f)
                                         main_file = pkg_data.get('main')
                                         if main_file:
@@ -193,7 +191,7 @@ class CodebaseIndexer:
             if dep_string.startswith('.'):
                 return self._resolve_relative_fallback(dep_string, source_filepath)
             return dep_string
-            
+
         # 2. C/C++: Include paths
         elif file_extension in ['.cpp', '.cc', '.cxx', '.h', '.hpp']:
             base_dir = os.path.dirname(source_filepath)
@@ -222,7 +220,7 @@ class CodebaseIndexer:
             else:
                 parts = dep_string.split('.')
                 target_path = os.path.join(self.repo_path, *parts)
-            
+
             if os.path.exists(target_path + '.py'):
                 return os.path.abspath(target_path + '.py')
             if os.path.isdir(target_path):
@@ -231,14 +229,14 @@ class CodebaseIndexer:
             if dep_string.startswith('.'):
                 return os.path.abspath(target_path)
             return dep_string
-            
+
         # 4. Go
         elif file_extension == '.go':
             module_name = ""
             go_mod = os.path.join(self.repo_path, 'go.mod')
             if os.path.exists(go_mod):
                 try:
-                    with open(go_mod, 'r', encoding='utf-8') as f:
+                    with open(go_mod, encoding='utf-8') as f:
                         for line in f:
                             if line.strip().startswith('module '):
                                 module_name = line.strip().split()[1]
@@ -250,7 +248,7 @@ class CodebaseIndexer:
                 target_path = os.path.abspath(os.path.join(self.repo_path, relative_path))
                 if os.path.exists(target_path): return target_path
                 if os.path.exists(target_path + '.go'): return target_path + '.go'
-            
+
             target_path = os.path.abspath(os.path.join(self.repo_path, dep_string))
             if os.path.exists(target_path): return target_path
             found = self._find_file_in_repo(dep_string)
@@ -258,7 +256,7 @@ class CodebaseIndexer:
             if dep_string.startswith('.'):
                 return self._resolve_relative_fallback(dep_string, source_filepath)
             return dep_string
-            
+
         # 5. Rust
         elif file_extension == '.rs':
             parts = dep_string.split('::')
@@ -331,7 +329,7 @@ class CodebaseIndexer:
                     "end_line": m.end_lineno,
                 }, "Method")
                 graph_edges.append((class_id, method_id, {}, "CONTAINS"))
-                
+
                 for call in getattr(m, 'called_methods', set()):
                     symbol_id = f"Symbol::{call}"
                     graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
@@ -358,7 +356,7 @@ class CodebaseIndexer:
                     'metrics': metrics,
                     'relationships': self._build_relationships_text(node)
                 })
-                
+
                 class_id = make_id(node.name)
                 graph_nodes_dict[class_id] = (class_id, {
                     "name": node.name,
@@ -367,7 +365,7 @@ class CodebaseIndexer:
                     "end_line": node.end_lineno,
                 }, "Class")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-                
+
                 for base in getattr(node, 'bases', []):
                     symbol_id = f"Symbol::{base}"
                     graph_nodes_dict[symbol_id] = (symbol_id, {"name": base}, "Symbol")
@@ -377,7 +375,7 @@ class CodebaseIndexer:
                     symbol_id = f"Symbol::{interface}"
                     graph_nodes_dict[symbol_id] = (symbol_id, {"name": interface}, "Symbol")
                     graph_edges.append((class_id, symbol_id, {}, "IMPLEMENTS"))
-                    
+
                 process_methods(node.methods, class_id, node.name)
 
             elif isinstance(node, InterfaceDef):
@@ -400,9 +398,9 @@ class CodebaseIndexer:
                     "end_line": node.end_lineno,
                 }, "Interface")
                 graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-                
+
                 process_methods(node.methods, class_id, node.name)
-                    
+
             elif type(node).__name__ == 'ImportDef':
                 if node.module:
                     dependencies.add(node.module)
@@ -430,15 +428,15 @@ class CodebaseIndexer:
                 "end_line": func.end_lineno,
             }, "Function")
             graph_edges.append((file_id, func_id, {}, "CONTAINS"))
-            
+
             for call in getattr(func, 'called_methods', set()):
                 symbol_id = f"Symbol::{call}"
                 graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                 graph_edges.append((func_id, symbol_id, {}, "CALLS"))
-                
+
             self._add_state_accesses(func, func_id, "Global", graph_nodes_dict, graph_edges, make_id)
             self._add_lambdas(func, func_id, filepath, "Global", graph_nodes_dict, graph_edges, make_id)
-                
+
             for stmt in getattr(func, 'statements', []):
                 self._add_statement_to_graph(stmt, func_id, filepath, "Global", graph_nodes_dict, graph_edges, make_id)
 
@@ -464,9 +462,9 @@ class CodebaseIndexer:
         records = self._extract_records(content, filepath, file_extension)
         if not records:
             return
-            
+
         self.search_index.clear_file(filepath)
-        
+
         nodes_to_index = records["nodes_to_index"]
         graph_nodes_dict = {nid: (nid, props, lbl) for nid, props, lbl in records["graph_nodes"]}
         graph_edges = records["graph_edges"]
@@ -482,7 +480,7 @@ class CodebaseIndexer:
 
         if nodes_to_index:
             self.search_index.index_nodes(nodes_to_index)
-            
+
         graph_nodes = list(graph_nodes_dict.values())
         if graph_nodes:
             try:
@@ -508,14 +506,14 @@ class CodebaseIndexer:
             MAX_FILE_SIZE = 2 * 1024 * 1024
             if fp.stat().st_size > MAX_FILE_SIZE:
                 return None
-                
+
             content = fp.read_text(encoding='utf-8', errors='ignore')
             content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
-            
+
             records = self._extract_records(content, file_str, fp.suffix)
             if not records:
                 return None
-                
+
             records.update({
                 "file_str": file_str,
                 "content_hash": content_hash,
@@ -544,7 +542,7 @@ class CodebaseIndexer:
         try:
             with self.graph:
                 self.graph.query_batch(queries)
-                
+
             # After graph relationships are resolved, calculate and build PageRank
             try:
                 pr_scores = self.graph.pagerank()
@@ -552,7 +550,7 @@ class CodebaseIndexer:
                     self.search_index.update_pagerank_bulk(pr_scores)
             except Exception as e:
                 logger.warning("Failed to calculate or build PageRank: %s", e)
-                
+
         except Exception as e:
             logger.warning("Failed to post-process graph: %s", e)
             logger.debug(traceback.format_exc())
@@ -567,16 +565,16 @@ class CodebaseIndexer:
                 fp = (pathlib.Path(r) / fname).resolve()
                 if fp.suffix in SUPPORTED_EXTENSIONS:
                     files.append(fp)
-        
+
         total_files = len(files)
         try:
             total_source_bytes = sum(fp.stat().st_size for fp in files)
         except Exception:
             total_source_bytes = 0
-            
+
         projected_db_bytes = int(total_source_bytes * 40.0)
         required_ramdisk_bytes = max(int(projected_db_bytes * 1.5), 100 * 1024 * 1024)
-        
+
         if progress_callback:
             progress_callback(0, total_files, f"Projected raw DB size: {projected_db_bytes / (1024*1024):.1f} MB")
 
@@ -586,14 +584,14 @@ class CodebaseIndexer:
             if self.search_index and self.search_index._conn:
                 rows = self.search_index._conn.execute('SELECT filepath, content_hash, mtime FROM files').fetchall()
                 tracked_metadata = {row[0]: (row[1], row[2]) for row in rows}
-        except Exception as e:
+        except Exception:
             pass
 
         indexed_count = 0
         skipped_count = 0
         current_files_set = set()
         parse_jobs = []
-        
+
         for fp in files:
             file_str = str(fp)
             current_files_set.add(file_str)
@@ -612,11 +610,11 @@ class CodebaseIndexer:
         if parse_jobs:
             max_workers = min(8, os.cpu_count() or 4)
             current_processed = skipped_count
-            
+
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 job_iterator = iter(parse_jobs)
                 futures = {}
-                
+
                 # Pre-populate pool (backpressure queue size = 2 * max_workers)
                 for _ in range(2 * max_workers):
                     try:
@@ -625,7 +623,7 @@ class CodebaseIndexer:
                         futures[fut] = job[1]
                     except StopIteration:
                         break
-                        
+
                 while futures:
                     done = next(as_completed(futures))
                     file_str = futures.pop(done)
@@ -640,11 +638,11 @@ class CodebaseIndexer:
                                 results.append(res)
                     except Exception as e:
                         logger.warning("Task failed for %s: %s", file_str, e)
-                        
+
                     current_processed += 1
                     if progress_callback:
                         progress_callback(current_processed, total_files, f"Parsed {file_str}")
-                        
+
                     try:
                         job = next(job_iterator)
                         fut = executor.submit(self._parse_file_task, job[0], job[1], job[2])
@@ -659,7 +657,7 @@ class CodebaseIndexer:
         if not results:
             self.search_index = CodeSearchIndex(ssd_db_path)
             self.graph = self.search_index.graph
-            
+
             tracked_files = self.search_index.get_all_tracked_files()
             stale_files = [tf for tf in tracked_files if tf not in current_files_set]
             stale_count = len(stale_files)
@@ -731,15 +729,15 @@ class CodebaseIndexer:
                     file_str = res["file_str"]
                     if res["nodes_to_index"]:
                         all_search_nodes.extend(res["nodes_to_index"])
-                    
+
                     if res["graph_nodes"]:
                         for node_id, props, lbl in res["graph_nodes"]:
                             all_graph_nodes[node_id] = (props, lbl)
-                    
+
                     if res["graph_edges"]:
                         for src, dst, props, rel in res["graph_edges"]:
                             all_graph_edges.add((src, dst, frozenset(props.items()), rel))
-                    
+
                     for dep, resolved_dep in res["resolved_deps"]:
                         if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
                             dep_name = os.path.basename(resolved_dep)
@@ -751,7 +749,7 @@ class CodebaseIndexer:
                             if resolved_dep not in all_graph_nodes:
                                 all_graph_nodes[resolved_dep] = ({"name": resolved_dep}, "Module")
                             all_graph_edges.add((file_str, resolved_dep, frozenset(), "DEPENDS_ON"))
-                    
+
                     lang_name = get_language_for_extension(res["lang"])
                     files_metadata.append((file_str, res["content_hash"], res["mtime"], lang_name))
 
@@ -766,7 +764,7 @@ class CodebaseIndexer:
                             progress_callback(total_files, total_files, "Inserting graph nodes into RAM Gorgonzola...")
                         nodes_list = [(nid, props, lbl) for nid, (props, lbl) in all_graph_nodes.items()]
                         id_map = ram_graph.insert_nodes_bulk(nodes_list)
-                        
+
                         if all_graph_edges:
                             if progress_callback:
                                 progress_callback(total_files, total_files, "Linking graph edges in RAM...")
@@ -778,7 +776,7 @@ class CodebaseIndexer:
                         if progress_callback:
                             progress_callback(total_files, total_files, "Updating file hash tracking in RAM...")
                         ram_search.upsert_file_hashes_bulk(files_metadata)
-                        
+
                     indexed_count = len(results)
                 except RamdiskQuotaExceeded as e:
                     logger.error("[ramdisk] QUOTA EXCEEDED: %s", e)
@@ -800,7 +798,7 @@ class CodebaseIndexer:
                 progress_callback(total_files, total_files, f"Removing {stale_count} stale files...")
             with self.graph:
                 self.search_index.clear_files_bulk(stale_files)
-                
+
         self._post_process_graph()
 
         fts_error = None
@@ -815,16 +813,16 @@ class CodebaseIndexer:
 
         if progress_callback:
             progress_callback(total_files, total_files, "Resolving symbols...")
- 
+
         from src.mcp_server.graph_api import GraphAPI
         graph_api = GraphAPI(dirpath)
         graph_api.resolve_symbols()
-        
+
         self.search_index.close()
 
         res = {
             "status": "success" if not fts_error else "partial",
-            "indexed_files": indexed_count, 
+            "indexed_files": indexed_count,
             "skipped_files": skipped_count,
             "stale_files_removed": stale_count,
             "total_files_found": total_files
@@ -844,10 +842,10 @@ def main():
     if len(sys.argv) < 3:
         sys.stderr.write("Usage: python -m src.mcp_server.index_pipeline <repo_root> <target_path>\n")
         sys.exit(1)
-        
+
     repo_root = sys.argv[1]
     target_path = sys.argv[2]
-    
+
     try:
         indexer = CodebaseIndexer(repo_path=repo_root)
         res = indexer.index_directory(target_path, progress_callback=progress_callback)

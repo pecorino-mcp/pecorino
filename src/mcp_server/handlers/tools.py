@@ -7,27 +7,26 @@ from typing import Any
 
 import mcp_types as types
 from mcp.server import ServerRequestContext
-from mcp.server.subscriptions import ToolsListChanged
 
 from src.mcp_server.config import settings
 from src.mcp_server.context_helper import PecorinoContext
 from src.mcp_server.errors import SecurityValidationError, handle_mcp_error
-from src.mcp_server.events import bus
 from src.mcp_server.middleware.security import check_suspicious
 from src.mcp_server.prometheus_metrics import TOOL_CALLS, TOOL_DURATION
 from src.mcp_server.tools.browse import do_browse
-from src.mcp_server.tools.search import do_search
+from src.mcp_server.tools.code import do_get_code_range
+from src.mcp_server.tools.explain_symbol import do_explain_symbol
 from src.mcp_server.tools.graph import do_analyze
 from src.mcp_server.tools.metrics_tool import do_metrics
-from src.mcp_server.tools.update_index import do_update_index
 from src.mcp_server.tools.query import do_query
-from src.mcp_server.tools.code import do_get_code_range
 from src.mcp_server.tools.risk_triage import do_risk_triage
-from src.mcp_server.tools.explain_symbol import do_explain_symbol
+from src.mcp_server.tools.search import do_search
+from src.mcp_server.tools.update_index import do_update_index
 
 logger = logging.getLogger(__name__)
 
 from src.mcp_server.middleware.concurrency import FIFOConcurrencyLimiter
+
 _concurrency_limiter = None
 
 def get_concurrency_limiter():
@@ -47,7 +46,7 @@ async def handle_list_tools(
 ) -> types.ListToolsResult:
     helper = PecorinoContext(ctx)
     role = helper.role
-    
+
     # Shared annotation presets
     _READ_ONLY = types.ToolAnnotations(
         read_only_hint=True,
@@ -340,7 +339,7 @@ async def handle_list_tools(
             }
         )
     ]
-    
+
     if role == "admin":
         tools.append(
             types.Tool(
@@ -378,7 +377,7 @@ async def handle_list_tools(
                 }
             )
         )
-        
+
     return types.ListToolsResult(tools=tools)
 
 async def handle_call_tool(
@@ -579,29 +578,29 @@ async def handle_call_tool(
             path_arg = arguments.get("path")
             if not path_arg:
                 raise SecurityValidationError("Missing 'path' argument")
-            
+
             new_path = Path(path_arg).expanduser().resolve()
             if not new_path.is_dir():
                 raise SecurityValidationError(f"Path does not exist or is not a directory: {new_path}")
-                
+
             # Update settings
             settings.workspace_root = new_path
-            
+
             # Restart file watcher with new path if it's running
             from src.mcp_server.middleware.file_watcher import get_file_watcher
             watcher = get_file_watcher()
             if watcher:
                 watcher.stop()
                 watcher.start(new_path)
-                
+
             # Clear index cache to force re-indexing of the new workspace
             from src.mcp_server.index_db import clear_index_cache
             clear_index_cache()
-            
+
             # Notify clients that roots and resources changed
             await helper.notify_roots_list_changed()
             await helper.notify_resource_list_changed()
-            
+
             res = [{"type": "text", "text": f"Workspace root successfully changed to: {new_path}"}]
         elif name == "risk_triage":
             target = await _detect_directory(_normalize_target(arguments.get("target")))
@@ -644,7 +643,7 @@ async def handle_call_tool(
         if isinstance(e, IndexNotFoundError) or "IndexNotFoundError" in str(type(e)):
             return types.CallToolResult(
                 content=[types.TextContent(
-                    type="text", 
+                    type="text",
                     text=json.dumps({
                         "error_type": "IndexNotFoundError",
                         "message": f"No index found. {e}",

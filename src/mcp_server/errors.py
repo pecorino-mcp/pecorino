@@ -3,15 +3,17 @@ import logging
 import sys
 import time
 import traceback
+
 import mcp_types as types
+
 from src.core.errors import (
+    AnalysisError,
+    IndexNotFoundError,
     PecorinoError,
     SecurityValidationError,
     TargetNotFoundError,
-    IndexNotFoundError,
-    AnalysisError
 )
-from src.mcp_server.prometheus_metrics import TOOL_ERRORS, TOOL_DURATION
+from src.mcp_server.prometheus_metrics import TOOL_DURATION, TOOL_ERRORS
 
 logger = logging.getLogger(__name__)
 

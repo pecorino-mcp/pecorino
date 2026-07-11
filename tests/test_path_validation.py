@@ -5,10 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.mcp_server.config import settings
-from src.mcp_server.core import (
-    is_safe_path,
-    safe_path,
-)
+from src.mcp_server.middleware.security import is_safe_path, safe_path
+
 from src.core.errors import TargetNotFoundError, SecurityValidationError
 
 def test_is_safe_path_within_workspace(tmp_path):

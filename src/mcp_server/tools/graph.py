@@ -2,9 +2,9 @@ import asyncio
 import logging
 from typing import Optional
 
-from src.core.errors import AnalysisError, SecurityValidationError, IndexNotFoundError
+from src.core.errors import AnalysisError, IndexNotFoundError, SecurityValidationError
 from src.mcp_server.middleware.caching import _get_cached_api
-from src.mcp_server.middleware.security import safe_path, check_suspicious
+from src.mcp_server.middleware.security import check_suspicious, safe_path
 from src.mcp_server.middleware.sync import _auto_sync_stale
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,7 @@ MAX_LIMIT = 100
 MAX_DEPTH = 10
 ALLOWED_ANALYSES = frozenset({"callers", "callees", "impact", "pagerank", "functional-analysis"})
 from mcp.server import ServerRequestContext
+
 
 async def do_analyze(target: str, analysis: str, symbol: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, allow_external: bool = False, ctx: Optional[ServerRequestContext] = None) -> dict:
     analysis = analysis.strip().lower()
@@ -33,7 +34,7 @@ async def do_analyze(target: str, analysis: str, symbol: Optional[str] = None, l
         if any(c in symbol for c in "\x00\n\r"):
             raise SecurityValidationError("Invalid characters in symbol")
         check_suspicious(symbol, "symbol")
-        
+
     if analysis in ("callers", "callees") and not symbol:
         raise SecurityValidationError(f"Symbol name is required for {analysis} analysis")
 
@@ -41,7 +42,7 @@ async def do_analyze(target: str, analysis: str, symbol: Optional[str] = None, l
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
-    
+
     import os
     if allow_external and not os.path.exists(db_path):
         raise IndexNotFoundError(
@@ -116,7 +117,7 @@ async def do_analyze(target: str, analysis: str, symbol: Optional[str] = None, l
     if analysis == "functional-analysis":
         result = await asyncio.to_thread(api.analyze_functional_purity)
         ret = {"target": path.as_posix(), "analysis": analysis, "functional_analysis": result}
-        
+
         try:
             import json
             import time

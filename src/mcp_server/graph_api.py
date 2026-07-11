@@ -1,9 +1,11 @@
 import os
 import threading
-from typing import List, Dict, Any
-from src.mcp_server.index_db import get_db_path_for_repo, find_repo_root
-from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
+from typing import Any, Dict, List
+
 from src.core.errors import AnalysisError
+from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
+from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+
 
 class GraphAPI:
     def __init__(self, repo_path: str = None, graph: GorgonzolaGraph = None):
@@ -178,7 +180,7 @@ class GraphAPI:
             DELETE r
             '''
         ]
-        
+
         self.graph.query_batch(queries)
 
     def analyze_functional_purity(self) -> Dict[str, Any]:
@@ -200,7 +202,7 @@ class GraphAPI:
                     "file": row.get("file"),
                     "count": row.get("lambda_count")
                 })
-            
+
             # 2. State Mutation Hotspots
             q_mutations = '''
             MATCH (m)-[a:ACCESSES_STATE]->(v:Variable)
@@ -213,7 +215,7 @@ class GraphAPI:
                     "function": row.get("function_name"),
                     "mutation_count": row.get("mutation_count")
                 })
-                
+
             # 3. Recursive Loops
             q_recursion = '''
             MATCH (m)-[:RECURSES_TO]->(m)
@@ -225,8 +227,8 @@ class GraphAPI:
                     "function": row.get("recursive_function"),
                     "filepath": row.get("filepath")
                 })
-                
+
         except Exception as e:
             raise AnalysisError(f"Functional purity analysis failed: {e}") from e
-            
+
         return result

@@ -6,7 +6,6 @@ import mcp_types as types
 from mcp.server import ServerRequestContext
 
 from src.core.constants import SUPPORTED_EXTENSIONS as SUPPORTED
-
 from src.mcp_server.context_helper import PecorinoContext
 
 logger = logging.getLogger(__name__)
@@ -61,7 +60,7 @@ async def handle_list_prompts(
             ]
         )
     ]
-    
+
     if role == "admin":
         prompts.append(
             types.Prompt(
@@ -73,7 +72,7 @@ async def handle_list_prompts(
                 ]
             )
         )
-        
+
     return types.ListPromptsResult(prompts=prompts)
 
 async def handle_get_prompt(
@@ -82,7 +81,7 @@ async def handle_get_prompt(
 ) -> types.GetPromptResult:
     name = params.name
     arguments = params.arguments or {}
-    
+
     if name == "browse":
         target = arguments.get("target", "")
         view = arguments.get("view", "tree")
@@ -167,7 +166,7 @@ async def handle_completion(
         if ref.name in ("browse", "search", "analyze", "metrics", "update_index", "query_codebase") and argument.name == "target":
             val = (context or {}).get("target", "")
             return _complete_target_path(val)
-            
+
         elif ref.name == "browse" and argument.name == "view":
             views = ["classes", "functions", "deps", "tree", "all", "pagerank", "summary"]
             val = (context or {}).get("view", "")
@@ -175,7 +174,7 @@ async def handle_completion(
                 values=[v for v in views if v.startswith(val.lower())],
                 has_more=False
             )
-            
+
         elif ref.name == "analyze" and argument.name == "analysis":
             analyses = ["callers", "callees", "impact", "pagerank", "functional-analysis"]
             val = (context or {}).get("analysis", "")
@@ -183,7 +182,7 @@ async def handle_completion(
                 values=[a for a in analyses if a.startswith(val.lower())],
                 has_more=False
             )
-            
+
     return types.CompleteResult(
         completion=result if result is not None else types.Completion(values=[], total=None, has_more=None)
     )

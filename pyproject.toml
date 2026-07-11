@@ -48,7 +48,7 @@ dependencies = [
     "watchdog>=3.0.0",
     "PyJWT",
     "prometheus_client",
-    "gorgonzola-lite",
+    "gorgonzola",
     "duckdb",
 ]
 

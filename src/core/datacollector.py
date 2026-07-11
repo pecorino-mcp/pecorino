@@ -1,4 +1,5 @@
 import logging
+
 """
 Data collector module for Pecorino.
 
@@ -7,18 +8,18 @@ Contains the base DataCollector class with repository metrics collection.
 
 import datetime
 import os
-import sys
 import pickle
 import re
+import sys
 import time
 import zlib
 from collections import OrderedDict, defaultdict
 
 from src.core.config import conf
-from src.git.commands import getpipeoutput
-from src.utils.helpers import should_include_file
-from src.metrics.oopmetrics import OOPMetricsAnalyzer
 from src.core.constants import get_language_for_extension
+from src.git.commands import getpipeoutput
+from src.metrics.oopmetrics import OOPMetricsAnalyzer
+from src.utils.helpers import should_include_file
 
 logger = logging.getLogger(__name__)
 
@@ -1159,7 +1160,7 @@ class DataCollector:
 			r'"([^"]*)"',                      # double-quoted strings
 			r"'([^']*)'",                      # single-quoted strings
 		]
-		
+
 		lang = get_language_for_extension(file_extension)
 
 		if lang == 'python':
@@ -1338,7 +1339,7 @@ class DataCollector:
 
 	def _calculate_oop_metrics(self, content, file_extension, filepath):
 		"""Calculate Object-Oriented Programming software metrics."""
-		
+
 		if not content.strip():
 			return {
 				'classes_defined': 0,
@@ -1354,7 +1355,7 @@ class DataCollector:
 				'attribute_count': 0,
 				'coupling': 0
 			}
-			
+
 		try:
 			# Delegate completely to OOPMetricsAnalyzer
 			metrics = self.oop_analyzer.analyze_file(filepath, content, file_extension)
@@ -2149,4 +2150,4 @@ class DataCollector:
 
 
 
- 
+

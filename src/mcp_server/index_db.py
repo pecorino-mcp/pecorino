@@ -1,11 +1,12 @@
+import functools
 import hashlib
-import json
 import logging
 import os
-import duckdb
-import functools
 from pathlib import Path
 from typing import Any, Dict, List
+
+import duckdb
+
 from src.core.errors import SecurityValidationError
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
@@ -25,7 +26,7 @@ def find_repo_root(filepath: str, max_depth: int = 20) -> str:
 
         if (parent / ".git").is_dir():
             return str(parent)
-            
+
         if len(visited) > max_depth:
             break
 
@@ -104,7 +105,7 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         except duckdb.Error:
             conn.execute("INSTALL fts")
             conn.execute("LOAD fts")
-        
+
         # We don't create the FTS index here anymore. It will be created lazily by ensure_fts().
     except Exception:
         logger.exception("Failed to initialize FTS extension during migration")
@@ -137,10 +138,10 @@ class CodeSearchIndex:
             repo_path = find_repo_root(os.getcwd())
             db_path = get_db_path_for_repo(repo_path)
         self.db_path = db_path
-        
+
         try:
             self._conn = duckdb.connect(self.db_path, read_only=read_only)
-            
+
             # ATTACH other repos for federated querying if we are in read-only mode
             if read_only:
                 try:
@@ -175,7 +176,7 @@ class CodeSearchIndex:
                     self._conn.execute("LOAD fts")
                 except Exception:
                     logger.exception("Failed to LOAD/INSTALL fts in read-only mode")
-        
+
         if not read_only:
             self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
 
@@ -193,7 +194,7 @@ class CodeSearchIndex:
             except Exception:
                 pass
             self._conn = None
-            
+
         if getattr(self, 'graph', None):
             try:
                 self.graph.close()
@@ -283,7 +284,7 @@ class CodeSearchIndex:
                 content = _get_file_content(filepath, mtime)
                 return content[start_byte:end_byte].decode('utf-8', errors='ignore')
             else:
-                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(filepath, encoding='utf-8', errors='ignore') as f:
                     lines = f.readlines()
                     return ''.join(lines[max(0, start_line-1):end_line])
         except (FileNotFoundError, OSError):
@@ -337,7 +338,7 @@ class CodeSearchIndex:
         conn = self._conn
         conn.execute('DELETE FROM code_nodes WHERE filepath = ?', (filepath,))
         conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
-            
+
         try:
             graph = self._ensure_graph()
             with graph:
@@ -362,7 +363,7 @@ class CodeSearchIndex:
             placeholders = ",".join(["?"] * len(chunk))
             conn.execute(f'DELETE FROM code_nodes WHERE filepath IN ({placeholders})', chunk)
             conn.execute(f'DELETE FROM files WHERE filepath IN ({placeholders})', chunk)
-            
+
         for i in range(0, len(filepaths), chunk_size):
             chunk = filepaths[i:i+chunk_size]
             try:
@@ -400,7 +401,7 @@ class CodeSearchIndex:
         except Exception as e:
             conn.execute("ROLLBACK")
             raise e
-            
+
         chunk_size = 500
         for i in range(0, len(files_data), chunk_size):
             chunk = files_data[i:i+chunk_size]
@@ -423,7 +424,7 @@ class CodeSearchIndex:
                     f"mtime_{j}": float(mtime),
                     f"lang_{j}": lang
                 })
-                
+
             if queries:
                 try:
                     graph = self._ensure_graph()
@@ -443,7 +444,7 @@ class CodeSearchIndex:
                 mtime=excluded.mtime,
                 lang=excluded.lang
         ''', (filepath, content_hash, mtime, lang))
-            
+
         name = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1]
         query = """
@@ -560,7 +561,7 @@ class CodeSearchIndex:
                     params.append(f"{prefix}%")
             params.extend([limit, offset])
 
-            # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the 
+            # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
             # WHERE clause for filtering and in the SELECT clause to retrieve the score.
             res = conn.execute(f'''
                 SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
@@ -571,7 +572,7 @@ class CodeSearchIndex:
                 ORDER BY score DESC
                 LIMIT ? OFFSET ?
             ''', params).fetchall()
-            
+
             results = []
             for row in res:
                 results.append({
@@ -600,7 +601,7 @@ class CodeSearchIndex:
             FROM code_nodes
             WHERE filepath = ?
         ''', (filepath,)).fetchall()
-        
+
         results = []
         for row in res:
             results.append({
@@ -623,7 +624,7 @@ class CodeSearchIndex:
             FROM code_nodes
             WHERE filepath LIKE ?
         ''', (f"{prefix}%",)).fetchall()
-        
+
         results = []
         for row in res:
             results.append({

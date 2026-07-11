@@ -3,21 +3,16 @@ import json
 import logging
 import os
 import threading
-from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from src.core.constants import SUPPORTED_EXTENSIONS as SUPPORTED
-from src.core.errors import AnalysisError, IndexNotFoundError, SecurityValidationError
-from src.mcp_server.middleware.caching import _get_cached_api, clear_index_cache
+from src.core.errors import IndexNotFoundError, SecurityValidationError
+from src.mcp_server.middleware.caching import _get_cached_api
 from src.mcp_server.middleware.security import (
-    ALLOWED_OUTPUT,
-    MAX_READ_BYTES,
-    is_safe_path,
     read_limited,
     safe_output_path,
     safe_path,
 )
-from src.mcp_server.middleware.sync import _auto_sync_stale
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +25,7 @@ MAX_QUERY_LEN = 200
 MAX_CODE_LINES = 300
 INDEX_TIMEOUT_S = 300
 from mcp.server import ServerRequestContext
+
 
 async def do_browse(target: str, view: str = "tree", query: Optional[str] = None, limit: int = 10, offset: int = 0, max_depth: int = 3, output_file: Optional[str] = None, allow_external: bool = False, ctx: Optional[ServerRequestContext] = None) -> dict:
     # --- Input validation ---
@@ -50,11 +46,11 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
             for v in views_to_query
         ]
         sub_results = await asyncio.gather(*tasks)
-        
+
         combined_structure = {}
         target_path = target
         target_type = "unknown"
-        
+
         for v, res in zip(views_to_query, sub_results):
             target_path = res.get("target", target_path)
             target_type = res.get("type", target_type)
@@ -64,14 +60,14 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                 data = {k: val for k, val in res.items() if k not in ("target", "type", "view", "index_staleness")}
                 if data:
                     combined_structure[v] = data
-                    
+
         result = {
             "target": target_path,
             "type": target_type,
             "view": "all",
             "structure": combined_structure
         }
-        
+
         if output_file:
             try:
                 out_path = safe_output_path(output_file)
@@ -80,7 +76,7 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                 return {"saved_to": str(out_path), "target": target_path, "type": target_type, "view": "all"}
             except Exception as e:
                 logger.error("Failed to write browse output: %s", e)
-                
+
         def truncate_lists(obj):
             if isinstance(obj, dict):
                 return {k: truncate_lists(v) for k, v in obj.items()}
@@ -91,20 +87,20 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                     return truncated_list
                 return [truncate_lists(v) for v in obj]
             return obj
-            
+
         return truncate_lists(result)
 
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
-    
+
     # Remove explicit index requirement
     try:
         index = _get_cached_api(repo_root, db_path, "index")
     except Exception:
         index = None
-    
+
     api = None
     if view in ("deps", "pagerank"):
         try:
@@ -220,8 +216,8 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
 
         filtered = [
             {
-                "name": n['name'], 
-                "filepath": n['filepath'], 
+                "name": n['name'],
+                "filepath": n['filepath'],
                 "line": n['start_line'],
                 "start_byte": n.get('start_byte', 0),
                 "end_byte": n.get('end_byte', 0)
@@ -238,17 +234,17 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
             if api._pagerank_cache is None:
                 pr_scores = await asyncio.to_thread(api.graph.pagerank)
                 api._pagerank_cache = {pr.get("node_id"): pr.get("score", 0.0) for pr in pr_scores}
-            
+
             prefix = path.as_posix()
             if not prefix.endswith('/'):
                 prefix += '/'
-                
+
             top_files = []
             for node_id, score in api._pagerank_cache.items():
                 if node_id.startswith(prefix):
                     rel_path = node_id[len(prefix):]
                     top_files.append({"path": rel_path, "score": score})
-            
+
             top_files.sort(key=lambda x: x["score"], reverse=True)
             result["structure"] = top_files
         else:
