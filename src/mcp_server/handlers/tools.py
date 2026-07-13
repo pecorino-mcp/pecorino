@@ -121,7 +121,7 @@ async def handle_list_tools(
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query, keyword, or symbol name. Required for fts (on directories), callers, callees, and usages modes."
+                        "description": "The search query, keyword, symbol name, or cypher string. Required for fts (on directories), callers, callees, usages, and cypher modes."
                     },
                     "target": {
                         "type": "string",
@@ -130,8 +130,8 @@ async def handle_list_tools(
                     "mode": {
                         "type": "string",
                         "default": "fts",
-                        "enum": ["fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis"],
-                        "description": "Search mode. 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL."
+                        "enum": ["fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis", "cypher"],
+                        "description": "Search mode. 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL, 'cypher' = native read-only graph queries."
                     },
                     "intent": {
                         "type": "string",

@@ -30,6 +30,9 @@ ALLOWED_MODES = frozenset({
     "intent",           # Preset AST queries (all_classes, dead_code, etc.)
     "dsl",              # Custom JSON DSL query
     "functional-analysis",  # Functional purity analysis
+    "cypher",           # Native Cypher read-only queries
+    "hybrid",           # Hybrid Vector+BM25 search
+    "community",        # Semantic neighborhood of a symbol
 })
 
 # ── Intent-based presets (from query_codebase) ────────────────
@@ -103,6 +106,7 @@ async def do_search(
       intent    — Preset AST queries (use 'intent' param).
       dsl       — Custom JSON DSL query (use 'query_json' param).
       functional-analysis — Functional purity analysis.
+      cypher    — Native Cypher read-only queries (query = cypher string, required).
     """
     mode = mode.strip().lower()
     if mode not in ALLOWED_MODES:
@@ -123,8 +127,8 @@ async def do_search(
         check_suspicious(query, "query")
 
     # ── Route to mode-specific handlers ───────────────────────
-    if mode == "fts":
-        return await _do_fts(target, query, limit, offset, include_source,
+    if mode in ("fts", "hybrid"):
+        return await _do_fts(target, query, mode, limit, offset, include_source,
                              auto_expand_source, output_file, allow_external, ctx)
     elif mode in ("callers", "callees"):
         return await _do_callers_callees(target, mode, query, limit, offset,
@@ -140,6 +144,10 @@ async def do_search(
         return await _do_dsl(target, query_json, allow_external, ctx)
     elif mode == "functional-analysis":
         return await _do_functional_analysis(target, allow_external, ctx)
+    elif mode == "cypher":
+        return await _do_cypher(target, query, allow_external, ctx)
+    elif mode == "community":
+        return await _do_community(target, query, limit, offset, allow_external, ctx)
 
     return {"error": "Unknown mode"}
 
@@ -151,6 +159,7 @@ async def do_search(
 async def _do_fts(
     target: str,
     query: Optional[str],
+    mode: str,
     limit: int,
     offset: int,
     include_source: bool,
@@ -242,7 +251,7 @@ async def _do_fts(
                 index = _get_cached_api(repo_root, db_path, "index")
 
     _fts_start = time.time()
-    results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset)
+    results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset, mode=mode)
     FTS_SCAN_DURATION.observe(time.time() - _fts_start)
 
     # Auto-expand: include source when few results
@@ -398,7 +407,7 @@ async def _do_usages(
     # 1. Search for the symbol definition
     try:
         search_res = await _do_fts(
-            target=target, query=query, limit=5, offset=0,
+            target=target, query=query, mode="fts", limit=5, offset=0,
             include_source=True, auto_expand_source=True,
             output_file=None, allow_external=allow_external, ctx=ctx
         )
@@ -664,3 +673,103 @@ async def _do_functional_analysis(
     except Exception:
         pass
     return ret
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: cypher — Native Cypher Query Mode
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_cypher(
+    target: str,
+    query: Optional[str],
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    if not query:
+        raise SecurityValidationError("'query' is required for cypher mode")
+
+    import re
+    query_upper = query.upper()
+    tokens = set(re.findall(r'\b[A-Z]+\b', query_upper))
+    forbidden = {"CREATE", "SET", "DELETE", "MERGE", "REMOVE", "DROP"}
+    
+    if forbidden.intersection(tokens):
+        raise SecurityValidationError(
+            "Cypher queries must be read-only.",
+            valid_values=[],
+            suggestion="Remove mutating clauses (CREATE, SET, DELETE, MERGE, REMOVE, DROP)."
+        )
+
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    import os
+    if allow_external and not os.path.exists(db_path):
+        raise IndexNotFoundError(f"External repository at '{repo_root}' has not been indexed yet.")
+
+    from src.mcp_server.middleware.sync import _auto_sync_stale
+    await _auto_sync_stale(repo_root, db_path, str(path))
+    api = _get_cached_api(repo_root, db_path, "graph")
+
+    try:
+        rows = await asyncio.to_thread(api.graph.query, query)
+        return {
+            "status": "ok",
+            "mode": "cypher",
+            "results": rows
+        }
+    except Exception as e:
+        logger.warning(f"Cypher query failed: {e}")
+        return {"status": "error", "error": str(e), "cypher": query}
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: community (Semantic Neighborhood)
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_community(
+    target: str,
+    query: Optional[str],
+    limit: int,
+    offset: int,
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    if not query:
+        raise SecurityValidationError("Query is required for community mode")
+        
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    index = _get_cached_api(repo_root, db_path, "index")
+    
+    conn = index._conn
+    def _fetch():
+        res = conn.execute(
+            "SELECT community_id, name FROM code_nodes WHERE name LIKE ? OR name = ? ORDER BY pagerank DESC LIMIT 1", 
+            (f"%{query}%", query)
+        )
+        return res.fetchone()
+        
+    row = await asyncio.to_thread(_fetch)
+    
+    if not row or row[0] is None:
+        return {"status": "ok", "results": [], "message": f"No community found for '{query}'"}
+        
+    community_id = row[0]
+    matched_name = row[1]
+    
+    nodes = await asyncio.to_thread(index.get_community_nodes, community_id)
+    
+    sliced_nodes = nodes[offset:offset+limit]
+    
+    return {
+        "status": "ok", 
+        "community_id": community_id,
+        "matched_symbol": matched_name,
+        "total_in_community": len(nodes),
+        "results": sliced_nodes
+    }

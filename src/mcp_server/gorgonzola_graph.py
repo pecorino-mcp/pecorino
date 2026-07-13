@@ -92,6 +92,12 @@ class GorgonzolaGraph:
         if not self._schema_initialized:
             init_gorgonzola_schema(conn)
             self._schema_initialized = True
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            ext_path = os.path.join(base_dir, "modules/gorgonzola/extension/algo/build/libalgo.gorgonzola_extension")
+            conn.execute(f"LOAD EXTENSION '{ext_path}';")
+        except Exception as e:
+            logger.warning(f"Failed to load Leiden extension: {e}")
 
     def __enter__(self):
         self._db_ctx = self.gorgonzola.Database(self.gorgonzola_db_path)
@@ -235,12 +241,43 @@ class GorgonzolaGraph:
             columns = _NODE_COLUMNS.get(label)
             if columns is None:
                 # Fallback: skip unknown labels
-                logger.warning("[WARNING] Unknown node label: {label}, skipping")
+                logger.warning(f"[WARNING] Unknown node label: {label}, skipping")
+                continue
+
+            # Query existing IDs to avoid duplicate primary key errors during incremental indexing
+            ids_to_check = []
+            for node_id, _ in group:
+                with self._label_cache_lock:
+                    if node_id not in self._label_cache:
+                        ids_to_check.append(node_id)
+            
+            existing_ids = set()
+            chunk_size = 500
+            for i in range(0, len(ids_to_check), chunk_size):
+                chunk = ids_to_check[i:i+chunk_size]
+                try:
+                    res = conn.execute(f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id", {"ids": chunk})
+                    while res.has_next():
+                        existing_ids.add(res.get_next()[0])
+                except Exception as e:
+                    logger.warning(f"Failed to check existing ids for {label}: {e}")
+
+            # Filter group to only new nodes (not in DB, not in cache)
+            filtered_group = []
+            for nid, props in group:
+                with self._label_cache_lock:
+                    if nid in self._label_cache:
+                        continue
+                if nid in existing_ids:
+                    continue
+                filtered_group.append((nid, props))
+                
+            if not filtered_group:
                 continue
 
             csv_path = os.path.join(csv_dir, f"_bulk_nodes_{label}.csv")
             rows = []
-            for node_id, properties in group:
+            for node_id, properties in filtered_group:
                 row = []
                 for col in columns:
                     if col == "id":
@@ -352,13 +389,6 @@ class GorgonzolaGraph:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
 
-                    # Load the algo extension dynamically
-                    ext_path = os.path.join(
-                        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                        "modules", "gorgonzola", "extension", "algo", "build", "libalgo.gorgonzola_extension"
-                    )
-                    conn.execute(f"LOAD EXTENSION '{ext_path}';")
-
                     # Project graph
                     try:
                         conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
@@ -372,7 +402,7 @@ class GorgonzolaGraph:
                         );
                     """)
 
-                    res = conn.execute("CALL page_rank('CodeGraph') RETURN node.id AS node_id, rank AS score;")
+                    res = conn.execute("CALL page_rank('CodeGraph') RETURN id(node) AS id, rank;")
                     while res.has_next():
                         row = res.get_next()
                         results.append({"node_id": row[0], "score": row[1]})
