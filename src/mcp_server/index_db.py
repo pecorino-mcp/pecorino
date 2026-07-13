@@ -385,11 +385,11 @@ class CodeSearchIndex:
             graph = self._ensure_graph()
             with graph:
                 graph.query_batch([
-                    "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda)-[:ACCESSES_STATE]->(v:Variable) DETACH DELETE v",
-                    "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda) DETACH DELETE l",
-                    "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:Variable) DETACH DELETE v",
-                    "MATCH (f:File {id: $id})-[:CONTAINS*1..10]->(child) DETACH DELETE child",
-                    "MATCH (f:File {id: $id}) DETACH DELETE f",
+                    "MATCH (f:CodeNode {node_type: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {node_type: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {node_type: 'Variable'}) DETACH DELETE v",
+                    "MATCH (f:CodeNode {node_type: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {node_type: 'Lambda'}) DETACH DELETE l",
+                    "MATCH (f:CodeNode {node_type: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {node_type: 'Variable'}) DETACH DELETE v",
+                    "MATCH (f:CodeNode {node_type: 'File', id: $id})-[:CONTAINS*1..10]->(child) DETACH DELETE child",
+                    "MATCH (f:CodeNode {node_type: 'File', id: $id}) DETACH DELETE f",
                 ], {"id": filepath})
         except Exception:
             pass
@@ -411,11 +411,11 @@ class CodeSearchIndex:
             try:
                 graph = self._ensure_graph()
                 graph.query_batch([
-                    "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda)-[:ACCESSES_STATE]->(v:Variable) WHERE f.id IN $ids DETACH DELETE v",
-                    "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:Lambda) WHERE f.id IN $ids DETACH DELETE l",
-                    "MATCH (f:File)-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:Variable) WHERE f.id IN $ids DETACH DELETE v",
-                    "MATCH (f:File)-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
-                    "MATCH (f:File) WHERE f.id IN $ids DETACH DELETE f",
+                    "MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {node_type: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {node_type: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
+                    "MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {node_type: 'Lambda'}) WHERE f.id IN $ids DETACH DELETE l",
+                    "MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {node_type: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
+                    "MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
+                    "MATCH (f:CodeNode {node_type: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
                 ], {"ids": chunk})
             except Exception:
                 pass

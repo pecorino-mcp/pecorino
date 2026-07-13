@@ -10,7 +10,7 @@ echo "2. Installing requirements..."
 pip install -r requirements.txt
 
 echo "3. Compiling gorgonzola Python package using cmake (forced lite configuration)..."
-cmake -B modules/gorgonzola/build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON modules/gorgonzola
+cmake -B modules/gorgonzola/build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON -DGORGONZOLA_LITE_ENABLE_GDS=ON modules/gorgonzola
 cmake --build modules/gorgonzola/build/release --config Release
 COMPILED_SO=$(find modules/gorgonzola/modules/gorgonzola-api-langs/python_api/build -name "_gorgonzola*.so" -print -quit)
 
