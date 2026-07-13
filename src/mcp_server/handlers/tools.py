@@ -106,7 +106,7 @@ async def handle_list_tools(
         types.Tool(
             name="search",
             description=(
-                "Unified search and analysis tool. Use mode='fts' (default) for keyword search, "
+                "Unified search and analysis tool. Use mode='hybrid' (default) for keyword search, "
                 "'callers'/'callees' to trace call graphs, 'impact' for dependency analysis, "
                 "'usages' for combined search+callers, 'intent' for preset AST queries "
                 "(all_classes, all_functions, entry_points, dead_code, files_by_language), "
@@ -130,7 +130,7 @@ async def handle_list_tools(
                     },
                     "mode": {
                         "type": "string",
-                        "default": "fts",
+                        "default": "hybrid",
                         "enum": ["fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis", "cypher", "hybrid", "community", "trace"],
                         "description": "Search mode. 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL, 'cypher' = native read-only graph queries, 'trace' = multi-hop call graph traversal, 'hybrid' = vector+BM25 fusion, 'community' = semantic neighborhood."
                     },
@@ -340,7 +340,7 @@ async def handle_call_tool(
             res = await do_search(
                 target=target,
                 query=arguments.get("query"),
-                mode=arguments.get("mode", "fts"),
+                mode=arguments.get("mode", "hybrid"),
                 limit=arguments.get("limit", 10),
                 offset=arguments.get("offset", 0),
                 include_source=arguments.get("include_source", False),
