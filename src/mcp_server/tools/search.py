@@ -33,6 +33,7 @@ ALLOWED_MODES = frozenset({
     "cypher",           # Native Cypher read-only queries
     "hybrid",           # Hybrid Vector+BM25 search
     "community",        # Semantic neighborhood of a symbol
+    "trace",             # Multi-hop call graph traversal (like CBM trace_path)
 })
 
 # ── Intent-based presets (from query_codebase) ────────────────
@@ -107,6 +108,7 @@ async def do_search(
       dsl       — Custom JSON DSL query (use 'query_json' param).
       functional-analysis — Functional purity analysis.
       cypher    — Native Cypher read-only queries (query = cypher string, required).
+      trace     — Multi-hop call graph traversal (query = symbol name, required).
     """
     mode = mode.strip().lower()
     if mode not in ALLOWED_MODES:
@@ -148,6 +150,8 @@ async def do_search(
         return await _do_cypher(target, query, allow_external, ctx)
     elif mode == "community":
         return await _do_community(target, query, limit, offset, allow_external, ctx)
+    elif mode == "trace":
+        return await _do_trace(target, query, max_depth, allow_external, ctx)
 
     return {"error": "Unknown mode"}
 
@@ -773,3 +777,40 @@ async def _do_community(
         "total_in_community": len(nodes),
         "results": sliced_nodes
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: trace (Multi-hop call graph traversal)
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_trace(
+    target: str,
+    query: Optional[str],
+    max_depth: int,
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    """Trace call graph paths from a symbol, similar to CBM's trace_path.
+
+    Returns callers and callees at each hop level up to max_depth.
+    """
+    if not query:
+        raise SecurityValidationError("'query' (symbol name) is required for trace mode")
+
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    import os
+    if allow_external and not os.path.exists(db_path):
+        raise IndexNotFoundError(
+            f"External repository at '{repo_root}' has not been indexed yet. "
+            f"Please run the 'update_index' tool with allow_external=True on this target first."
+        )
+
+    await _auto_sync_stale(repo_root, db_path, str(path))
+    api = _get_cached_api(repo_root, db_path, "graph")
+
+    result = await asyncio.to_thread(api.trace_calls, query, "both", max_depth)
+    return {"status": "ok", "mode": "trace", **result}
