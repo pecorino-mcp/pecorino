@@ -96,31 +96,132 @@ class GraphAPI:
             seen = set()
             unique_nodes = []
             for row in results:
-                props = row[return_key]['properties']
-                if props.get('id') not in seen:
-                    seen.add(props.get('id'))
+                raw = row.get(return_key, row)
+                if isinstance(raw, dict) and 'properties' in raw:
+                    props = raw['properties']
+                else:
+                    props = raw
+                node_id = props.get('id', str(props))
+                if node_id not in seen:
+                    seen.add(node_id)
                     unique_nodes.append(props)
             return unique_nodes
         except Exception as e:
             raise AnalysisError(f"Graph query failed for '{target_name}': {e}") from e
 
+    def _name_match_clause(self, var: str, param: str = "$target") -> str:
+        """Build a Cypher WHERE clause that fuzzy-matches both simple and class-qualified names.
+
+        Handles queries like 'index_directory' matching nodes named
+        'CodebaseIndexer.index_directory' or 'index_directory'.
+        """
+        return (
+            f"({var}.name = {param} "
+            f"OR ends_with({var}.name, '.' + {param}) "
+            f"OR {var}.name CONTAINS {param})"
+        )
+
     def find_callers(self, target_name: str) -> List[Dict[str, Any]]:
-        """Find all methods/functions that call the target function/method."""
-        query = '''
-            MATCH (caller)-[:CALLS]->(callee)
-            WHERE callee.name = $target
-            RETURN caller
-        '''
-        return self._find_calls(query, target_name, 'caller')
+        """Find all methods/functions that call the target function/method.
+
+        Searches both resolved CALLS edges and unresolved Symbol nodes.
+        """
+        where = self._name_match_clause("callee")
+        # Direct CALLS to Method/Function nodes
+        q1 = f"MATCH (caller)-[:CALLS]->(callee) WHERE {where} RETURN caller"
+        results = self._find_calls(q1, target_name, 'caller')
+
+        # Also search via Symbol nodes (most CALLS edges are still unresolved)
+        where_sym = self._name_match_clause("s")
+        q2 = f"MATCH (caller)-[:CALLS]->(s:Symbol) WHERE {where_sym} RETURN caller"
+        results.extend(self._find_calls(q2, target_name, 'caller'))
+
+        # Deduplicate
+        seen = set()
+        unique = []
+        for r in results:
+            rid = r.get('id', str(r))
+            if rid not in seen:
+                seen.add(rid)
+                unique.append(r)
+        return unique
 
     def find_callees(self, target_name: str) -> List[Dict[str, Any]]:
-        """Find all functions/methods called by the given target function/method."""
-        query = '''
-            MATCH (caller)-[:CALLS]->(callee)
-            WHERE caller.name = $target
-            RETURN callee
-        '''
-        return self._find_calls(query, target_name, 'callee')
+        """Find all functions/methods called by the given target function/method.
+
+        Returns both resolved targets and unresolved Symbol names.
+        """
+        where = self._name_match_clause("caller")
+        q1 = f"MATCH (caller)-[:CALLS]->(callee) WHERE {where} RETURN callee"
+        results = self._find_calls(q1, target_name, 'callee')
+
+        seen = set()
+        unique = []
+        for r in results:
+            rid = r.get('id', str(r))
+            if rid not in seen:
+                seen.add(rid)
+                unique.append(r)
+        return unique
+
+    def trace_calls(self, symbol: str, direction: str = "both", max_depth: int = 3) -> Dict[str, Any]:
+        """Multi-hop call graph traversal, returning a tree with hop distances.
+
+        Similar to CBM's trace_path. Returns callers and/or callees
+        at each hop level up to max_depth.
+        """
+        result = {"function": symbol, "direction": direction}
+        where = self._name_match_clause("start")
+        max_depth = min(max_depth, 10)
+
+        if direction in ("outbound", "both"):
+            callees = []
+            for depth in range(1, max_depth + 1):
+                try:
+                    q = (
+                        f"MATCH (start)-[:CALLS*{depth}..{depth}]->(target) "
+                        f"WHERE {where} "
+                        f"RETURN target.name AS name, target.id AS id, "
+                        f"labels(target) AS label"
+                    )
+                    rows = self.graph.query(q, {"target": symbol})
+                    for row in rows:
+                        callees.append({
+                            "name": row.get("name", ""),
+                            "id": row.get("id", ""),
+                            "label": row.get("label", ""),
+                            "hop": depth,
+                        })
+                except Exception as e:
+                    # Variable-length paths may fail for certain depth combos
+                    import logging
+                    logging.getLogger(__name__).debug("trace_calls depth=%d failed: %s", depth, e)
+                    break
+            result["callees"] = callees
+
+        if direction in ("inbound", "both"):
+            callers = []
+            for depth in range(1, max_depth + 1):
+                try:
+                    q = (
+                        f"MATCH (source)-[:CALLS*{depth}..{depth}]->(target) "
+                        f"WHERE {self._name_match_clause('target')} "
+                        f"RETURN source.name AS name, source.id AS id, "
+                        f"labels(source) AS label"
+                    )
+                    rows = self.graph.query(q, {"target": symbol})
+                    for row in rows:
+                        callers.append({
+                            "name": row.get("name", ""),
+                            "id": row.get("id", ""),
+                            "label": row.get("label", ""),
+                            "hop": depth,
+                        })
+                except Exception:
+                    break
+            result["callers"] = callers
+
+        return result
 
     def impact_analysis(self, filepath: str, max_depth: int = 3) -> List[Dict[str, Any]]:
         """Find all files/modules that transitively depend on the given filepath."""

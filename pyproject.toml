@@ -50,8 +50,10 @@ dependencies = [
     "prometheus_client",
     "gorgonzola",
     "duckdb",
+    "onnxruntime>=1.15.0",
+    "tokenizers>=0.15.0",
+    "huggingface_hub>=0.20.0"
 ]
-
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
