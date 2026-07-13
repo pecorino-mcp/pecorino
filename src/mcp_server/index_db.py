@@ -686,7 +686,7 @@ class CodeSearchIndex:
                         ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC
                         LIMIT 100
                     )
-                    SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                    SELECT c.id, c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            COALESCE(b.bm25_score, 0) as bm25_score,
                            ((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0)))) * (1.0 + COALESCE(c.pagerank, 0.0)) AS score
                     FROM code_nodes c
@@ -727,7 +727,7 @@ class CodeSearchIndex:
                 # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
                 # WHERE clause for filtering and in the SELECT clause to retrieve the score.
                 res = conn.execute(f'''
-                    SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                    SELECT c.id, c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
                     FROM code_nodes c
                     WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
@@ -739,21 +739,72 @@ class CodeSearchIndex:
             results = []
             for row in res:
                 entry = {
-                    'name': row[0],
-                    'node_type': row[1],
-                    'filepath': row[2],
-                    'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
-                    'start_line': row[3],
-                    'end_line': row[4],
+                    'id': row[0],
+                    'name': row[1],
+                    'node_type': row[2],
+                    'filepath': row[3],
+                    'body_text': self._lazy_load_body(row[3], row[4], row[5], start_byte=row[6] if row[6] is not None else 0, end_byte=row[7] if row[7] is not None else 0),
+                    'start_line': row[4],
+                    'end_line': row[5],
                 }
                 # Surface the BM25×PageRank score (already computed in SQL)
-                if len(row) > 7 and row[7] is not None:
-                    if mode == "hybrid" and len(row) > 8:
-                        entry['bm25_score'] = row[7]
-                        entry['score'] = row[8]
+                if len(row) > 8 and row[8] is not None:
+                    if mode == "hybrid" and len(row) > 9:
+                        entry['bm25_score'] = row[8]
+                        entry['score'] = row[9]
                     else:
-                        entry['score'] = row[7]
+                        entry['score'] = row[8]
                 results.append(entry)
+
+            # Cypher dynamic boost logic
+            try:
+                graph = self._ensure_graph()
+                if graph and results:
+                    import math
+                    ids = [r['id'] for r in results]
+                    cypher_query = "MATCH ()-[r]->(n) WHERE n.id IN $ids RETURN n.id as id, count(r) AS in_degree"
+                    boost_res = graph.query(cypher_query, {"ids": ids})
+                    boost_map = {row['id']: row['in_degree'] for row in boost_res}
+                    for r in results:
+                        in_deg = boost_map.get(r['id'], 0)
+                        if 'score' in r and in_deg > 0:
+                            r['score'] *= (1.0 + math.log1p(in_deg))
+                    results.sort(key=lambda x: x.get('score', 0), reverse=True)
+
+                    # Fetch immediate usages (callers) for top results
+                    top_results = results[:5]
+                    top_ids = [r['id'] for r in top_results]
+                    if top_ids:
+                        usage_query = """
+                            MATCH (caller)-[r]->(target) 
+                            WHERE target.id IN $top_ids 
+                            RETURN target.id as target_id, caller.id as caller_id, 
+                                   caller.name as caller_name, caller.filepath as filepath, 
+                                   caller.start_line as start_line 
+                            LIMIT 50
+                        """
+                        usage_res = graph.query(usage_query, {"top_ids": top_ids})
+                        usages_by_target = {}
+                        for row in usage_res:
+                            target_id = row['target_id']
+                            usages_by_target.setdefault(target_id, []).append({
+                                "caller_id": row['caller_id'],
+                                "name": row['caller_name'],
+                                "filepath": row['filepath'],
+                                "start_line": row['start_line']
+                            })
+                        for r in top_results:
+                            if usages_by_target.get(r['id']):
+                                r['usages'] = usages_by_target[r['id']]
+
+                    for r in results:
+                        r.pop('id', None)  # Remove internal ID to avoid cluttering response
+            except Exception as e:
+                import traceback
+                with open("/tmp/pecorino_cypher_error.txt", "w") as f:
+                    f.write(traceback.format_exc())
+                logger.warning(f"Failed to apply Cypher boost and usages: {e}")
+
             return results
         except Exception as e:
             err_str = str(e)

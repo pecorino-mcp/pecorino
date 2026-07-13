@@ -9,17 +9,10 @@ source .venv/bin/activate
 echo "2. Installing requirements..."
 pip install -r requirements.txt
 
-echo "3. Searching for a compiled gorgonzola Python package..."
-# The .so file would normally be inside the build folder of the gorgonzola python API
-COMPILED_SO=$(find modules/gorgonzola/modules/gorgonzola-api-langs/python_api/build -name "_gorgonzola*.so" -print -quit 2>/dev/null || true)
-
-if [ -z "$COMPILED_SO" ]; then
-    echo "Compiled package not found. Compiling in lite configuration..."
-    make -C modules/gorgonzola python EXTENSION_LIST=""
-    COMPILED_SO=$(find modules/gorgonzola/modules/gorgonzola-api-langs/python_api/build -name "_gorgonzola*.so" -print -quit)
-else
-    echo "Found pre-compiled package at $COMPILED_SO"
-fi
+echo "3. Compiling gorgonzola Python package using cmake (forced lite configuration)..."
+cmake -B modules/gorgonzola/build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON modules/gorgonzola
+cmake --build modules/gorgonzola/build/release --config Release
+COMPILED_SO=$(find modules/gorgonzola/modules/gorgonzola-api-langs/python_api/build -name "_gorgonzola*.so" -print -quit)
 
 echo "4. Copying gorgonzola Python module to site-packages..."
 # Get the active python version to determine the site-packages path
