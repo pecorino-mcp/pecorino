@@ -70,6 +70,11 @@ class FunctionDef(ASTNode):
     statements: List['ControlFlowDef'] = field(default_factory=list)
     lambdas: List['LambdaDef'] = field(default_factory=list)
 
+    cognitive_complexity: int = 0
+    is_recursive: bool = False
+    is_test: bool = False
+    raised_exceptions: Set[str] = field(default_factory=set)
+
     @property
     def _fields(self) -> tuple:
         return ('name', 'args', 'decorators', 'statements')
@@ -146,6 +151,19 @@ class InterfaceDef(ASTNode):
 
 
 @dataclass
+class RouteDef(ASTNode):
+    """Represents an HTTP API endpoint."""
+    name: str = ""
+    http_method: str = ""
+    path: str = ""
+    parent_id: str = ""
+
+@dataclass
+class EnvVarDef(ASTNode):
+    """Represents a referenced environment variable."""
+    name: str = ""
+
+@dataclass
 class ModuleDef(ASTNode):
     """Root node representing a source file/module."""
     name: str = ""
@@ -153,10 +171,12 @@ class ModuleDef(ASTNode):
     classes: List[ClassDef] = field(default_factory=list)
     interfaces: List[InterfaceDef] = field(default_factory=list)
     functions: List[FunctionDef] = field(default_factory=list)
+    routes: List[RouteDef] = field(default_factory=list)
+    env_vars: List[EnvVarDef] = field(default_factory=list)
 
     @property
     def _fields(self) -> tuple:
-        return ('imports', 'classes', 'interfaces', 'functions')
+        return ('imports', 'classes', 'interfaces', 'functions', 'routes', 'env_vars')
 
 
 # =============================================================================

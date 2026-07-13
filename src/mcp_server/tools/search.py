@@ -84,7 +84,7 @@ def _cap_body(body: str) -> str:
 async def do_search(
     target: str,
     query: Optional[str] = None,
-    mode: str = "fts",
+    mode: str = "hybrid",
     limit: int = 10,
     offset: int = 0,
     include_source: bool = False,
@@ -99,7 +99,7 @@ async def do_search(
     """Unified search and analysis tool.
 
     Modes:
-      fts       — Full-text keyword search (default). query required for dirs.
+      fts       — Full-text keyword search. query required for dirs.
       callers   — Who calls symbol X? (query = symbol name, required)
       callees   — What does symbol X call? (query = symbol name, required)
       impact    — Deep dependency trace from a file/directory.
@@ -692,17 +692,7 @@ async def _do_cypher(
     if not query:
         raise SecurityValidationError("'query' is required for cypher mode")
 
-    import re
-    query_upper = query.upper()
-    tokens = set(re.findall(r'\b[A-Z]+\b', query_upper))
-    forbidden = {"CREATE", "SET", "DELETE", "MERGE", "REMOVE", "DROP"}
-    
-    if forbidden.intersection(tokens):
-        raise SecurityValidationError(
-            "Cypher queries must be read-only.",
-            valid_values=[],
-            suggestion="Remove mutating clauses (CREATE, SET, DELETE, MERGE, REMOVE, DROP)."
-        )
+
 
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo

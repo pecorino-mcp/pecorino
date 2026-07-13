@@ -14,8 +14,10 @@ def get_ast_classes():
         ImportDef,
         InterfaceDef,
         ModuleDef,
+        RouteDef,
+        EnvVarDef,
     )
-    return ModuleDef, ClassDef, InterfaceDef, FunctionDef, ImportDef, AttributeDef, ControlFlowDef
+    return ModuleDef, ClassDef, InterfaceDef, FunctionDef, ImportDef, AttributeDef, ControlFlowDef, RouteDef, EnvVarDef
 
 def get_language_from_extension(extension: str) -> str:
     """Map file extension to language name."""
@@ -167,11 +169,12 @@ class TreeSitterExtractor:
         self.lang_obj = lang_obj
 
         # Resolve AST classes lazily
-        self.ModuleDef, self.ClassDef, self.InterfaceDef, self.FunctionDef, self.ImportDef, self.AttributeDef, self.ControlFlowDef = get_ast_classes()
+        self.ModuleDef, self.ClassDef, self.InterfaceDef, self.FunctionDef, self.ImportDef, self.AttributeDef, self.ControlFlowDef, self.RouteDef, self.EnvVarDef = get_ast_classes()
 
         self.module = self.ModuleDef()
         # Out-of-line method definitions (for Go receivers & Rust impl blocks)
         self.out_of_line_methods = defaultdict(list)
+        self.extracted_routes = []
 
         # Load metrics query
         self.metrics_query = None
@@ -405,16 +408,66 @@ class TreeSitterExtractor:
         called_methods = self._find_called_methods(node)
         reads, mutations, taints = self._find_state_accesses(node)
 
+        # New CBM metrics
+        cog_complexity = self._calculate_cognitive_complexity(node)
+        raised_exc = self._find_raised_exceptions(node)
+        is_rec = any(name == call or call.endswith(f".{name}") for call in called_methods)
+
+        decorators = []
+        if self.language == 'python':
+            parent = node.parent
+            if parent and parent.type == 'decorated_definition':
+                for child in parent.children:
+                    if child.type == 'decorator':
+                        decorators.append(self._get_text(child))
+        elif self.language == 'java':
+            mods = self._find_child_by_type(node, 'modifiers')
+            if mods:
+                for child in mods.children:
+                    if child.type in ('marker_annotation', 'annotation'):
+                        decorators.append(self._get_text(child))
+
+        is_test_func = name.startswith('test_') or any('test' in dec.lower() for dec in decorators)
+
+
+        # Extract HTTP routes from decorators
+        import re
+        route_pattern = re.compile(r'@(?:\w+)\.(get|post|put|delete|patch|route)\s*\(\s*(["\'])(.*?)\2')
+        for dec in decorators:
+            m = route_pattern.match(dec)
+            if m:
+                http_method = m.group(1).upper()
+                path = m.group(3)
+                self.extracted_routes.append(self.RouteDef(
+                    name=f"{http_method} {path}",
+                    http_method=http_method,
+                    path=path,
+                    lineno=node.start_point[0] + 1,
+                    col_offset=node.start_point[1],
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte
+                    # parent_id will be mapped during pipeline creation
+                ))
+
+        # Re-check decorators for is_test if they were populated
+        if not is_test_func:
+            is_test_func = any('test' in dec.lower() for dec in decorators)
+
         return self.FunctionDef(
             name=name,
             args=args,
             return_type=return_type,
+            decorators=decorators,
             is_abstract=is_abstract,
             is_static=is_static,
             visibility=visibility,
             body_start=node.start_point[0] + 1,
             body_end=node.end_point[0] + 1,
             cyclomatic_complexity=complexity,
+            cognitive_complexity=cog_complexity,
+            is_recursive=is_rec,
+            is_test=is_test_func,
+            raised_exceptions=raised_exc,
             called_methods=called_methods,
             read_attributes=reads,
             mutated_attributes=mutations,
@@ -437,6 +490,76 @@ class TreeSitterExtractor:
             return len(captures.get("complexity", []))
         except Exception:
             return 0
+
+    def _calculate_cognitive_complexity(self, node) -> int:
+        cog_score = 0
+        def visit(n, depth=0):
+            nonlocal cog_score
+            is_decision = n.type in ('if_statement', 'while_statement', 'for_statement', 'except_clause')
+            if is_decision:
+                cog_score += 1 + depth
+                for child in n.children:
+                    visit(child, depth + 1)
+            else:
+                for child in n.children:
+                    visit(child, depth)
+        body_node = node.child_by_field_name('body')
+        if body_node:
+            visit(body_node)
+        return cog_score
+
+    def _find_raised_exceptions(self, node) -> Set[str]:
+        raised = set()
+        def visit(n):
+            if n.type == 'raise_statement':
+                for child in n.children:
+                    if child.type == 'call':
+                        func_child = child.child_by_field_name('function')
+                        if func_child:
+                            raised.add(self._get_text(func_child))
+                    elif child.type == 'identifier':
+                        raised.add(self._get_text(child))
+            for child in n.children:
+                visit(child)
+        body_node = node.child_by_field_name('body')
+        if body_node:
+            visit(body_node)
+        else:
+            for child in node.children:
+                if child.type not in ('identifier', 'type_identifier', 'formal_parameters', 'parameters', 'modifiers'):
+                    visit(child)
+        return raised
+
+    def _find_env_vars(self, root_node) -> Set[str]:
+        env_vars = set()
+        def visit(n):
+            if n.type in ('call_expression', 'method_invocation', 'call'):
+                func_node = n.child_by_field_name('function')
+                if func_node:
+                    func_text = self._get_text(func_node)
+                    if func_text in ('os.getenv', 'getenv', 'os.environ.get'):
+                        args_node = n.child_by_field_name('arguments')
+                        if args_node and args_node.children:
+                            for arg in args_node.children:
+                                if arg.type == 'string':
+                                    var_name = self._get_text(arg).strip("'\"")
+                                    if var_name:
+                                        env_vars.add(var_name)
+                                    break
+            elif n.type == 'subscript':
+                obj_node = n.child_by_field_name('value')
+                if obj_node:
+                    obj_text = self._get_text(obj_node)
+                    if obj_text in ('os.environ', 'environ'):
+                        sub_node = n.child_by_field_name('subscript')
+                        if sub_node and sub_node.type == 'string':
+                            var_name = self._get_text(sub_node).strip("'\"")
+                            if var_name:
+                                env_vars.add(var_name)
+            for child in n.children:
+                visit(child)
+        visit(root_node)
+        return env_vars
 
     def _find_called_methods(self, node) -> Set[str]:
         called = set()
@@ -1031,6 +1154,7 @@ class TreeSitterExtractor:
                 target_cls = self.ClassDef(name=class_name)
                 self.module.classes.append(target_cls)
             target_cls.methods.extend(methods)
+        self.module.routes.extend(self.extracted_routes)
 
 
 # Module-level singletons for tree-sitter parser reuse (Fix #4: Performance)
@@ -1102,6 +1226,11 @@ def parse_with_tree_sitter(source: str, extension: str) -> Optional[Any]:
         except Exception:
             # Fallback to the generic TreeSitterExtractor if strategy fails
             pass
+
+    # Extract environment variables via AST traversal pass
+    env_var_names = extractor._find_env_vars(tree.root_node)
+    for var in env_var_names:
+        module.env_vars.append(extractor.EnvVarDef(name=var))
 
     return module
 
