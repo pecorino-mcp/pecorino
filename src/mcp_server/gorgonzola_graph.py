@@ -8,38 +8,25 @@ logger = logging.getLogger(__name__)
 
 # Column orders for each node table (matching CREATE statements, used for CSV COPY)
 _NODE_COLUMNS = {
-    "File": ["id", "name", "path", "extension", "content_hash", "mtime", "lang"],
-    "Class": ["id", "name", "filepath", "start_line", "end_line"],
-    "Method": ["id", "name", "complexity", "filepath", "start_line", "end_line"],
-    "Function": ["id", "name", "complexity", "filepath", "start_line", "end_line"],
-    "Interface": ["id", "name", "filepath", "start_line", "end_line"],
-    "Symbol": ["id", "name"],
-    "Module": ["id", "name"],
-    "ControlFlow": ["id", "name", "type"],
-    "Lambda": ["id", "name"],
-    "Variable": ["id", "name"],
-    "Route": ["id", "name", "http_method", "path"],
-    "EnvVar": ["id", "name"],
-    "Folder": ["id", "name", "path"],
-    "TestFile": ["id", "name", "path"],
+    "CodeNode": ["id", "name", "node_type", "filepath", "start_line", "end_line", "complexity", "extension", "content_hash", "mtime", "lang", "http_method", "path", "cf_type"]
 }
 
 # Columns that should default to 0 instead of empty string when missing
 _NUMERIC_COLUMNS = {"complexity", "start_line", "end_line", "mtime"}
 
 _RELATIONSHIP_SCHEMA = [
-    "CREATE REL TABLE CONTAINS (FROM File TO Class, FROM Class TO Method, FROM Class TO Function, FROM Class TO Class, FROM File TO Interface, FROM Interface TO Method, FROM File TO Function, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class, FROM Method TO ControlFlow, FROM Function TO ControlFlow, FROM ControlFlow TO ControlFlow, FROM Folder TO File, FROM Folder TO Folder, FROM File TO Route, FROM Class TO Route, FROM Function TO Route, FROM Method TO Route, FROM File TO EnvVar, FROM File TO TestFile)",
-    "CREATE REL TABLE CONTAINS_LAMBDA (FROM Method TO Lambda, FROM Function TO Lambda, FROM ControlFlow TO Lambda, FROM Lambda TO Lambda)",
-    "CREATE REL TABLE EXTENDS (FROM Class TO Symbol, FROM Class TO Class)",
-    "CREATE REL TABLE IMPLEMENTS (FROM Class TO Symbol, FROM Class TO Interface)",
-    "CREATE REL TABLE CALLS (FROM Method TO Symbol, FROM Method TO Method, FROM Method TO Function, FROM Function TO Symbol, FROM Function TO Method, FROM Function TO Function, FROM ControlFlow TO Symbol, FROM ControlFlow TO Method, FROM ControlFlow TO Function, FROM Lambda TO Symbol, FROM Lambda TO Method, FROM Lambda TO Function, FROM Method TO Lambda, FROM Function TO Lambda, FROM Method TO Class, FROM Function TO Class, FROM ControlFlow TO Class, FROM Lambda TO Class)",
-    "CREATE REL TABLE RECURSES_TO (FROM Method TO Method, FROM Function TO Function)",
-    "CREATE REL TABLE DEPENDS_ON (FROM File TO File, FROM File TO Module)",
-    "CREATE REL TABLE ACCESSES_STATE (FROM Method TO Variable, FROM Function TO Variable, FROM ControlFlow TO Variable, FROM Lambda TO Variable, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
-    "CREATE REL TABLE HTTP_CALLS (FROM Method TO Route, FROM Function TO Route, FROM ControlFlow TO Route, FROM Lambda TO Route)",
-    "CREATE REL TABLE TESTS (FROM Method TO Method, FROM Method TO Function, FROM Method TO Class, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class)",
-    "CREATE REL TABLE RAISES (FROM Method TO Symbol, FROM Function TO Symbol, FROM Method TO Class, FROM Function TO Class)",
-    "CREATE REL TABLE FILE_CHANGES_WITH (FROM File TO File, FROM File TO TestFile, FROM TestFile TO File, FROM TestFile TO TestFile, weight DOUBLE)",
+    "CREATE REL TABLE CONTAINS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE CONTAINS_LAMBDA (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE EXTENDS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE IMPLEMENTS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE CALLS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE RECURSES_TO (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE DEPENDS_ON (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE ACCESSES_STATE (FROM CodeNode TO CodeNode, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
+    "CREATE REL TABLE HTTP_CALLS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE FILE_CHANGES_WITH (FROM CodeNode TO CodeNode, weight DOUBLE)",
 ]
 
 def init_gorgonzola_schema(conn):
@@ -53,23 +40,10 @@ def init_gorgonzola_schema(conn):
     except Exception:
         existing_tables = set()
 
-    if "File" not in existing_tables:
+    if "CodeNode" not in existing_tables:
         queries = [
             # Create node tables
-            "CREATE NODE TABLE File (id STRING, name STRING, path STRING, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Class (id STRING, name STRING, filepath STRING, start_line INT64, end_line INT64, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Method (id STRING, name STRING, complexity INT64, filepath STRING, start_line INT64, end_line INT64, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Function (id STRING, name STRING, complexity INT64, filepath STRING, start_line INT64, end_line INT64, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Interface (id STRING, name STRING, filepath STRING, start_line INT64, end_line INT64, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Symbol (id STRING, name STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Module (id STRING, name STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE ControlFlow (id STRING, name STRING, type STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Lambda (id STRING, name STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Variable (id STRING, name STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Route (id STRING, name STRING, http_method STRING, path STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE EnvVar (id STRING, name STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Folder (id STRING, name STRING, path STRING, PRIMARY KEY (id))",
-            "CREATE NODE TABLE TestFile (id STRING, name STRING, path STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE CodeNode (id STRING, name STRING, node_type STRING, filepath STRING, start_line INT64, end_line INT64, complexity INT64, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, http_method STRING, path STRING, cf_type STRING, PRIMARY KEY (id))",
 
             # Create relationship tables
         ] + _RELATIONSHIP_SCHEMA
@@ -145,17 +119,15 @@ class GorgonzolaGraph:
         with self._label_cache_lock:
             if node_id in self._label_cache:
                 return self._label_cache[node_id]
-        tables = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module", "ControlFlow", "Lambda", "Variable", "Route", "EnvVar", "Folder", "TestFile"]
-        for t in tables:
-            res = conn.execute(f"MATCH (n:{t} {{id: $id}}) RETURN label(n) AS lbl", {"id": node_id})
-            lbl = None
-            if res.has_next():
-                lbl = res.get_next()[0]
-            res.close()
-            if lbl:
-                with self._label_cache_lock:
-                    self._label_cache[node_id] = lbl
-                return lbl
+        res = conn.execute("MATCH (n:CodeNode {id: $id}) RETURN n.node_type", {"id": node_id})
+        lbl = None
+        if res.has_next():
+            lbl = res.get_next()[0]
+        res.close()
+        if lbl:
+            with self._label_cache_lock:
+                self._label_cache[node_id] = lbl
+            return lbl
         return None
 
     def _write_and_copy_csv(self, conn, csv_path, rows, copy_query):
@@ -180,6 +152,33 @@ class GorgonzolaGraph:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     return self._query_conn(query, parameters, conn)
+
+    def compute_leiden_communities(self) -> dict:
+        """
+        Runs the Leiden algorithm on the graph and returns the communities.
+        It projects the CALLS relationships between functions, methods, and classes.
+        Returns a dictionary mapping node id to its community leiden_id.
+        """
+        with self:
+            try:
+                self._conn.execute("CALL DROP_PROJECTED_GRAPH('call_graph')")
+            except Exception:
+                pass
+            
+            try:
+                self._conn.execute("CALL PROJECT_GRAPH('call_graph', ['CodeNode'], ['CALLS'])")
+                res = self._conn.execute("CALL leiden('call_graph') RETURN node.id AS id, leiden_id")
+                communities = {}
+                while res.has_next():
+                    row = res.get_next()
+                    node_id = row[0]
+                    leiden_id = row[1]
+                    communities[node_id] = leiden_id
+                res.close()
+                return communities
+            except Exception as e:
+                logger.error("Failed to compute Leiden communities: %s", e)
+                return {}
 
     def _query_conn(self, query: str, parameters: dict, conn) -> list:
         res = conn.execute(query, parameters)
@@ -242,10 +241,14 @@ class GorgonzolaGraph:
                     return self._insert_nodes_bulk_conn(nodes, conn)
 
     def _insert_nodes_bulk_conn(self, nodes, conn) -> dict:
-        # Group nodes by label
+        # Group nodes by label (actually all will be CodeNode)
         groups = {}
         for node_id, properties, label in nodes:
-            groups.setdefault(label, []).append((node_id, properties))
+            if "type" in properties:
+                properties["cf_type"] = properties["type"]
+                del properties["type"]
+            properties["node_type"] = label
+            groups.setdefault("CodeNode", []).append((node_id, properties))
 
         csv_dir = self._get_csv_dir()
 
@@ -336,20 +339,16 @@ class GorgonzolaGraph:
                     self._insert_edges_bulk_conn(edges, conn, label_map)
 
     def _insert_edges_bulk_conn(self, edges, conn, label_map):
-        # Group edges by (rel_type, src_label, dst_label)
         groups = {}
-        for src_id, dst_id, properties, rel_type in edges:
-            with self._label_cache_lock:
-                c_src = self._label_cache.get(src_id)
-                c_dst = self._label_cache.get(dst_id)
-            src_label = label_map.get(src_id) or c_src or self._get_node_label(src_id, conn)
-            dst_label = label_map.get(dst_id) or c_dst or self._get_node_label(dst_id, conn)
+        for src_id, dst_id, props, rel_type in edges:
+            src_label = "CodeNode"
+            dst_label = "CodeNode"
 
             if not src_label or not dst_label:
                 continue
 
             key = (rel_type, src_label, dst_label)
-            groups.setdefault(key, []).append((src_id, dst_id, properties))
+            groups.setdefault(key, []).append((src_id, dst_id, props))
 
         csv_dir = self._get_csv_dir()
 

@@ -47,7 +47,7 @@ class GraphAPI:
 
         incoming_deps, err = self._safe_query(
             lambda: [r["id"] for r in self.graph.query(
-                f"MATCH (other:File)-[:{rel_depends}]->(f:File {{id: $id}}) RETURN other.id AS id",
+                f"MATCH (other:CodeNode {{node_type: 'File'}})-[:{rel_depends}]->(f:CodeNode {{node_type: 'File', id: $id}}) RETURN other.id AS id",
                 {"id": filepath}
             )]
         )
@@ -59,7 +59,7 @@ class GraphAPI:
         if not error_msg:
             outgoing_deps, err = self._safe_query(
                 lambda: [{"id": r["id"], "type": r["label"] if r.get("label") else "Unknown"} for r in self.graph.query(
-                    f"MATCH (f:File {{id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, label(other) AS label",
+                    f"MATCH (f:CodeNode {{node_type: 'File', id: $id}})-[:{rel_depends}]->(other) RETURN other.id AS id, other.node_type AS label",
                     {"id": filepath}
                 )]
             )
@@ -133,7 +133,7 @@ class GraphAPI:
 
         # Also search via Symbol nodes (most CALLS edges are still unresolved)
         where_sym = self._name_match_clause("s")
-        q2 = f"MATCH (caller)-[:CALLS]->(s:Symbol) WHERE {where_sym} RETURN caller"
+        q2 = f"MATCH (caller)-[:CALLS]->(s:CodeNode {{node_type: 'Symbol'}}) WHERE {where_sym} RETURN caller"
         results.extend(self._find_calls(q2, target_name, 'caller'))
 
         # Deduplicate
@@ -226,7 +226,7 @@ class GraphAPI:
     def impact_analysis(self, filepath: str, max_depth: int = 3) -> List[Dict[str, Any]]:
         """Find all files/modules that transitively depend on the given filepath."""
         query = f'''
-            MATCH (dependent)-[:DEPENDS_ON*1..{max_depth}]->(f:File {{id: $path}})
+            MATCH (dependent)-[:DEPENDS_ON*1..{max_depth}]->(f:CodeNode {{node_type: 'File', id: $path}})
             RETURN dependent
         '''
         try:
@@ -251,32 +251,32 @@ class GraphAPI:
         """
         queries = [
             '''
-            MATCH (caller:Method)-[r:CALLS]->(s:Symbol), (target:Method {name: s.name})
+            MATCH (caller:CodeNode {node_type: 'Method'})-[r:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (target:CodeNode {node_type: 'Method', name: s.name})
             MERGE (caller)-[:CALLS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (caller:Method)-[r:CALLS]->(s:Symbol), (target:Function {name: s.name})
+            MATCH (caller:CodeNode {node_type: 'Method'})-[r:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (target:CodeNode {node_type: 'Function', name: s.name})
             MERGE (caller)-[:CALLS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (caller:Function)-[r:CALLS]->(s:Symbol), (target:Method {name: s.name})
+            MATCH (caller:CodeNode {node_type: 'Function'})-[r:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (target:CodeNode {node_type: 'Method', name: s.name})
             MERGE (caller)-[:CALLS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (caller:Function)-[r:CALLS]->(s:Symbol), (target:Function {name: s.name})
+            MATCH (caller:CodeNode {node_type: 'Function'})-[r:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (target:CodeNode {node_type: 'Function', name: s.name})
             MERGE (caller)-[:CALLS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (c:Class)-[r:EXTENDS]->(s:Symbol), (target:Class {name: s.name})
+            MATCH (c:CodeNode {node_type: 'Class'})-[r:EXTENDS]->(s:CodeNode {node_type: 'Symbol'}), (target:CodeNode {node_type: 'Class', name: s.name})
             MERGE (c)-[:EXTENDS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (c:Class)-[r:IMPLEMENTS]->(s:Symbol), (target:Interface {name: s.name})
+            MATCH (c:CodeNode {node_type: 'Class'})-[r:IMPLEMENTS]->(s:CodeNode {node_type: 'Symbol'}), (target:CodeNode {node_type: 'Interface', name: s.name})
             MERGE (c)-[:IMPLEMENTS]->(target)
             DELETE r
             '''
@@ -294,7 +294,7 @@ class GraphAPI:
         try:
             # 1. Lambda Density
             q_lambdas = '''
-            MATCH (f:File)-[:CONTAINS*1..3]->(m)-[:CONTAINS_LAMBDA]->(l:Lambda)
+            MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..3]->(m)-[:CONTAINS_LAMBDA]->(l:CodeNode {node_type: 'Lambda'})
             RETURN f.name AS file, COUNT(l) AS lambda_count
             ORDER BY lambda_count DESC LIMIT 20
             '''
