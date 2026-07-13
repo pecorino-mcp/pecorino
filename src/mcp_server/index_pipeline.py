@@ -20,12 +20,22 @@ logger = logging.getLogger(__name__)
 
 class CodebaseIndexer:
     def __init__(self, repo_path: str = None):
-        self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
-        db_path = get_db_path_for_repo(self.repo_path)
+        repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
 
-        # Let CodeSearchIndex own the graph instance to avoid multiple connection handlers
-        self.search_index = CodeSearchIndex(db_path)
-        self.graph = self.search_index.graph
+        from src.mcp_server.index_db import CodeSearchIndex
+        from src.mcp_server.config import settings
+
+        self.repo_path = repo_path
+        db_path = get_db_path_for_repo(repo_path)
+        self.search_index = CodeSearchIndex(db_path=db_path)
+        self.graph = self.search_index._ensure_graph()
+        
+        self.enable_embeddings = settings.enable_embeddings
+        if self.enable_embeddings:
+            from src.mcp_server.embedding import EmbeddingPipeline
+            self.embedder = EmbeddingPipeline()
+        else:
+            self.embedder = None
         self._repo_cache_lock = threading.Lock()
 
     def close(self):
@@ -120,7 +130,7 @@ class CodebaseIndexer:
             if not hasattr(self, '_repo_files_cache'):
                 self._repo_files_cache = []
                 for r, d, fnames in os.walk(self.repo_path):
-                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
+                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules"}
                     d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
                     for fname in fnames:
                         self._repo_files_cache.append(os.path.abspath(os.path.join(r, fname)))
@@ -309,6 +319,8 @@ class CodebaseIndexer:
             for m in methods:
                 m_cc = getattr(m, 'cyclomatic_complexity', 1)
                 method_metrics = {'cyclomatic_complexity': m_cc}
+                m_args = getattr(m, 'args', [])
+                sig = f"{class_name}.{m.name}({', '.join(m_args)})" if m_args else f"{class_name}.{m.name}()"
                 nodes_to_index.append({
                     'name': f"{class_name}.{m.name}",
                     'node_type': 'method',
@@ -318,7 +330,9 @@ class CodebaseIndexer:
                     'start_byte': getattr(m, 'start_byte', 0),
                     'end_byte': getattr(m, 'end_byte', 0),
                     'metrics': method_metrics,
-                    'relationships': self._build_relationships_text(m)
+                    'relationships': self._build_relationships_text(m),
+                    'complexity': m_cc,
+                    'signature': sig,
                 })
                 method_id = make_id(class_name, m.name)
                 graph_nodes_dict[method_id] = (method_id, {
@@ -408,6 +422,8 @@ class CodebaseIndexer:
         for func in tree.functions:
             f_cc = getattr(func, 'cyclomatic_complexity', 1)
             func_metrics = {'cyclomatic_complexity': f_cc}
+            f_args = getattr(func, 'args', [])
+            sig = f"{func.name}({', '.join(f_args)})" if f_args else f"{func.name}()"
             nodes_to_index.append({
                 'name': func.name,
                 'node_type': 'function',
@@ -417,7 +433,9 @@ class CodebaseIndexer:
                 'start_byte': getattr(func, 'start_byte', 0),
                 'end_byte': getattr(func, 'end_byte', 0),
                 'metrics': func_metrics,
-                'relationships': self._build_relationships_text(func)
+                'relationships': self._build_relationships_text(func),
+                'complexity': f_cc,
+                'signature': sig,
             })
             func_id = make_id(func.name)
             graph_nodes_dict[func_id] = (func_id, {
@@ -462,6 +480,8 @@ class CodebaseIndexer:
         records = self._extract_records(content, filepath, file_extension)
         if not records:
             return
+
+        self._embed_nodes(records.get("nodes_to_index", []), content.encode('utf-8'))
 
         self.search_index.clear_file(filepath)
 
@@ -513,18 +533,45 @@ class CodebaseIndexer:
             records = self._extract_records(content, file_str, fp.suffix)
             if not records:
                 return None
+                
+            content_bytes = content.encode('utf-8')
 
             records.update({
                 "file_str": file_str,
                 "content_hash": content_hash,
                 "mtime": mtime,
-                "lang": fp.suffix
+                "lang": fp.suffix,
+                "content_bytes": content_bytes
             })
             return records
         except Exception as e:
             logger.warning("Failed to parse %s: %s", file_str, e)
             logger.debug(traceback.format_exc())
             return None
+
+    def _embed_nodes(self, nodes_to_index: list, content_bytes: bytes):
+        if not self.enable_embeddings or not self.embedder:
+            return
+        if not nodes_to_index:
+            return
+            
+        texts_to_embed = []
+        for n in nodes_to_index:
+            s_byte = n.get('start_byte', 0)
+            e_byte = n.get('end_byte', 0)
+            if e_byte > s_byte:
+                try:
+                    text = content_bytes[s_byte:e_byte].decode('utf-8', errors='ignore')
+                except Exception:
+                    text = ""
+            else:
+                text = ""
+            texts_to_embed.append(text)
+            
+        embeddings = self.embedder.embed_batch(texts_to_embed)
+        for i, n in enumerate(nodes_to_index):
+            if i < len(embeddings):
+                n['embedding'] = embeddings[i]
 
     def _post_process_graph(self):
         """Find recursive self-calls and resolve Symbol nodes to Method/Function for dynamic languages."""
@@ -533,15 +580,40 @@ class CodebaseIndexer:
             "MATCH (f:Function)-[r:RECURSES_TO]->(f) DELETE r",
             "MATCH (m:Method)-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
             "MATCH (f:Function)-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
-            # Resolve CALLS to Symbol nodes into direct CALLS to Method nodes (e.g. for dynamic languages like Python)
+            # Resolve CALLS to Symbol nodes into direct CALLS to Method/Function nodes.
+            # Handle dotted attribute access: 'self.rebuild_fts' → match Method named 'rebuild_fts'
+            # Handle class-qualified: 'search_index.rebuild_fts' → match 'rebuild_fts'
+            # Method callers → Method targets
             "MATCH (caller:Method)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
-            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            # Method callers → Function targets
             "MATCH (caller:Method)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
-            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)"
+            # Function callers → Method targets
+            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            # Function callers → Function targets
+            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            # ControlFlow callers → Method/Function targets
+            "MATCH (caller:ControlFlow)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:ControlFlow)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            # Lambda callers → Method/Function targets
+            "MATCH (caller:Lambda)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:Lambda)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
         ]
         try:
             with self.graph:
                 self.graph.query_batch(queries)
+
+            # Log resolution stats
+            try:
+                with self.graph:
+                    total_calls = self.graph.query("MATCH ()-[r:CALLS]->() RETURN count(r) AS cnt")
+                    to_symbol = self.graph.query("MATCH ()-[:CALLS]->(s:Symbol) RETURN count(s) AS cnt")
+                    to_resolved = self.graph.query("MATCH ()-[:CALLS]->(t) WHERE NOT t:Symbol RETURN count(t) AS cnt")
+                    total = total_calls[0].get('cnt', 0) if total_calls else 0
+                    sym = to_symbol[0].get('cnt', 0) if to_symbol else 0
+                    res = to_resolved[0].get('cnt', 0) if to_resolved else 0
+                    logger.info("Symbol resolution: %d total CALLS, %d resolved, %d still pointing to Symbol nodes", total, res, sym)
+            except Exception:
+                pass
 
             # After graph relationships are resolved, calculate and build PageRank
             try:
@@ -550,6 +622,70 @@ class CodebaseIndexer:
                     self.search_index.update_pagerank_bulk(pr_scores)
             except Exception as e:
                 logger.warning("Failed to calculate or build PageRank: %s", e)
+
+            # Compute in/out degree from CALLS edges
+            try:
+                with self.graph:
+                    out_rows = self.graph.query(
+                        "MATCH (n)-[:CALLS]->(t) WHERE label(t) <> 'Symbol' "
+                        "RETURN n.name AS name, count(t) AS deg"
+                    )
+                    in_rows = self.graph.query(
+                        "MATCH (s)-[:CALLS]->(n) WHERE label(s) <> 'Symbol' "
+                        "RETURN n.name AS name, count(s) AS deg"
+                    )
+                degree_map = {}
+                for row in out_rows:
+                    name = row.get("name", "")
+                    degree_map.setdefault(name, {"name": name, "in_degree": 0, "out_degree": 0})
+                    degree_map[name]["out_degree"] = row.get("deg", 0)
+                for row in in_rows:
+                    name = row.get("name", "")
+                    degree_map.setdefault(name, {"name": name, "in_degree": 0, "out_degree": 0})
+                    degree_map[name]["in_degree"] = row.get("deg", 0)
+                if degree_map:
+                    self.search_index.update_degrees_bulk(list(degree_map.values()))
+            except Exception as e:
+                logger.warning("Failed to compute in/out degree: %s", e)
+
+            # Leiden Sweep for community detection
+            try:
+                from src.mcp_server import graph_algorithms
+                logger.info("Starting Leiden sweep for community detection...")
+                
+                # Project graph first
+                with self.graph:
+                    try:
+                        self.graph._conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
+                    except Exception:
+                        pass
+                    self.graph._conn.execute("""
+                        CALL PROJECT_GRAPH('CodeGraph', 
+                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable'],
+                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS']
+                        );
+                    """)
+                
+                    sweep_results = graph_algorithms.sweep_gamma(self.graph, graph_name='CodeGraph')
+                    stable_regions = graph_algorithms.find_stable_partition(sweep_results)
+                    best_partition_info = graph_algorithms.get_best_partition(stable_regions)
+                    
+                    if best_partition_info:
+                        partition_dict = best_partition_info["partition"]
+                        community_updates = [{"node_id": k, "community_id": v} for k, v in partition_dict.items()]
+                        self.search_index.update_community_bulk(community_updates)
+                        logger.info("Successfully updated community IDs based on best partition (gamma=%.2f)", best_partition_info["gamma_begin"])
+                    else:
+                        logger.warning("No stable partition found from Leiden sweep.")
+
+                    # Drop projected graph
+                    try:
+                        self.graph._conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning("Failed to run Leiden sweep: %s", e)
+                logger.debug(traceback.format_exc())
 
         except Exception as e:
             logger.warning("Failed to post-process graph: %s", e)
@@ -649,6 +785,42 @@ class CodebaseIndexer:
                         futures[fut] = job[1]
                     except StopIteration:
                         pass
+
+        # Batch embed all nodes across all parsed files in one go
+        if results and self.enable_embeddings and self.embedder:
+            all_nodes_to_embed = []
+            texts_to_embed = []
+            for res in results:
+                content_bytes = res.get("content_bytes", b"")
+                for n in res.get("nodes_to_index", []):
+                    s_byte = n.get('start_byte', 0)
+                    e_byte = n.get('end_byte', 0)
+                    if e_byte > s_byte:
+                        try:
+                            text = content_bytes[s_byte:e_byte].decode('utf-8', errors='ignore')
+                        except Exception:
+                            text = ""
+                    else:
+                        text = ""
+                    texts_to_embed.append(text)
+                    all_nodes_to_embed.append(n)
+
+            if texts_to_embed:
+                if progress_callback:
+                    progress_callback(total_files, total_files, f"Generating vector embeddings for {len(texts_to_embed)} code symbols...")
+                try:
+                    embeddings = self.embedder.embed_batch(texts_to_embed)
+                    for i, n in enumerate(all_nodes_to_embed):
+                        if i < len(embeddings):
+                            n['embedding'] = embeddings[i]
+                except Exception as e:
+                    logger.warning("Failed to generate vector embeddings during bulk run: %s", e)
+                    logger.debug(traceback.format_exc())
+
+        # Clear content_bytes to save memory
+        if results:
+            for res in results:
+                res.pop("content_bytes", None)
 
         # Close existing connections before mass update/ramdisk to prevent connection errors
         ssd_db_path = self.search_index.db_path

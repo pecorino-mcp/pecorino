@@ -110,7 +110,8 @@ async def handle_list_tools(
                 "'callers'/'callees' to trace call graphs, 'impact' for dependency analysis, "
                 "'usages' for combined search+callers, 'intent' for preset AST queries "
                 "(all_classes, all_functions, entry_points, dead_code, files_by_language), "
-                "or 'dsl' for custom JSON DSL queries."
+                "'dsl' for custom JSON DSL queries, 'trace' for multi-hop call graph traversal, "
+                "'hybrid' for vector+BM25 fusion search, or 'community' for semantic neighborhood."
             ),
             annotations=types.ToolAnnotations(
                 title="Search & Analyze",
@@ -121,7 +122,7 @@ async def handle_list_tools(
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query, keyword, or symbol name. Required for fts (on directories), callers, callees, and usages modes."
+                        "description": "The search query, keyword, symbol name, or cypher string. Required for fts (on directories), callers, callees, usages, and cypher modes."
                     },
                     "target": {
                         "type": "string",
@@ -130,8 +131,8 @@ async def handle_list_tools(
                     "mode": {
                         "type": "string",
                         "default": "fts",
-                        "enum": ["fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis"],
-                        "description": "Search mode. 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL."
+                        "enum": ["fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis", "cypher", "hybrid", "community", "trace"],
+                        "description": "Search mode. 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL, 'cypher' = native read-only graph queries, 'trace' = multi-hop call graph traversal, 'hybrid' = vector+BM25 fusion, 'community' = semantic neighborhood."
                     },
                     "intent": {
                         "type": "string",
