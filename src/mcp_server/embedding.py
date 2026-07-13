@@ -9,8 +9,10 @@ import threading
 _onnx_lock = threading.Lock()
 
 class EmbeddingPipeline:
-    def __init__(self, model_id="nomic-ai/nomic-embed-text-v1.5"):
-        self.model_id = model_id
+    def __init__(self, model_id=None):
+        from src.mcp_server.config import settings
+        self.model_id = model_id or settings.embedding_model
+        self.embedding_dim = settings.embedding_dim
         self.session = None
         self.tokenizer = None
         self._initialize()
@@ -43,16 +45,32 @@ class EmbeddingPipeline:
         except Exception as e:
             logger.error(f"Failed to load ONNX model: {e}")
 
+    def embed_queries(self, queries: list[str]) -> list[list[float]]:
+        if not self.session or not self.tokenizer:
+            return [[0.0] * self.embedding_dim for _ in queries]
+        if not queries:
+            return []
+        
+        if "nomic" in self.model_id.lower():
+            prefixed = [f"search_query: {q}" for q in queries]
+        else:
+            prefixed = queries
+            
+        return self.embed_batch(prefixed)
+
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not self.session or not self.tokenizer:
             logger.warning("Embedding session not initialized, returning zero vectors.")
-            return [[0.0] * 768 for _ in texts]
+            return [[0.0] * self.embedding_dim for _ in texts]
         
         if not texts:
             return []
 
         # Nomic v1.5 uses prefixes
-        prefixed_texts = [f"search_document: {t}" for t in texts]
+        if "nomic" in self.model_id.lower():
+            prefixed_texts = [f"search_document: {t}" for t in texts]
+        else:
+            prefixed_texts = texts
         
         all_embeddings = []
         batch_size = 16

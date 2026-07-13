@@ -402,7 +402,7 @@ class GorgonzolaGraph:
                         );
                     """)
 
-                    res = conn.execute("CALL page_rank('CodeGraph') RETURN id(node) AS id, rank;")
+                    res = conn.execute("CALL page_rank('CodeGraph') RETURN node.id AS id, rank;")
                     while res.has_next():
                         row = res.get_next()
                         results.append({"node_id": row[0], "score": row[1]})

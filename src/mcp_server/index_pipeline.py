@@ -23,13 +23,19 @@ class CodebaseIndexer:
         repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
 
         from src.mcp_server.index_db import CodeSearchIndex
-        from src.mcp_server.embedding import EmbeddingPipeline
+        from src.mcp_server.config import settings
 
         self.repo_path = repo_path
         db_path = get_db_path_for_repo(repo_path)
         self.search_index = CodeSearchIndex(db_path=db_path)
         self.graph = self.search_index._ensure_graph()
-        self.embedder = EmbeddingPipeline()
+        
+        self.enable_embeddings = settings.enable_embeddings
+        if self.enable_embeddings:
+            from src.mcp_server.embedding import EmbeddingPipeline
+            self.embedder = EmbeddingPipeline()
+        else:
+            self.embedder = None
         self._repo_cache_lock = threading.Lock()
 
     def close(self):
@@ -124,7 +130,7 @@ class CodebaseIndexer:
             if not hasattr(self, '_repo_files_cache'):
                 self._repo_files_cache = []
                 for r, d, fnames in os.walk(self.repo_path):
-                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist"}
+                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules"}
                     d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
                     for fname in fnames:
                         self._repo_files_cache.append(os.path.abspath(os.path.join(r, fname)))
@@ -528,13 +534,14 @@ class CodebaseIndexer:
             if not records:
                 return None
                 
-            self._embed_nodes(records.get("nodes_to_index", []), content.encode('utf-8'))
+            content_bytes = content.encode('utf-8')
 
             records.update({
                 "file_str": file_str,
                 "content_hash": content_hash,
                 "mtime": mtime,
-                "lang": fp.suffix
+                "lang": fp.suffix,
+                "content_bytes": content_bytes
             })
             return records
         except Exception as e:
@@ -543,6 +550,8 @@ class CodebaseIndexer:
             return None
 
     def _embed_nodes(self, nodes_to_index: list, content_bytes: bytes):
+        if not self.enable_embeddings or not self.embedder:
+            return
         if not nodes_to_index:
             return
             
@@ -618,11 +627,11 @@ class CodebaseIndexer:
             try:
                 with self.graph:
                     out_rows = self.graph.query(
-                        "MATCH (n)-[:CALLS]->(t) WHERE NOT t:Symbol "
+                        "MATCH (n)-[:CALLS]->(t) WHERE label(t) <> 'Symbol' "
                         "RETURN n.name AS name, count(t) AS deg"
                     )
                     in_rows = self.graph.query(
-                        "MATCH (s)-[:CALLS]->(n) WHERE NOT s:Symbol "
+                        "MATCH (s)-[:CALLS]->(n) WHERE label(s) <> 'Symbol' "
                         "RETURN n.name AS name, count(s) AS deg"
                     )
                 degree_map = {}
@@ -643,17 +652,37 @@ class CodebaseIndexer:
             try:
                 from src.mcp_server import graph_algorithms
                 logger.info("Starting Leiden sweep for community detection...")
-                sweep_results = graph_algorithms.sweep_gamma(self.graph)
-                stable_regions = graph_algorithms.find_stable_partition(sweep_results)
-                best_partition_info = graph_algorithms.get_best_partition(stable_regions)
                 
-                if best_partition_info:
-                    partition_dict = best_partition_info["partition"]
-                    community_updates = [{"node_id": k, "community_id": v} for k, v in partition_dict.items()]
-                    self.search_index.update_community_bulk(community_updates)
-                    logger.info("Successfully updated community IDs based on best partition (gamma=%.2f)", best_partition_info["gamma_begin"])
-                else:
-                    logger.warning("No stable partition found from Leiden sweep.")
+                # Project graph first
+                with self.graph:
+                    try:
+                        self.graph._conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
+                    except Exception:
+                        pass
+                    self.graph._conn.execute("""
+                        CALL PROJECT_GRAPH('CodeGraph', 
+                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable'],
+                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS']
+                        );
+                    """)
+                
+                    sweep_results = graph_algorithms.sweep_gamma(self.graph, graph_name='CodeGraph')
+                    stable_regions = graph_algorithms.find_stable_partition(sweep_results)
+                    best_partition_info = graph_algorithms.get_best_partition(stable_regions)
+                    
+                    if best_partition_info:
+                        partition_dict = best_partition_info["partition"]
+                        community_updates = [{"node_id": k, "community_id": v} for k, v in partition_dict.items()]
+                        self.search_index.update_community_bulk(community_updates)
+                        logger.info("Successfully updated community IDs based on best partition (gamma=%.2f)", best_partition_info["gamma_begin"])
+                    else:
+                        logger.warning("No stable partition found from Leiden sweep.")
+
+                    # Drop projected graph
+                    try:
+                        self.graph._conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning("Failed to run Leiden sweep: %s", e)
                 logger.debug(traceback.format_exc())
@@ -756,6 +785,42 @@ class CodebaseIndexer:
                         futures[fut] = job[1]
                     except StopIteration:
                         pass
+
+        # Batch embed all nodes across all parsed files in one go
+        if results and self.enable_embeddings and self.embedder:
+            all_nodes_to_embed = []
+            texts_to_embed = []
+            for res in results:
+                content_bytes = res.get("content_bytes", b"")
+                for n in res.get("nodes_to_index", []):
+                    s_byte = n.get('start_byte', 0)
+                    e_byte = n.get('end_byte', 0)
+                    if e_byte > s_byte:
+                        try:
+                            text = content_bytes[s_byte:e_byte].decode('utf-8', errors='ignore')
+                        except Exception:
+                            text = ""
+                    else:
+                        text = ""
+                    texts_to_embed.append(text)
+                    all_nodes_to_embed.append(n)
+
+            if texts_to_embed:
+                if progress_callback:
+                    progress_callback(total_files, total_files, f"Generating vector embeddings for {len(texts_to_embed)} code symbols...")
+                try:
+                    embeddings = self.embedder.embed_batch(texts_to_embed)
+                    for i, n in enumerate(all_nodes_to_embed):
+                        if i < len(embeddings):
+                            n['embedding'] = embeddings[i]
+                except Exception as e:
+                    logger.warning("Failed to generate vector embeddings during bulk run: %s", e)
+                    logger.debug(traceback.format_exc())
+
+        # Clear content_bytes to save memory
+        if results:
+            for res in results:
+                res.pop("content_bytes", None)
 
         # Close existing connections before mass update/ramdisk to prevent connection errors
         ssd_db_path = self.search_index.db_path

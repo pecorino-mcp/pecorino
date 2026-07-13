@@ -56,6 +56,29 @@ class TestCodebaseIndexerLifecycle:
         indexer.close()  # Should not raise
         assert indexer.search_index is None
 
+    def test_indexing_without_embeddings(self, temp_repo, db_path, monkeypatch):
+        """Index directory with PECORINO_ENABLE_EMBEDDINGS=false."""
+        from src.mcp_server.config import settings
+        monkeypatch.setattr(settings, "enable_embeddings", False)
+
+        py_file = temp_repo / "example.py"
+        content = py_file.read_text(encoding="utf-8")
+
+        with CodebaseIndexer(repo_path=str(temp_repo)) as indexer:
+            assert indexer.enable_embeddings is False
+            assert indexer.embedder is None
+            
+            # Index file
+            indexer.index_file(str(py_file), content, ".py", rebuild_fts=True)
+            
+            # Verify data is stored in DuckDB
+            res = indexer.search_index.search("Foo", limit=5)
+            assert len(res) > 0
+            
+            # Since embeddings are disabled, hybrid mode should warn and fallback to FTS
+            res_hybrid = indexer.search_index.search("Foo", limit=5, mode="hybrid")
+            assert len(res_hybrid) > 0
+
     def test_single_file_index_releases_lock(self, temp_repo, db_path):
         """After single-file indexing with context manager, no write lock remains."""
         py_file = temp_repo / "example.py"
