@@ -786,27 +786,27 @@ class CodebaseIndexer:
     def _post_process_graph(self):
         """Find recursive self-calls and resolve Symbol nodes to Method/Function for dynamic languages."""
         queries = [
-            "MATCH (m:Method)-[r:RECURSES_TO]->(m) DELETE r",
-            "MATCH (f:Function)-[r:RECURSES_TO]->(f) DELETE r",
-            "MATCH (m:Method)-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
-            "MATCH (f:Function)-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
+            "MATCH (m:CodeNode {node_type: 'Method'})-[r:RECURSES_TO]->(m) DELETE r",
+            "MATCH (f:CodeNode {node_type: 'Function'})-[r:RECURSES_TO]->(f) DELETE r",
+            "MATCH (m:CodeNode {node_type: 'Method'})-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
+            "MATCH (f:CodeNode {node_type: 'Function'})-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
             # Resolve CALLS to Symbol nodes into direct CALLS to Method/Function nodes.
             # Handle dotted attribute access: 'self.rebuild_fts' → match Method named 'rebuild_fts'
             # Handle class-qualified: 'search_index.rebuild_fts' → match 'rebuild_fts'
             # Method callers → Method targets
-            "MATCH (caller:Method)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {node_type: 'Method'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
             # Method callers → Function targets
-            "MATCH (caller:Method)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {node_type: 'Method'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # Function callers → Method targets
-            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {node_type: 'Function'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
             # Function callers → Function targets
-            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {node_type: 'Function'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # ControlFlow callers → Method/Function targets
-            "MATCH (caller:ControlFlow)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
-            "MATCH (caller:ControlFlow)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {node_type: 'ControlFlow'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {node_type: 'ControlFlow'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # Lambda callers → Method/Function targets
-            "MATCH (caller:Lambda)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
-            "MATCH (caller:Lambda)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {node_type: 'Lambda'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {node_type: 'Lambda'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
         ]
         try:
             with self.graph:
@@ -816,8 +816,8 @@ class CodebaseIndexer:
             try:
                 with self.graph:
                     total_calls = self.graph.query("MATCH ()-[r:CALLS]->() RETURN count(r) AS cnt")
-                    to_symbol = self.graph.query("MATCH ()-[:CALLS]->(s:Symbol) RETURN count(s) AS cnt")
-                    to_resolved = self.graph.query("MATCH ()-[:CALLS]->(t) WHERE NOT t:Symbol RETURN count(t) AS cnt")
+                    to_symbol = self.graph.query("MATCH ()-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}) RETURN count(s) AS cnt")
+                    to_resolved = self.graph.query("MATCH ()-[:CALLS]->(t:CodeNode) WHERE t.node_type <> 'Symbol' RETURN count(t) AS cnt")
                     total = total_calls[0].get('cnt', 0) if total_calls else 0
                     sym = to_symbol[0].get('cnt', 0) if to_symbol else 0
                     res = to_resolved[0].get('cnt', 0) if to_resolved else 0
@@ -833,15 +833,24 @@ class CodebaseIndexer:
             except Exception as e:
                 logger.warning("Failed to calculate or build PageRank: %s", e)
 
+            # Calculate and build Leiden Communities
+            try:
+                communities = self.graph.compute_leiden_communities()
+                if communities:
+                    partitions = [{'node_id': k, 'community_id': v} for k, v in communities.items()]
+                    self.search_index.update_communities_bulk(partitions)
+            except Exception as e:
+                logger.warning("Failed to calculate or build Leiden communities: %s", e)
+
             # Compute in/out degree from CALLS edges
             try:
                 with self.graph:
                     out_rows = self.graph.query(
-                        "MATCH (n)-[:CALLS]->(t) WHERE label(t) <> 'Symbol' "
+                        "MATCH (n)-[:CALLS]->(t:CodeNode) WHERE t.node_type <> 'Symbol' "
                         "RETURN n.name AS name, count(t) AS deg"
                     )
                     in_rows = self.graph.query(
-                        "MATCH (s)-[:CALLS]->(n) WHERE label(s) <> 'Symbol' "
+                        "MATCH (s:CodeNode)-[:CALLS]->(n) WHERE s.node_type <> 'Symbol' "
                         "RETURN n.name AS name, count(s) AS deg"
                     )
                 degree_map = {}
