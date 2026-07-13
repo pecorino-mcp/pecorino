@@ -20,12 +20,16 @@ logger = logging.getLogger(__name__)
 
 class CodebaseIndexer:
     def __init__(self, repo_path: str = None):
-        self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
-        db_path = get_db_path_for_repo(self.repo_path)
+        repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
 
-        # Let CodeSearchIndex own the graph instance to avoid multiple connection handlers
-        self.search_index = CodeSearchIndex(db_path)
-        self.graph = self.search_index.graph
+        from src.mcp_server.index_db import CodeSearchIndex
+        from src.mcp_server.embedding import EmbeddingPipeline
+
+        self.repo_path = repo_path
+        db_path = get_db_path_for_repo(repo_path)
+        self.search_index = CodeSearchIndex(db_path=db_path)
+        self.graph = self.search_index._ensure_graph()
+        self.embedder = EmbeddingPipeline()
         self._repo_cache_lock = threading.Lock()
 
     def close(self):
@@ -463,6 +467,8 @@ class CodebaseIndexer:
         if not records:
             return
 
+        self._embed_nodes(records.get("nodes_to_index", []), content.encode('utf-8'))
+
         self.search_index.clear_file(filepath)
 
         nodes_to_index = records["nodes_to_index"]
@@ -513,6 +519,8 @@ class CodebaseIndexer:
             records = self._extract_records(content, file_str, fp.suffix)
             if not records:
                 return None
+                
+            self._embed_nodes(records.get("nodes_to_index", []), content.encode('utf-8'))
 
             records.update({
                 "file_str": file_str,
@@ -525,6 +533,28 @@ class CodebaseIndexer:
             logger.warning("Failed to parse %s: %s", file_str, e)
             logger.debug(traceback.format_exc())
             return None
+
+    def _embed_nodes(self, nodes_to_index: list, content_bytes: bytes):
+        if not nodes_to_index:
+            return
+            
+        texts_to_embed = []
+        for n in nodes_to_index:
+            s_byte = n.get('start_byte', 0)
+            e_byte = n.get('end_byte', 0)
+            if e_byte > s_byte:
+                try:
+                    text = content_bytes[s_byte:e_byte].decode('utf-8', errors='ignore')
+                except Exception:
+                    text = ""
+            else:
+                text = ""
+            texts_to_embed.append(text)
+            
+        embeddings = self.embedder.embed_batch(texts_to_embed)
+        for i, n in enumerate(nodes_to_index):
+            if i < len(embeddings):
+                n['embedding'] = embeddings[i]
 
     def _post_process_graph(self):
         """Find recursive self-calls and resolve Symbol nodes to Method/Function for dynamic languages."""
@@ -550,6 +580,25 @@ class CodebaseIndexer:
                     self.search_index.update_pagerank_bulk(pr_scores)
             except Exception as e:
                 logger.warning("Failed to calculate or build PageRank: %s", e)
+
+            # Leiden Sweep for community detection
+            try:
+                from src.mcp_server import graph_algorithms
+                logger.info("Starting Leiden sweep for community detection...")
+                sweep_results = graph_algorithms.sweep_gamma(self.graph)
+                stable_regions = graph_algorithms.find_stable_partition(sweep_results)
+                best_partition_info = graph_algorithms.get_best_partition(stable_regions)
+                
+                if best_partition_info:
+                    partition_dict = best_partition_info["partition"]
+                    community_updates = [{"node_id": k, "community_id": v} for k, v in partition_dict.items()]
+                    self.search_index.update_community_bulk(community_updates)
+                    logger.info("Successfully updated community IDs based on best partition (gamma=%.2f)", best_partition_info["gamma_begin"])
+                else:
+                    logger.warning("No stable partition found from Leiden sweep.")
+            except Exception as e:
+                logger.warning("Failed to run Leiden sweep: %s", e)
+                logger.debug(traceback.format_exc())
 
         except Exception as e:
             logger.warning("Failed to post-process graph: %s", e)
