@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 import duckdb
 
 from src.core.errors import SecurityValidationError
+from src.mcp_server.config import settings
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes ADD COLUMN start_byte INTEGER',
         'ALTER TABLE code_nodes ADD COLUMN end_byte INTEGER',
         'ALTER TABLE code_nodes ADD COLUMN community_id INTEGER',
-        'ALTER TABLE code_nodes ADD COLUMN embedding FLOAT[768]',
+        f'ALTER TABLE code_nodes ADD COLUMN embedding FLOAT[{settings.embedding_dim}]',
         'ALTER TABLE code_nodes ADD COLUMN complexity INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN signature VARCHAR',
         'ALTER TABLE code_nodes ADD COLUMN in_degree INTEGER DEFAULT 0',
@@ -640,6 +641,12 @@ class CodeSearchIndex:
     def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts") -> List[Dict[str, Any]]:
         """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
         from src.core.errors import AnalysisError, IndexNotFoundError
+        from src.mcp_server.config import settings
+        
+        if mode == "hybrid" and not settings.enable_embeddings:
+            logger.warning("Hybrid search requested but embeddings are disabled. Falling back to FTS mode.")
+            mode = "fts"
+
         conn = self._conn
         try:
             # Build path filter clause
@@ -672,11 +679,11 @@ class CodeSearchIndex:
                     ),
                     vector_scores AS (
                         SELECT c.id,
-                               row_number() OVER (ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[768]) ASC) as rank_vec
+                               row_number() OVER (ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC) as rank_vec
                         FROM code_nodes c
                         WHERE c.embedding IS NOT NULL
                         {path_filter}
-                        ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[768]) ASC
+                        ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC
                         LIMIT 100
                     )
                     SELECT c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
