@@ -18,20 +18,28 @@ _NODE_COLUMNS = {
     "ControlFlow": ["id", "name", "type"],
     "Lambda": ["id", "name"],
     "Variable": ["id", "name"],
+    "Route": ["id", "name", "http_method", "path"],
+    "EnvVar": ["id", "name"],
+    "Folder": ["id", "name", "path"],
+    "TestFile": ["id", "name", "path"],
 }
 
 # Columns that should default to 0 instead of empty string when missing
 _NUMERIC_COLUMNS = {"complexity", "start_line", "end_line", "mtime"}
 
 _RELATIONSHIP_SCHEMA = [
-    "CREATE REL TABLE CONTAINS (FROM File TO Class, FROM Class TO Method, FROM Class TO Function, FROM Class TO Class, FROM File TO Interface, FROM Interface TO Method, FROM File TO Function, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class, FROM Method TO ControlFlow, FROM Function TO ControlFlow, FROM ControlFlow TO ControlFlow)",
+    "CREATE REL TABLE CONTAINS (FROM File TO Class, FROM Class TO Method, FROM Class TO Function, FROM Class TO Class, FROM File TO Interface, FROM Interface TO Method, FROM File TO Function, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class, FROM Method TO ControlFlow, FROM Function TO ControlFlow, FROM ControlFlow TO ControlFlow, FROM Folder TO File, FROM Folder TO Folder, FROM File TO Route, FROM Class TO Route, FROM Function TO Route, FROM Method TO Route, FROM File TO EnvVar, FROM File TO TestFile)",
     "CREATE REL TABLE CONTAINS_LAMBDA (FROM Method TO Lambda, FROM Function TO Lambda, FROM ControlFlow TO Lambda, FROM Lambda TO Lambda)",
     "CREATE REL TABLE EXTENDS (FROM Class TO Symbol, FROM Class TO Class)",
     "CREATE REL TABLE IMPLEMENTS (FROM Class TO Symbol, FROM Class TO Interface)",
-    "CREATE REL TABLE CALLS (FROM Method TO Symbol, FROM Method TO Method, FROM Method TO Function, FROM Function TO Symbol, FROM Function TO Method, FROM Function TO Function, FROM ControlFlow TO Symbol, FROM ControlFlow TO Method, FROM ControlFlow TO Function, FROM Lambda TO Symbol, FROM Lambda TO Method, FROM Lambda TO Function, FROM Method TO Lambda, FROM Function TO Lambda)",
+    "CREATE REL TABLE CALLS (FROM Method TO Symbol, FROM Method TO Method, FROM Method TO Function, FROM Function TO Symbol, FROM Function TO Method, FROM Function TO Function, FROM ControlFlow TO Symbol, FROM ControlFlow TO Method, FROM ControlFlow TO Function, FROM Lambda TO Symbol, FROM Lambda TO Method, FROM Lambda TO Function, FROM Method TO Lambda, FROM Function TO Lambda, FROM Method TO Class, FROM Function TO Class, FROM ControlFlow TO Class, FROM Lambda TO Class)",
     "CREATE REL TABLE RECURSES_TO (FROM Method TO Method, FROM Function TO Function)",
     "CREATE REL TABLE DEPENDS_ON (FROM File TO File, FROM File TO Module)",
     "CREATE REL TABLE ACCESSES_STATE (FROM Method TO Variable, FROM Function TO Variable, FROM ControlFlow TO Variable, FROM Lambda TO Variable, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
+    "CREATE REL TABLE HTTP_CALLS (FROM Method TO Route, FROM Function TO Route, FROM ControlFlow TO Route, FROM Lambda TO Route)",
+    "CREATE REL TABLE TESTS (FROM Method TO Method, FROM Method TO Function, FROM Method TO Class, FROM Function TO Method, FROM Function TO Function, FROM Function TO Class)",
+    "CREATE REL TABLE RAISES (FROM Method TO Symbol, FROM Function TO Symbol, FROM Method TO Class, FROM Function TO Class)",
+    "CREATE REL TABLE FILE_CHANGES_WITH (FROM File TO File, FROM File TO TestFile, FROM TestFile TO File, FROM TestFile TO TestFile, weight DOUBLE)",
 ]
 
 def init_gorgonzola_schema(conn):
@@ -58,6 +66,10 @@ def init_gorgonzola_schema(conn):
             "CREATE NODE TABLE ControlFlow (id STRING, name STRING, type STRING, PRIMARY KEY (id))",
             "CREATE NODE TABLE Lambda (id STRING, name STRING, PRIMARY KEY (id))",
             "CREATE NODE TABLE Variable (id STRING, name STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE Route (id STRING, name STRING, http_method STRING, path STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE EnvVar (id STRING, name STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE Folder (id STRING, name STRING, path STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE TestFile (id STRING, name STRING, path STRING, PRIMARY KEY (id))",
 
             # Create relationship tables
         ] + _RELATIONSHIP_SCHEMA
@@ -133,7 +145,7 @@ class GorgonzolaGraph:
         with self._label_cache_lock:
             if node_id in self._label_cache:
                 return self._label_cache[node_id]
-        tables = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module", "ControlFlow", "Lambda", "Variable"]
+        tables = ["File", "Class", "Method", "Function", "Interface", "Symbol", "Module", "ControlFlow", "Lambda", "Variable", "Route", "EnvVar", "Folder", "TestFile"]
         for t in tables:
             res = conn.execute(f"MATCH (n:{t} {{id: $id}}) RETURN label(n) AS lbl", {"id": node_id})
             lbl = None
@@ -397,8 +409,8 @@ class GorgonzolaGraph:
 
                     conn.execute("""
                         CALL PROJECT_GRAPH('CodeGraph', 
-                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable'],
-                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS']
+                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable', 'Folder', 'TestFile', 'Route', 'EnvVar'],
+                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS']
                         );
                     """)
 

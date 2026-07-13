@@ -36,6 +36,7 @@ class CodebaseIndexer:
             self.embedder = EmbeddingPipeline()
         else:
             self.embedder = None
+        self.enable_lsp = settings.enable_lsp
         self._repo_cache_lock = threading.Lock()
 
     def close(self):
@@ -303,14 +304,18 @@ class CodebaseIndexer:
         graph_edges = []
         dependencies = set()
 
+        # Determine if file is a test file
+        is_test_file = "/tests/" in filepath or "/test_" in filepath or "test_" in os.path.basename(filepath) or "_test" in os.path.basename(filepath)
+        file_label = "TestFile" if is_test_file else "File"
         file_id = filepath
+
         lang_name = get_language_for_extension(file_extension)
         graph_nodes_dict[file_id] = (file_id, {
             "name": os.path.basename(filepath),
             "path": filepath,
             "extension": file_extension,
             "lang": lang_name
-        }, "File")
+        }, file_label)
 
         def make_id(*parts):
             return "::".join([filepath] + [str(p) for p in parts])
@@ -318,7 +323,18 @@ class CodebaseIndexer:
         def process_methods(methods, class_id, class_name):
             for m in methods:
                 m_cc = getattr(m, 'cyclomatic_complexity', 1)
-                method_metrics = {'cyclomatic_complexity': m_cc}
+                m_cog = getattr(m, 'cognitive_complexity', 0)
+                m_rec = getattr(m, 'is_recursive', False)
+                m_is_test = getattr(m, 'is_test', False) or is_test_file
+                
+                method_metrics = {
+                    'cyclomatic_complexity': m_cc,
+                    'cognitive_complexity': m_cog,
+                    'is_recursive': m_rec,
+                    'is_test': m_is_test,
+                    'raised_exceptions': list(getattr(m, 'raised_exceptions', []))
+                }
+                
                 m_args = getattr(m, 'args', [])
                 sig = f"{class_name}.{m.name}({', '.join(m_args)})" if m_args else f"{class_name}.{m.name}()"
                 nodes_to_index.append({
@@ -348,6 +364,11 @@ class CodebaseIndexer:
                     symbol_id = f"Symbol::{call}"
                     graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                     graph_edges.append((method_id, symbol_id, {}, "CALLS"))
+
+                for exc in getattr(m, 'raised_exceptions', set()):
+                    symbol_id = f"Symbol::{exc}"
+                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": exc}, "Symbol")
+                    graph_edges.append((method_id, symbol_id, {}, "RAISES"))
 
                 self._add_state_accesses(m, method_id, class_name, graph_nodes_dict, graph_edges, make_id)
                 self._add_lambdas(m, method_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
@@ -421,7 +442,17 @@ class CodebaseIndexer:
 
         for func in tree.functions:
             f_cc = getattr(func, 'cyclomatic_complexity', 1)
-            func_metrics = {'cyclomatic_complexity': f_cc}
+            f_cog = getattr(func, 'cognitive_complexity', 0)
+            f_rec = getattr(func, 'is_recursive', False)
+            f_is_test = getattr(func, 'is_test', False) or is_test_file
+            
+            func_metrics = {
+                'cyclomatic_complexity': f_cc,
+                'cognitive_complexity': f_cog,
+                'is_recursive': f_rec,
+                'is_test': f_is_test,
+                'raised_exceptions': list(getattr(func, 'raised_exceptions', []))
+            }
             f_args = getattr(func, 'args', [])
             sig = f"{func.name}({', '.join(f_args)})" if f_args else f"{func.name}()"
             nodes_to_index.append({
@@ -452,11 +483,75 @@ class CodebaseIndexer:
                 graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
                 graph_edges.append((func_id, symbol_id, {}, "CALLS"))
 
+            for exc in getattr(func, 'raised_exceptions', set()):
+                symbol_id = f"Symbol::{exc}"
+                graph_nodes_dict[symbol_id] = (symbol_id, {"name": exc}, "Symbol")
+                graph_edges.append((func_id, symbol_id, {}, "RAISES"))
+
             self._add_state_accesses(func, func_id, "Global", graph_nodes_dict, graph_edges, make_id)
             self._add_lambdas(func, func_id, filepath, "Global", graph_nodes_dict, graph_edges, make_id)
 
             for stmt in getattr(func, 'statements', []):
                 self._add_statement_to_graph(stmt, func_id, filepath, "Global", graph_nodes_dict, graph_edges, make_id)
+
+        # Process HTTP Routes
+        for r in getattr(tree, 'routes', []):
+            route_id = make_id("Route", r.http_method, r.path)
+            graph_nodes_dict[route_id] = (route_id, {
+                "name": r.name,
+                "http_method": r.http_method,
+                "path": r.path
+            }, "Route")
+            graph_edges.append((file_id, route_id, {}, "CONTAINS"))
+
+            nodes_to_index.append({
+                'name': r.name,
+                'node_type': 'route',
+                'filepath': filepath,
+                'start_line': r.lineno,
+                'end_line': r.end_lineno,
+                'start_byte': getattr(r, 'start_byte', 0),
+                'end_byte': getattr(r, 'end_byte', 0),
+                'metrics': {},
+                'relationships': ""
+            })
+
+            # Map CONTAINS from parent Function/Method
+            parent_id = None
+            for func in tree.functions:
+                if func.start_byte <= r.start_byte and r.end_byte <= func.end_byte:
+                    parent_id = make_id(func.name)
+                    break
+            if not parent_id:
+                for cls in tree.classes:
+                    for m in cls.methods:
+                        if m.start_byte <= r.start_byte and r.end_byte <= m.end_byte:
+                            parent_id = make_id(cls.name, m.name)
+                            break
+                    if parent_id:
+                        break
+            if parent_id:
+                graph_edges.append((parent_id, route_id, {}, "CONTAINS"))
+
+        # Process Environment Variables
+        for ev in getattr(tree, 'env_vars', []):
+            ev_id = f"EnvVar::{ev.name}"
+            graph_nodes_dict[ev_id] = (ev_id, {
+                "name": ev.name
+            }, "EnvVar")
+            graph_edges.append((file_id, ev_id, {}, "CONTAINS"))
+
+            nodes_to_index.append({
+                'name': ev.name,
+                'node_type': 'env_var',
+                'filepath': filepath,
+                'start_line': 1,
+                'end_line': 1,
+                'start_byte': 0,
+                'end_byte': 0,
+                'metrics': {},
+                'relationships': ""
+            })
 
         resolved_deps = []
         for dep in dependencies:
@@ -530,18 +625,35 @@ class CodebaseIndexer:
             content = fp.read_text(encoding='utf-8', errors='ignore')
             content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
 
+            if getattr(self, "lsp_client", None):
+                try:
+                    self.lsp_client.open_document(file_str, content)
+                except Exception as e:
+                    logger.debug("Failed to open document in LSP: %s", e)
+
             records = self._extract_records(content, file_str, fp.suffix)
             if not records:
                 return None
                 
             content_bytes = content.encode('utf-8')
 
+            lsp_resolutions = []
+            if getattr(self, "lsp_client", None):
+                try:
+                    from src.parsers.tree_sitter_parser import get_raw_tree_sitter_tree
+                    raw_tree = get_raw_tree_sitter_tree(content, fp.suffix)
+                    if raw_tree:
+                        lsp_resolutions = self._find_lsp_resolutions(raw_tree, file_str)
+                except Exception as e:
+                    logger.debug("Failed to resolve definitions via LSP: %s", e)
+
             records.update({
                 "file_str": file_str,
                 "content_hash": content_hash,
                 "mtime": mtime,
                 "lang": fp.suffix,
-                "content_bytes": content_bytes
+                "content_bytes": content_bytes,
+                "lsp_resolutions": lsp_resolutions
             })
             return records
         except Exception as e:
@@ -572,6 +684,104 @@ class CodebaseIndexer:
         for i, n in enumerate(nodes_to_index):
             if i < len(embeddings):
                 n['embedding'] = embeddings[i]
+
+    def _compute_git_coupling(self, dirpath: str) -> list:
+        """Run git log to calculate file co-change coupling scores (Jaccard similarity).
+        
+        Returns list of (filepath_a, filepath_b, weight) tuples.
+        """
+        import subprocess
+        from collections import defaultdict
+        
+        try:
+            cmd = ["git", "log", "--pretty=format:commit:%H", "--name-only"]
+            proc = subprocess.Popen(
+                cmd,
+                cwd=dirpath,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            stdout, _ = proc.communicate()
+            if proc.returncode != 0 or not stdout:
+                return []
+        except Exception as e:
+            logger.debug("Failed to run git log: %s", e)
+            return []
+            
+        commit_files = defaultdict(set)
+        current_commit = None
+        
+        file_commit_counts = defaultdict(int)
+        
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("commit:"):
+                current_commit = line.split(":", 1)[1]
+            elif current_commit:
+                abs_path = os.path.abspath(os.path.join(dirpath, line))
+                if os.path.exists(abs_path):
+                    commit_files[current_commit].add(abs_path)
+                    
+        pair_counts = defaultdict(lambda: defaultdict(int))
+        for commit, files in commit_files.items():
+            if len(files) > 50 or len(files) < 2:
+                continue
+            for f in files:
+                file_commit_counts[f] += 1
+                
+            file_list = list(files)
+            for i in range(len(file_list)):
+                for j in range(i + 1, len(file_list)):
+                    f1, f2 = file_list[i], file_list[j]
+                    if f1 < f2:
+                        pair_counts[f1][f2] += 1
+                    else:
+                        pair_counts[f2][f1] += 1
+                        
+        coupling_edges = []
+        for f1, targets in pair_counts.items():
+            for f2, count in targets.items():
+                denom = file_commit_counts[f1] + file_commit_counts[f2] - count
+                if denom > 0:
+                    jaccard = count / denom
+                    if jaccard >= 0.1 and count >= 2:
+                        coupling_edges.append((f1, f2, float(jaccard)))
+                        
+        return coupling_edges
+
+    def _find_lsp_resolutions(self, tree, file_str) -> list:
+        if not getattr(self, "lsp_client", None):
+            return []
+            
+        resolutions = []
+        
+        def visit(n):
+            if n.type in ('call_expression', 'method_invocation', 'call'):
+                func_node = n.child_by_field_name('function') or n.child_by_field_name('name')
+                if not func_node and n.children:
+                    func_node = n.children[0]
+                if func_node:
+                    line = func_node.start_point[0] + 1
+                    char = func_node.start_point[1]
+                    try:
+                        res = self.lsp_client.resolve_definition(file_str, line, char)
+                        if res:
+                            resolutions.append({
+                                "call_line": line,
+                                "def_filepath": res["filepath"],
+                                "def_line": res["start_line"]
+                            })
+                    except Exception:
+                        pass
+            for child in n.children:
+                visit(child)
+                
+        visit(tree.root_node)
+        return resolutions
+
 
     def _post_process_graph(self):
         """Find recursive self-calls and resolve Symbol nodes to Method/Function for dynamic languages."""
@@ -661,8 +871,8 @@ class CodebaseIndexer:
                         pass
                     self.graph._conn.execute("""
                         CALL PROJECT_GRAPH('CodeGraph', 
-                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable'],
-                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS']
+                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable', 'Folder', 'TestFile', 'Route', 'EnvVar'],
+                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS']
                         );
                     """)
                 
@@ -692,6 +902,25 @@ class CodebaseIndexer:
             logger.debug(traceback.format_exc())
 
     def index_directory(self, dirpath: str, progress_callback=None) -> dict:
+        path = pathlib.Path(dirpath).resolve()
+        self.lsp_client = None
+        if self.enable_lsp:
+            try:
+                from src.mcp_server.lsp.manager import LSPClient
+                self.lsp_client = LSPClient(workspace_root=str(path))
+                if not self.lsp_client.start():
+                    self.lsp_client = None
+            except Exception as e:
+                logger.warning("Failed to start LSP client: %s", e)
+                self.lsp_client = None
+        try:
+            return self._index_directory_impl(dirpath, progress_callback)
+        finally:
+            if self.lsp_client:
+                self.lsp_client.stop()
+                self.lsp_client = None
+
+    def _index_directory_impl(self, dirpath: str, progress_callback=None) -> dict:
         path = pathlib.Path(dirpath).resolve()
         ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}
         files = []
@@ -937,11 +1166,63 @@ class CodebaseIndexer:
                         nodes_list = [(nid, props, lbl) for nid, (props, lbl) in all_graph_nodes.items()]
                         id_map = ram_graph.insert_nodes_bulk(nodes_list)
 
+                        # Resolve LSP definitions into concrete CALLS edges
+                        for res in results:
+                            file_str = res["file_str"]
+                            for resolution in res.get("lsp_resolutions", []):
+                                call_line = resolution["call_line"]
+                                def_filepath = resolution["def_filepath"]
+                                def_line = resolution["def_line"]
+                                
+                                caller_id = None
+                                for node_id, (props, label) in all_graph_nodes.items():
+                                    if node_id.startswith(file_str + "::"):
+                                        if label in ("Method", "Function"):
+                                            if props.get("start_line", 0) <= call_line <= props.get("end_line", 0):
+                                                caller_id = node_id
+                                                break
+                                                
+                                callee_id = None
+                                for node_id, (props, label) in all_graph_nodes.items():
+                                    if node_id.startswith(def_filepath + "::") or node_id == def_filepath:
+                                        if label in ("Method", "Function", "Class"):
+                                            if props.get("start_line", 0) <= def_line <= props.get("end_line", 0):
+                                                callee_id = node_id
+                                                break
+                                                
+                                if not callee_id and self.search_index:
+                                    try:
+                                        row = self.search_index._conn.execute(
+                                            "SELECT id FROM code_nodes WHERE filepath = ? AND start_line <= ? AND end_line >= ? AND node_type IN ('method', 'function', 'class')",
+                                            (def_filepath, def_line, def_line)
+                                        ).fetchone()
+                                        if row:
+                                            callee_id = row[0]
+                                    except Exception:
+                                        pass
+                                        
+                                if caller_id and callee_id:
+                                    all_graph_edges.add((caller_id, callee_id, frozenset(), "CALLS"))
+
                         if all_graph_edges:
                             if progress_callback:
                                 progress_callback(total_files, total_files, "Linking graph edges in RAM...")
                             edges_list = [(src, dst, dict(props), rel) for src, dst, props, rel in all_graph_edges]
                             ram_graph.insert_edges_bulk(edges_list, id_map)
+
+                        # Compute and insert git temporal coupling edges
+                        git_coupling = self._compute_git_coupling(str(path))
+                        if git_coupling:
+                            if progress_callback:
+                                progress_callback(total_files, total_files, f"Linking {len(git_coupling)} git temporal coupling edges...")
+                            git_edges = []
+                            for f1, f2, weight in git_coupling:
+                                lbl1 = ram_graph._get_node_label(f1, ram_graph._conn)
+                                lbl2 = ram_graph._get_node_label(f2, ram_graph._conn)
+                                if lbl1 and lbl2:
+                                    git_edges.append((f1, f2, {"weight": weight}, "FILE_CHANGES_WITH"))
+                            if git_edges:
+                                ram_graph.insert_edges_bulk(git_edges, id_map)
 
                     ramdisk.check_quota()
                     if files_metadata:
