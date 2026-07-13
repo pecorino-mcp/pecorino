@@ -73,7 +73,11 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes ADD COLUMN start_byte INTEGER',
         'ALTER TABLE code_nodes ADD COLUMN end_byte INTEGER',
         'ALTER TABLE code_nodes ADD COLUMN community_id INTEGER',
-        'ALTER TABLE code_nodes ADD COLUMN embedding FLOAT[768]'
+        'ALTER TABLE code_nodes ADD COLUMN embedding FLOAT[768]',
+        'ALTER TABLE code_nodes ADD COLUMN complexity INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN signature VARCHAR',
+        'ALTER TABLE code_nodes ADD COLUMN in_degree INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN out_degree INTEGER DEFAULT 0',
     ]
     for query in migrations:
         try:
@@ -337,14 +341,18 @@ class CodeSearchIndex:
                 n.get('start_byte', 0),
                 n.get('end_byte', 0),
                 None,  # community_id defaults to None
-                n.get('embedding', None)
+                n.get('embedding', None),
+                n.get('complexity', 0),
+                n.get('signature', None),
+                0,  # in_degree — computed post-indexing
+                0,  # out_degree — computed post-indexing
             ))
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
                 # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
                 conn.execute('''
                     INSERT INTO code_nodes
                     SELECT * FROM temp_code_nodes
@@ -356,7 +364,9 @@ class CodeSearchIndex:
                         end_line=excluded.end_line,
                         relationships=excluded.relationships,
                         start_byte=excluded.start_byte,
-                        end_byte=excluded.end_byte
+                        end_byte=excluded.end_byte,
+                        complexity=excluded.complexity,
+                        signature=excluded.signature
                 ''')
                 conn.execute("DROP TABLE temp_code_nodes")
                 conn.execute("COMMIT")
@@ -562,6 +572,33 @@ class CodeSearchIndex:
             conn.execute("ROLLBACK")
             logger.warning("Failed to bulk update community: %s", e)
 
+    def update_degrees_bulk(self, degree_data: List[Dict[str, Any]]):
+        """Bulk update in_degree and out_degree for code nodes.
+
+        degree_data: list of {'name': str, 'in_degree': int, 'out_degree': int}
+        """
+        if not degree_data:
+            return
+        conn = self._conn
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            conn.execute("CREATE TEMP TABLE temp_deg (name VARCHAR, in_deg INTEGER, out_deg INTEGER)")
+            data = [(d['name'], d.get('in_degree', 0), d.get('out_degree', 0)) for d in degree_data]
+            conn.executemany("INSERT INTO temp_deg VALUES (?, ?, ?)", data)
+            conn.execute('''
+                UPDATE code_nodes
+                SET in_degree = temp_deg.in_deg,
+                    out_degree = temp_deg.out_deg
+                FROM temp_deg
+                WHERE code_nodes.name = temp_deg.name
+            ''')
+            conn.execute("DROP TABLE temp_deg")
+            conn.execute("COMMIT")
+            logger.info("Updated in/out degree for %d nodes", len(degree_data))
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.warning("Failed to bulk update degrees: %s", e)
+
     def get_file_hash(self, filepath: str) -> str:
         """Retrieve the stored hash for a given file, or None if not found."""
         conn = self._conn
@@ -694,15 +731,22 @@ class CodeSearchIndex:
 
             results = []
             for row in res:
-                results.append({
+                entry = {
                     'name': row[0],
                     'node_type': row[1],
                     'filepath': row[2],
                     'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
-                    'metrics': {},
                     'start_line': row[3],
-                    'end_line': row[4]
-                })
+                    'end_line': row[4],
+                }
+                # Surface the BM25×PageRank score (already computed in SQL)
+                if len(row) > 7 and row[7] is not None:
+                    if mode == "hybrid" and len(row) > 8:
+                        entry['bm25_score'] = row[7]
+                        entry['score'] = row[8]
+                    else:
+                        entry['score'] = row[7]
+                results.append(entry)
             return results
         except Exception as e:
             err_str = str(e)
@@ -716,7 +760,8 @@ class CodeSearchIndex:
         """Get all nodes for a specific file."""
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte
+            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte,
+                   pagerank, complexity, signature, in_degree, out_degree
             FROM code_nodes
             WHERE filepath = ?
         ''', (filepath,)).fetchall()
@@ -728,9 +773,13 @@ class CodeSearchIndex:
                 'node_type': row[1],
                 'filepath': row[2],
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
-                'metrics': {},
                 'start_line': row[3],
-                'end_line': row[4]
+                'end_line': row[4],
+                'pagerank': row[7] or 0.0,
+                'complexity': row[8] or 0,
+                'signature': row[9],
+                'in_degree': row[10] or 0,
+                'out_degree': row[11] or 0,
             })
         return results
 
@@ -739,7 +788,8 @@ class CodeSearchIndex:
         prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte
+            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte,
+                   pagerank, complexity, signature, in_degree, out_degree
             FROM code_nodes
             WHERE filepath LIKE ?
         ''', (f"{prefix}%",)).fetchall()
@@ -751,9 +801,13 @@ class CodeSearchIndex:
                 'node_type': row[1],
                 'filepath': row[2],
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
-                'metrics': {},
                 'start_line': row[3],
-                'end_line': row[4]
+                'end_line': row[4],
+                'pagerank': row[7] or 0.0,
+                'complexity': row[8] or 0,
+                'signature': row[9],
+                'in_degree': row[10] or 0,
+                'out_degree': row[11] or 0,
             })
         return results
 

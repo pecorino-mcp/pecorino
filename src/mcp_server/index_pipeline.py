@@ -313,6 +313,8 @@ class CodebaseIndexer:
             for m in methods:
                 m_cc = getattr(m, 'cyclomatic_complexity', 1)
                 method_metrics = {'cyclomatic_complexity': m_cc}
+                m_args = getattr(m, 'args', [])
+                sig = f"{class_name}.{m.name}({', '.join(m_args)})" if m_args else f"{class_name}.{m.name}()"
                 nodes_to_index.append({
                     'name': f"{class_name}.{m.name}",
                     'node_type': 'method',
@@ -322,7 +324,9 @@ class CodebaseIndexer:
                     'start_byte': getattr(m, 'start_byte', 0),
                     'end_byte': getattr(m, 'end_byte', 0),
                     'metrics': method_metrics,
-                    'relationships': self._build_relationships_text(m)
+                    'relationships': self._build_relationships_text(m),
+                    'complexity': m_cc,
+                    'signature': sig,
                 })
                 method_id = make_id(class_name, m.name)
                 graph_nodes_dict[method_id] = (method_id, {
@@ -412,6 +416,8 @@ class CodebaseIndexer:
         for func in tree.functions:
             f_cc = getattr(func, 'cyclomatic_complexity', 1)
             func_metrics = {'cyclomatic_complexity': f_cc}
+            f_args = getattr(func, 'args', [])
+            sig = f"{func.name}({', '.join(f_args)})" if f_args else f"{func.name}()"
             nodes_to_index.append({
                 'name': func.name,
                 'node_type': 'function',
@@ -421,7 +427,9 @@ class CodebaseIndexer:
                 'start_byte': getattr(func, 'start_byte', 0),
                 'end_byte': getattr(func, 'end_byte', 0),
                 'metrics': func_metrics,
-                'relationships': self._build_relationships_text(func)
+                'relationships': self._build_relationships_text(func),
+                'complexity': f_cc,
+                'signature': sig,
             })
             func_id = make_id(func.name)
             graph_nodes_dict[func_id] = (func_id, {
@@ -563,15 +571,40 @@ class CodebaseIndexer:
             "MATCH (f:Function)-[r:RECURSES_TO]->(f) DELETE r",
             "MATCH (m:Method)-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
             "MATCH (f:Function)-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
-            # Resolve CALLS to Symbol nodes into direct CALLS to Method nodes (e.g. for dynamic languages like Python)
+            # Resolve CALLS to Symbol nodes into direct CALLS to Method/Function nodes.
+            # Handle dotted attribute access: 'self.rebuild_fts' → match Method named 'rebuild_fts'
+            # Handle class-qualified: 'search_index.rebuild_fts' → match 'rebuild_fts'
+            # Method callers → Method targets
             "MATCH (caller:Method)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
-            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            # Method callers → Function targets
             "MATCH (caller:Method)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
-            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)"
+            # Function callers → Method targets
+            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            # Function callers → Function targets
+            "MATCH (caller:Function)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            # ControlFlow callers → Method/Function targets
+            "MATCH (caller:ControlFlow)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:ControlFlow)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            # Lambda callers → Method/Function targets
+            "MATCH (caller:Lambda)-[:CALLS]->(s:Symbol), (m:Method) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:Lambda)-[:CALLS]->(s:Symbol), (f:Function) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
         ]
         try:
             with self.graph:
                 self.graph.query_batch(queries)
+
+            # Log resolution stats
+            try:
+                with self.graph:
+                    total_calls = self.graph.query("MATCH ()-[r:CALLS]->() RETURN count(r) AS cnt")
+                    to_symbol = self.graph.query("MATCH ()-[:CALLS]->(s:Symbol) RETURN count(s) AS cnt")
+                    to_resolved = self.graph.query("MATCH ()-[:CALLS]->(t) WHERE NOT t:Symbol RETURN count(t) AS cnt")
+                    total = total_calls[0].get('cnt', 0) if total_calls else 0
+                    sym = to_symbol[0].get('cnt', 0) if to_symbol else 0
+                    res = to_resolved[0].get('cnt', 0) if to_resolved else 0
+                    logger.info("Symbol resolution: %d total CALLS, %d resolved, %d still pointing to Symbol nodes", total, res, sym)
+            except Exception:
+                pass
 
             # After graph relationships are resolved, calculate and build PageRank
             try:
@@ -580,6 +613,31 @@ class CodebaseIndexer:
                     self.search_index.update_pagerank_bulk(pr_scores)
             except Exception as e:
                 logger.warning("Failed to calculate or build PageRank: %s", e)
+
+            # Compute in/out degree from CALLS edges
+            try:
+                with self.graph:
+                    out_rows = self.graph.query(
+                        "MATCH (n)-[:CALLS]->(t) WHERE NOT t:Symbol "
+                        "RETURN n.name AS name, count(t) AS deg"
+                    )
+                    in_rows = self.graph.query(
+                        "MATCH (s)-[:CALLS]->(n) WHERE NOT s:Symbol "
+                        "RETURN n.name AS name, count(s) AS deg"
+                    )
+                degree_map = {}
+                for row in out_rows:
+                    name = row.get("name", "")
+                    degree_map.setdefault(name, {"name": name, "in_degree": 0, "out_degree": 0})
+                    degree_map[name]["out_degree"] = row.get("deg", 0)
+                for row in in_rows:
+                    name = row.get("name", "")
+                    degree_map.setdefault(name, {"name": name, "in_degree": 0, "out_degree": 0})
+                    degree_map[name]["in_degree"] = row.get("deg", 0)
+                if degree_map:
+                    self.search_index.update_degrees_bulk(list(degree_map.values()))
+            except Exception as e:
+                logger.warning("Failed to compute in/out degree: %s", e)
 
             # Leiden Sweep for community detection
             try:
