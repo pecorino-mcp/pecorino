@@ -20,6 +20,7 @@ from src.mcp_server.tools.update_index import do_update_index
 from src.mcp_server.tools.detect_changes import do_detect_changes
 from src.mcp_server.tools.manage_adr import do_manage_adr
 from src.mcp_server.tools.snapshot import do_manage_snapshot
+from src.mcp_server.tools.query_graph import do_query_graph
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +307,46 @@ async def handle_list_tools(
                 "required": ["action"]
             }
         ),
+        types.Tool(
+            name="query_graph",
+            description="Execute an openCypher query directly against the Kùzu graph. Read-only mutations are enforced.",
+            annotations=types.ToolAnnotations(
+                title="Query Graph (Cypher)",
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Path to the repository."
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Alias for target (for codebase-memory-mcp compatibility)."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "The openCypher query string."
+                    },
+                    "max_rows": {
+                        "type": "integer",
+                        "description": "Optional row limit."
+                    },
+                    "parameters": {
+                        "type": "object",
+                        "description": "Optional parameterized query values."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": True
+                    }
+                },
+                "required": ["target", "query"]
+            }
+        ),
     ]
 
     if role == "admin":
@@ -477,6 +518,23 @@ async def handle_call_tool(
                 action=arguments.get("action"),
                 target=target,
                 output_path=arguments.get("output_path"),
+                allow_external=arguments.get("allow_external", True),
+                ctx=ctx
+            )
+        elif name == "query_graph":
+            raw_target = arguments.get("target") or arguments.get("project")
+            target = await _detect_directory(_normalize_target(raw_target))
+            check_suspicious(target, "target")
+            
+            query = arguments.get("query")
+            max_rows = arguments.get("max_rows")
+            if max_rows and query and "LIMIT " not in query.upper():
+                query = f"{query} LIMIT {max_rows}"
+                
+            res = await do_query_graph(
+                target=target,
+                query=query,
+                parameters=arguments.get("parameters"),
                 allow_external=arguments.get("allow_external", True),
                 ctx=ctx
             )
