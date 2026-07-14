@@ -101,6 +101,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
                 except Exception as e:
                     logger.warning("Subprocess parse error: %s for line: %s", e, line_str)
 
+        stderr_logs = []
         async def read_stderr():
             while True:
                 line = await proc.stderr.readline()
@@ -108,6 +109,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
                     break
                 line_str = line.decode('utf-8', errors='ignore').strip()
                 if line_str:
+                    stderr_logs.append(line_str)
                     logger.debug("[index worker] %s", line_str)
 
         try:
@@ -120,7 +122,8 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
             raise AnalysisError(f"Indexing timed out after {INDEX_TIMEOUT_S}s")
 
         if proc.returncode != 0:
-            raise AnalysisError(f"Index subprocess failed with exit code {proc.returncode}")
+            err_msg = "\n".join(stderr_logs[-10:])
+            raise AnalysisError(f"Index subprocess failed with exit code {proc.returncode}. Stderr: {err_msg}")
 
         final_res["target"] = path.as_posix()
 

@@ -46,6 +46,8 @@ def main():
     parser.add_argument("--embedding-model", help="Embedding model ID (overrides PECORINO_EMBEDDING_MODEL env var)")
     parser.add_argument("--embedding-dim", type=int, help="Embedding dimension (overrides PECORINO_EMBEDDING_DIM env var)")
 
+    parser.add_argument("--legacy", action="store_true", help="Use legacy low-level Server API with JSON routing instead of MCPServer")
+
     args, _ = parser.parse_known_args()
 
     # CLI args override environment variables if provided
@@ -70,10 +72,11 @@ def main():
     if args.embedding_dim:
         settings.embedding_dim = args.embedding_dim
 
-    # Removed global safe startup migration to prevent blocking MCP server startup.
-    # Individual databases are migrated lazily in CodeSearchIndex.__init__().
-
     # Start the background file watcher on the current workspace root
+    if settings.transport == "stdio":
+        import sys
+        sys.stdout = sys.stderr
+
     try:
         from src.mcp_server.middleware.file_watcher import init_file_watcher
         watcher = init_file_watcher(settings.workspace_root)
@@ -81,6 +84,16 @@ def main():
     except Exception as e:
         logger.warning(f"Failed to start file watcher: {e}")
 
+    if not args.legacy:
+        from src.mcp_server.highlevel_core import server as fast_mcp_server
+        kwargs = {}
+        if settings.transport in ("sse", "streamable-http"):
+            if settings.host: kwargs["host"] = settings.host
+            if settings.port: kwargs["port"] = settings.port
+        fast_mcp_server.run(transport=settings.transport, **kwargs)
+        return
+
+    from src.mcp_server.core import server as mcp_server
     if settings.transport == "stdio":
         from src.transports.stdio_adapter import run_stdio
         asyncio.run(run_stdio(mcp_server))
