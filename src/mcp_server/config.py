@@ -35,9 +35,13 @@ class Config:
             self.index_dir = Path("~/.pecorino/indexes").expanduser()
 
         self.enable_embeddings = os.getenv("PECORINO_ENABLE_EMBEDDINGS", "true").lower() in ("true", "1", "yes")
-        # Default to the lightweight MiniLM model (384 dimensions) instead of the heavy Nomic v1.5 (768 dimensions)
         self.embedding_model = os.getenv("PECORINO_EMBEDDING_MODEL", "Xenova/all-MiniLM-L6-v2")
-        self.embedding_dim = int(os.getenv("PECORINO_EMBEDDING_DIM", "384"))
+        default_dim = "384"
+        if "nomic" in self.embedding_model.lower():
+            default_dim = "768"
+        elif "bge-large" in self.embedding_model.lower():
+            default_dim = "1024"
+        self.embedding_dim = int(os.getenv("PECORINO_EMBEDDING_DIM", default_dim))
         self.enable_lsp = os.getenv("PECORINO_ENABLE_LSP", "true").lower() in ("true", "1", "yes")
 
         # Allowed external roots (allowlist model for allow_external=True)

@@ -31,5 +31,5 @@ def test_federated_graph_creation(mock_kuzu_repo):
     
     # Check that we can run a simple query on the in-memory graph
     with api.graph:
-        res = api.graph._conn.execute("MATCH (a:File) RETURN count(a)").get_all()
+        res = api.graph.query("MATCH (a:File) RETURN count(a)")
         assert len(res) == 1

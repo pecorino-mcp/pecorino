@@ -27,11 +27,29 @@ class EmbeddingPipeline:
             return
 
         try:
-            # We must set matmul_nbits to avoid parsing issues if the ONNX model is quantized
             # Nomic v1.5 text embedding model. The onnx version is usually in the "onnx" subfolder
             logger.info("Downloading/loading ONNX embedding model...")
-            model_path = hf_hub_download(repo_id=self.model_id, filename="onnx/model.onnx")
-            tokenizer_path = hf_hub_download(repo_id=self.model_id, filename="tokenizer.json")
+            filename = "onnx/model.onnx"
+            if "nomic" in self.model_id.lower():
+                filename = "onnx/model_quantized.onnx"
+            
+            # Use HF token from environment if configured
+            hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+            
+            try:
+                model_path = hf_hub_download(repo_id=self.model_id, filename=filename, token=hf_token)
+                tokenizer_path = hf_hub_download(repo_id=self.model_id, filename="tokenizer.json", token=hf_token)
+            except Exception as download_err:
+                err_msg = str(download_err)
+                if "401" in err_msg or "403" in err_msg or "gated" in err_msg.lower() or "unauthorized" in err_msg.lower():
+                    logger.error(
+                        f"Hugging Face authentication/authorization failure for model '{self.model_id}'. "
+                        "Please verify your HF_TOKEN / HUGGING_FACE_HUB_TOKEN env var is set and has access. "
+                        f"Details: {download_err}"
+                    )
+                else:
+                    logger.error(f"Failed to download model files from HF Hub: {download_err}")
+                return
             
             self.tokenizer = Tokenizer.from_file(tokenizer_path)
             # Enable truncation to avoid massive memory spikes
