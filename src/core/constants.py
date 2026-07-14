@@ -38,6 +38,9 @@ ALLOWED_EXTENSIONS: Set[str] = {
     # Rust
     '.rs',
 
+    # Markdown (used for Architecture Decision Records)
+    '.md',
+
     # Python
     '.py', '.pyi', '.pyx', '.pxd',
 

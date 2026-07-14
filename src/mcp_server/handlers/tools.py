@@ -17,6 +17,9 @@ from src.mcp_server.tools.browse import do_browse
 from src.mcp_server.tools.metrics_tool import do_metrics
 from src.mcp_server.tools.search import do_search
 from src.mcp_server.tools.update_index import do_update_index
+from src.mcp_server.tools.detect_changes import do_detect_changes
+from src.mcp_server.tools.manage_adr import do_manage_adr
+from src.mcp_server.tools.snapshot import do_manage_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +210,102 @@ async def handle_list_tools(
                 "required": ["path"]
             }
         ),
+        types.Tool(
+            name="detect_changes",
+            description="Detect changed symbols and their impact using git diff and the AST index. Use this to understand the blast radius of uncommitted changes.",
+            annotations=types.ToolAnnotations(
+                title="Detect Changes",
+                **{k: v for k, v in _READ_ONLY.model_dump(exclude_none=True).items() if k != "title"},
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute path to the workspace root or target directory."
+                    },
+                    "diff_target": {
+                        "type": "string",
+                        "default": "HEAD",
+                        "description": "The git diff target (e.g., 'HEAD', 'main', or a commit hash)."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": True
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="manage_adr",
+            description="Manage Architecture Decision Records (ADRs). Use this to create, read, update, or list ADRs for a repository.",
+            annotations=types.ToolAnnotations(
+                title="Manage ADR",
+                **{k: v for k, v in _MUTATING.model_dump(exclude_none=True).items() if k != "title"},
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "create", "read", "update", "delete"],
+                        "description": "The CRUD action to perform."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute path to the workspace root or target directory."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Title of the ADR (required for create)."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Context and content of the ADR (used in create/update)."
+                    },
+                    "adr_id": {
+                        "type": "string",
+                        "description": "Filename or ID of the ADR (required for read/update/delete)."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": True
+                    }
+                },
+                "required": ["action"]
+            }
+        ),
+        types.Tool(
+            name="manage_snapshot",
+            description="Export or import a .zst graph snapshot for the current repository. Useful for team sharing.",
+            annotations=types.ToolAnnotations(
+                title="Manage Snapshot",
+                **{k: v for k, v in _MUTATING.model_dump(exclude_none=True).items() if k != "title"},
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["export", "import"],
+                        "description": "The action to perform."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Absolute path to the workspace root or target directory."
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Absolute path to the .tar.zst snapshot file."
+                    },
+                    "allow_external": {
+                        "type": "boolean",
+                        "default": True
+                    }
+                },
+                "required": ["action"]
+            }
+        ),
     ]
 
     if role == "admin":
@@ -347,6 +446,37 @@ async def handle_call_tool(
                 max_depth=arguments.get("max_depth", 3),
                 intent=arguments.get("intent"),
                 query_json=arguments.get("query_json"),
+                allow_external=arguments.get("allow_external", True),
+                ctx=ctx
+            )
+        elif name == "detect_changes":
+            target = await _detect_directory(_normalize_target(arguments.get("target")))
+            check_suspicious(target, "target")
+            res = await do_detect_changes(
+                target=target,
+                diff_target=arguments.get("diff_target", "HEAD"),
+                allow_external=arguments.get("allow_external", True),
+                ctx=ctx
+            )
+        elif name == "manage_adr":
+            target = await _detect_directory(_normalize_target(arguments.get("target")))
+            check_suspicious(target, "target")
+            res = await do_manage_adr(
+                action=arguments.get("action"),
+                target=target,
+                title=arguments.get("title"),
+                content=arguments.get("content"),
+                adr_id=arguments.get("adr_id"),
+                allow_external=arguments.get("allow_external", True),
+                ctx=ctx
+            )
+        elif name == "manage_snapshot":
+            target = await _detect_directory(_normalize_target(arguments.get("target")))
+            check_suspicious(target, "target")
+            res = await do_manage_snapshot(
+                action=arguments.get("action"),
+                target=target,
+                output_path=arguments.get("output_path"),
                 allow_external=arguments.get("allow_external", True),
                 ctx=ctx
             )
