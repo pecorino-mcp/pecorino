@@ -73,10 +73,6 @@ def main():
         settings.embedding_dim = args.embedding_dim
 
     # Start the background file watcher on the current workspace root
-    if settings.transport == "stdio":
-        import sys
-        sys.stdout = sys.stderr
-
     try:
         from src.mcp_server.middleware.file_watcher import init_file_watcher
         watcher = init_file_watcher(settings.workspace_root)
