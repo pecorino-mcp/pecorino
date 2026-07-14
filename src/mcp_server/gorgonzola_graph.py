@@ -27,6 +27,27 @@ _RELATIONSHIP_SCHEMA = [
     "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE FILE_CHANGES_WITH (FROM CodeNode TO CodeNode, weight DOUBLE)",
+    
+    # Advanced / codebase-memory-mcp compat schemas
+    "CREATE REL TABLE CONTAINS_PACKAGE (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE CONTAINS_FOLDER (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE CONTAINS_FILE (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE DEFINES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE DEFINES_METHOD (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE MEMBER_OF (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE ASYNC_CALLS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE IMPORTS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE USES_TYPE (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE USAGE (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE DATA_FLOWS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE WRITES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE CONFIGURES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE HANDLES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE EMITS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE LISTENS_ON (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE SIMILAR_TO (FROM CodeNode TO CodeNode, score DOUBLE)",
+    "CREATE REL TABLE SEMANTICALLY_RELATED (FROM CodeNode TO CodeNode, score DOUBLE)",
+
 ]
 
 def init_gorgonzola_schema(conn):
