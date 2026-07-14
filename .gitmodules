@@ -21,9 +21,6 @@
 	url = https://github.com/pecorino-mcp/pecorino-utils.git
 	ignore = dirty
 [submodule "modules/web-client"]
-	path = web-client
+	path = modules/web-client
 	url = https://github.com/gorgonzola-graph-db/gorgonzola-web-client.git
 	ignore = dirty
-[submodule "web-client"]
-	path = web-client
-	url = https://github.com/gorgonzola-graph-db/gorgonzola-web-client.git
