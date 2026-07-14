@@ -4,7 +4,10 @@ import logging
 import os
 import pathlib
 import shutil
+import tempfile
 import sys
+
+from src.mcp_server.naming_analyzer import analyze_name
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -667,7 +670,12 @@ class CodebaseIndexer:
         if nodes_to_index:
             self.search_index.index_nodes(nodes_to_index)
 
-        graph_nodes = list(graph_nodes_dict.values())
+        graph_nodes = []
+        for nid, props, lbl in graph_nodes_dict.values():
+            if "name" in props:
+                analysis = analyze_name(props["name"])
+                props.update(analysis)
+            graph_nodes.append((nid, props, lbl))
         if graph_nodes:
             try:
                 id_map = self.graph.insert_nodes_bulk(graph_nodes)
@@ -1345,7 +1353,12 @@ class CodebaseIndexer:
                     if all_graph_nodes:
                         if progress_callback:
                             progress_callback(total_files, total_files, "Inserting graph nodes into RAM Gorgonzola...")
-                        nodes_list = [(nid, props, lbl) for nid, (props, lbl) in all_graph_nodes.items()]
+                        nodes_list = []
+                        for nid, (props, lbl) in all_graph_nodes.items():
+                            if "name" in props:
+                                analysis = analyze_name(props["name"])
+                                props.update(analysis)
+                            nodes_list.append((nid, props, lbl))
                         id_map = ram_graph.insert_nodes_bulk(nodes_list)
 
                         # Resolve LSP definitions into concrete CALLS edges
