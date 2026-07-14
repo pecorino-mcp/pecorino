@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 from src.core.errors import AnalysisError
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
-from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo, get_graph_path_for_repo
 
 
 class GraphAPI:
@@ -15,7 +15,7 @@ class GraphAPI:
             self.graph = graph
             self._owns_graph = False
         else:
-            self.graph = GorgonzolaGraph(db_path=self.db_path)
+            self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
             self._owns_graph = True
         self._pagerank_cache = None
         self._pagerank_lock = threading.Lock()
@@ -178,24 +178,41 @@ class GraphAPI:
             callees = []
             for depth in range(1, max_depth + 1):
                 try:
-                    q = (
-                        f"MATCH (start)-[:CALLS*{depth}..{depth}]->(target) "
-                        f"WHERE {where} "
-                        f"RETURN target.name AS name, target.id AS id, "
-                        f"labels(target) AS label"
-                    )
+                    if depth == 1:
+                        q = (
+                            f"MATCH (start)-[e:CALLS|LIKELY_CALLS|DATA_FLOWS_TO]->(target) "
+                            f"WHERE {where} "
+                            f"RETURN target.name AS name, target.id AS id, "
+                            f"labels(target) AS label, e"
+                        )
+                    else:
+                        q = (
+                            f"MATCH (start)-[:CALLS|LIKELY_CALLS|DATA_FLOWS_TO*{depth - 1}..{depth - 1}]->(mid)-[e:CALLS|LIKELY_CALLS|DATA_FLOWS_TO]->(target) "
+                            f"WHERE {where} "
+                            f"RETURN target.name AS name, target.id AS id, "
+                            f"labels(target) AS label, e"
+                        )
                     rows = self.graph.query(q, {"target": symbol})
                     for row in rows:
+                        edge_info = row.get("e", {})
+                        if isinstance(edge_info, dict):
+                            edge_type = edge_info.get("_label", "CALLS")
+                            confidence = edge_info.get("confidence")
+                        else:
+                            edge_type = "CALLS"
+                            confidence = None
+                            
                         callees.append({
                             "name": row.get("name", ""),
                             "id": row.get("id", ""),
                             "label": row.get("label", ""),
                             "hop": depth,
+                            "edge_type": edge_type,
+                            "confidence": confidence
                         })
                 except Exception as e:
-                    # Variable-length paths may fail for certain depth combos
                     import logging
-                    logging.getLogger(__name__).debug("trace_calls depth=%d failed: %s", depth, e)
+                    logging.getLogger(__name__).debug("trace_calls outbound depth=%d failed: %s", depth, e)
                     break
             result["callees"] = callees
 
@@ -203,21 +220,41 @@ class GraphAPI:
             callers = []
             for depth in range(1, max_depth + 1):
                 try:
-                    q = (
-                        f"MATCH (source)-[:CALLS*{depth}..{depth}]->(target) "
-                        f"WHERE {self._name_match_clause('target')} "
-                        f"RETURN source.name AS name, source.id AS id, "
-                        f"labels(source) AS label"
-                    )
+                    if depth == 1:
+                        q = (
+                            f"MATCH (source)-[e:CALLS|LIKELY_CALLS|DATA_FLOWS_TO]->(target) "
+                            f"WHERE {self._name_match_clause('target')} "
+                            f"RETURN source.name AS name, source.id AS id, "
+                            f"labels(source) AS label, e"
+                        )
+                    else:
+                        q = (
+                            f"MATCH (source)-[e:CALLS|LIKELY_CALLS|DATA_FLOWS_TO]->(mid)-[:CALLS|LIKELY_CALLS|DATA_FLOWS_TO*{depth - 1}..{depth - 1}]->(target) "
+                            f"WHERE {self._name_match_clause('target')} "
+                            f"RETURN source.name AS name, source.id AS id, "
+                            f"labels(source) AS label, e"
+                        )
                     rows = self.graph.query(q, {"target": symbol})
                     for row in rows:
+                        edge_info = row.get("e", {})
+                        if isinstance(edge_info, dict):
+                            edge_type = edge_info.get("_label", "CALLS")
+                            confidence = edge_info.get("confidence")
+                        else:
+                            edge_type = "CALLS"
+                            confidence = None
+                            
                         callers.append({
                             "name": row.get("name", ""),
                             "id": row.get("id", ""),
                             "label": row.get("label", ""),
                             "hop": depth,
+                            "edge_type": edge_type,
+                            "confidence": confidence
                         })
-                except Exception:
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).debug("trace_calls inbound depth=%d failed: %s", depth, e)
                     break
             result["callers"] = callers
 
@@ -281,8 +318,45 @@ class GraphAPI:
             DELETE r
             '''
         ]
-
         self.graph.query_batch(queries)
+
+        # 2. Semantic Fallback for unresolved symbols
+        unresolved_q = '''
+        MATCH (caller)-[r:CALLS]->(s:CodeNode {node_type: 'Symbol'})
+        RETURN caller.id AS caller_id, s.name AS symbol_name, s.id AS symbol_id
+        LIMIT 100
+        '''
+        unresolved = self.graph.query(unresolved_q)
+        if unresolved:
+            from src.mcp_server.index_db import CodeSearchIndex
+            # Need to avoid blocking the graph during FTS query, so we do it carefully
+            index = CodeSearchIndex(db_path=self.db_path, read_only=True)
+            try:
+                for row in unresolved:
+                    symbol_name = row.get("symbol_name")
+                    caller_id = row.get("caller_id")
+                    if not symbol_name or not caller_id:
+                        continue
+                    
+                    # Find semantically closest node
+                    res = index.search(symbol_name, limit=1, mode="hybrid")
+                    if res:
+                        best_match = res[0]
+                        target_id = best_match.get("id")
+                        score = best_match.get("score", 0.0)
+                        
+                        # Only link if the match is decent and not self
+                        if target_id and target_id != caller_id and score > 0.3:
+                            q = '''
+                            MATCH (caller {id: $caller_id}), (target {id: $target_id})
+                            MERGE (caller)-[:LIKELY_CALLS {confidence: $score}]->(target)
+                            '''
+                            self.graph.query(q, {"caller_id": caller_id, "target_id": target_id, "score": score})
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Semantic fallback resolution failed: {e}")
+            finally:
+                index.close()
 
     def analyze_functional_purity(self) -> Dict[str, Any]:
         """Aggregate functional purity metrics: Lambda density, State mutations, Recursive loops."""

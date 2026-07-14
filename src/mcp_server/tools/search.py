@@ -213,7 +213,16 @@ async def _do_fts(
                 n['body_text'] = _cap_body(n.get('body_text', ''))
         else:
             for n in nodes:
-                n.pop('body_text', None)
+                body = n.pop('body_text', "")
+                if body and query:
+                    lines = body.split('\n')
+                    q_lower = query.lower()
+                    for i, line in enumerate(lines):
+                        if q_lower in line.lower():
+                            start_idx = max(0, i - 1)
+                            end_idx = min(len(lines), i + 2)
+                            n["matched_snippet"] = "\n".join(lines[start_idx:end_idx]).strip()
+                            break
         result = {"query": query, "results": nodes, "search_status": "ok"}
         if auto_expanded:
             result["auto_expanded"] = True
@@ -269,7 +278,19 @@ async def _do_fts(
             r['body_text'] = _cap_body(r.get('body_text', ''))
     elif not output_file:
         for r in results:
-            r.pop("body_text", None)
+            body = r.pop("body_text", "")
+            if body and query:
+                # Find the first line containing the query (case-insensitive)
+                lines = body.split('\n')
+                q_lower = query.lower()
+                for i, line in enumerate(lines):
+                    if q_lower in line.lower():
+                        # Grab +/- 1 line around the match
+                        start_idx = max(0, i - 1)
+                        end_idx = min(len(lines), i + 2)
+                        snippet_lines = lines[start_idx:end_idx]
+                        r["matched_snippet"] = "\n".join(snippet_lines).strip()
+                        break
 
     result = {"query": query, "results": results, "search_status": "ok"}
     if auto_expanded:
@@ -803,4 +824,23 @@ async def _do_trace(
     api = _get_cached_api(repo_root, db_path, "graph")
 
     result = await asyncio.to_thread(api.trace_calls, query, "both", max_depth)
+    
+    callers = result.get("callers", [])
+    callees = result.get("callees", [])
+    
+    summary_parts = []
+    if callees:
+        fuzzy = sum(1 for c in callees if c.get("edge_type") == "LIKELY_CALLS")
+        data = sum(1 for c in callees if c.get("edge_type") == "DATA_FLOWS_TO")
+        summary_parts.append(f"{len(callees)} callees ({fuzzy} fuzzy, {data} data-flow)")
+    if callers:
+        fuzzy = sum(1 for c in callers if c.get("edge_type") == "LIKELY_CALLS")
+        data = sum(1 for c in callers if c.get("edge_type") == "DATA_FLOWS_TO")
+        summary_parts.append(f"{len(callers)} callers ({fuzzy} fuzzy, {data} data-flow)")
+        
+    if summary_parts:
+        result["summary"] = " | ".join(summary_parts)
+    else:
+        result["summary"] = "No relations found."
+
     return {"status": "ok", "mode": "trace", **result}

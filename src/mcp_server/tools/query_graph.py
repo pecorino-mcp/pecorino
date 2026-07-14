@@ -36,7 +36,7 @@ async def do_query_graph(
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
 
-    from src.mcp_server.handlers.tools import _get_cached_api
+    from src.mcp_server.middleware.caching import _get_cached_api
     graph_api = _get_cached_api(repo_root, db_path, "graph")
     if not graph_api:
         return {"status": "error", "message": "Graph index not found or uninitialized. Run update_index first."}

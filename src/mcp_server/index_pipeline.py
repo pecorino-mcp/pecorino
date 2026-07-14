@@ -89,6 +89,12 @@ class CodebaseIndexer:
             var_id = make_id("Variable", class_name, attr)
             graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
             graph_edges.append((parent_id, var_id, {"is_read": flags[0], "is_mutation": flags[1], "is_taint": flags[2]}, "ACCESSES_STATE"))
+            
+            # Also emit explicit DATA_FLOWS_TO edges for Taint Analysis
+            if kind == "mutate":
+                graph_edges.append((parent_id, var_id, {}, "DATA_FLOWS_TO"))
+            else:
+                graph_edges.append((var_id, parent_id, {}, "DATA_FLOWS_TO"))
 
     def _add_state_accesses(self, node, parent_id, class_name, graph_nodes_dict, graph_edges, make_id):
         self._add_access("read", getattr(node, 'read_attributes', set()), parent_id, class_name, graph_nodes_dict, graph_edges, make_id)
