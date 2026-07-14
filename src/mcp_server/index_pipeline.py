@@ -811,10 +811,112 @@ class CodebaseIndexer:
                 
         visit(tree.root_node)
         return resolutions
+    def _compute_similarity_edges(self):
+        """Compute SIMILAR_TO (MinHash/Jaccard) and SEMANTICALLY_RELATED (Vector) edges."""
+        logger.info("Computing similarity edges (SIMILAR_TO, SEMANTICALLY_RELATED)...")
+        try:
+            # 1. SEMANTICALLY_RELATED (Vector Similarity)
+            if self.enable_embeddings and self.search_index:
+                # Use DuckDB cross join for nodes in different files with cosine distance <= 0.20 (score >= 0.80)
+                semantic_query = """
+                SELECT a.id as from_id, b.id as to_id, 1.0 - array_cosine_distance(a.embedding, b.embedding) as score
+                FROM code_nodes a, code_nodes b
+                WHERE a.id < b.id
+                  AND a.node_type IN ('Function', 'Method', 'Class')
+                  AND b.node_type IN ('Function', 'Method', 'Class')
+                  AND a.filepath != b.filepath
+                  AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+                  AND array_cosine_distance(a.embedding, b.embedding) <= 0.20
+                """
+                df_semantic = self.search_index._conn.execute(semantic_query).df()
+                if not df_semantic.empty:
+                    semantic_edges = []
+                    for _, row in df_semantic.iterrows():
+                        semantic_edges.extend([
+                            (row['from_id'], row['to_id'], float(row['score'])),
+                            (row['to_id'], row['from_id'], float(row['score']))
+                        ])
+                    if semantic_edges:
+                        # Write to temporary CSV and load into Kùzu
+                        import tempfile
+                        import csv
+                        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
+                            writer = csv.writer(f)
+                            for edge in semantic_edges:
+                                writer.writerow(edge)
+                            tmp_path = f.name
+                        
+                        try:
+                            with self.graph:
+                                self.graph._conn.execute(f"COPY SEMANTICALLY_RELATED FROM '{tmp_path}' (HEADER=false);")
+                            logger.info(f"Loaded {len(semantic_edges)} SEMANTICALLY_RELATED edges.")
+                        finally:
+                            os.remove(tmp_path)
+
+            # 2. SIMILAR_TO (MinHash/Jaccard via datasketch)
+            try:
+                from datasketch import MinHash, MinHashLSH
+                # Fetch text content for code nodes
+                text_query = "SELECT id, content FROM code_nodes WHERE node_type IN ('Function', 'Method', 'Class')"
+                df_texts = self.search_index._conn.execute(text_query).df()
+                
+                if not df_texts.empty:
+                    lsh = MinHashLSH(threshold=0.70, num_perm=128)
+                    minhashes = {}
+                    
+                    for _, row in df_texts.iterrows():
+                        nid = row['id']
+                        content = str(row['content'])
+                        # Basic 3-gram tokenization
+                        tokens = [content[i:i+3] for i in range(len(content) - 2)]
+                        m = MinHash(num_perm=128)
+                        for d in tokens:
+                            m.update(d.encode('utf8'))
+                        lsh.insert(nid, m)
+                        minhashes[nid] = m
+                    
+                    similar_edges = []
+                    seen_pairs = set()
+                    for nid, m in minhashes.items():
+                        result = lsh.query(m)
+                        for r_id in result:
+                            if nid != r_id and (r_id, nid) not in seen_pairs:
+                                jaccard = m.jaccard(minhashes[r_id])
+                                if jaccard >= 0.70:
+                                    similar_edges.extend([
+                                        (nid, r_id, float(jaccard)),
+                                        (r_id, nid, float(jaccard))
+                                    ])
+                                    seen_pairs.add((nid, r_id))
+                                    
+                    if similar_edges:
+                        import tempfile
+                        import csv
+                        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
+                            writer = csv.writer(f)
+                            for edge in similar_edges:
+                                writer.writerow(edge)
+                            tmp_path = f.name
+                            
+                        try:
+                            with self.graph:
+                                self.graph._conn.execute(f"COPY SIMILAR_TO FROM '{tmp_path}' (HEADER=false);")
+                            logger.info(f"Loaded {len(similar_edges)} SIMILAR_TO edges.")
+                        finally:
+                            os.remove(tmp_path)
+                            
+            except ImportError:
+                logger.warning("datasketch not installed. Skipping SIMILAR_TO edge generation.")
+                
+        except Exception as e:
+            logger.warning(f"Failed to compute similarity edges: {e}")
+            logger.debug(traceback.format_exc())
 
 
     def _post_process_graph(self):
         """Find recursive self-calls and resolve Symbol nodes to Method/Function for dynamic languages."""
+        self._compute_similarity_edges()
+        
         queries = [
             "MATCH (m:CodeNode {node_type: 'Method'})-[r:RECURSES_TO]->(m) DELETE r",
             "MATCH (f:CodeNode {node_type: 'Function'})-[r:RECURSES_TO]->(f) DELETE r",

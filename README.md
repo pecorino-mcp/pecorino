@@ -77,13 +77,16 @@ Unified search and analysis tool with multiple modes:
 - **`dsl`** — Custom JSON DSL query against the codebase AST and graph.
 - **`functional-analysis`** — Functional purity analysis.
 
-### 3. `update_index`
+### 3. `query_graph`
+Execute openCypher queries directly against the Kùzu knowledge graph for deep structural and similarity analysis.
+
+### 4. `update_index`
 Update the AST index for the codebase and return a structural summary. Call this once after cloning or after significant changes.
 
-### 4. `set_workspace`
+### 5. `set_workspace`
 Change the server's workspace root directory at runtime.
 
-### 5. `metrics` *(Admin only)*
+### 6. `metrics` *(Admin only)*
 Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis. Use `what: ['hotspots']` for repo-level risk triage.
 
 ---
