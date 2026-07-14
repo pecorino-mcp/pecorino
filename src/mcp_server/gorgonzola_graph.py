@@ -8,46 +8,21 @@ logger = logging.getLogger(__name__)
 
 # Column orders for each node table (matching CREATE statements, used for CSV COPY)
 _NODE_COLUMNS = {
-    "CodeNode": ["id", "name", "node_type", "filepath", "start_line", "end_line", "complexity", "extension", "content_hash", "mtime", "lang", "http_method", "path", "cf_type"]
+    "CodeNode": ["id", "kind", "name", "qualified_name", "file", "line", "end_line", "mtime", "complexity", "docstring", "embedding"],
+    "Identifier": ["id", "raw", "tokens", "case_style", "prefix", "suffix", "verb", "entity", "qualifier", "is_magic", "canonical_verb", "canonical_entity", "domain", "intent", "embedding"]
 }
 
 # Columns that should default to 0 instead of empty string when missing
-_NUMERIC_COLUMNS = {"complexity", "start_line", "end_line", "mtime"}
+_NUMERIC_COLUMNS = {"complexity", "line", "end_line", "mtime"}
 
 _RELATIONSHIP_SCHEMA = [
+    "CREATE REL TABLE HAS_IDENTIFIER (FROM CodeNode TO Identifier)",
     "CREATE REL TABLE CONTAINS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CONTAINS_LAMBDA (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE EXTENDS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE IMPLEMENTS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CALLS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE RECURSES_TO (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE DEPENDS_ON (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE ACCESSES_STATE (FROM CodeNode TO CodeNode, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
-    "CREATE REL TABLE HTTP_CALLS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE FILE_CHANGES_WITH (FROM CodeNode TO CodeNode, weight DOUBLE)",
-    
-    # Advanced / codebase-memory-mcp compat schemas
-    "CREATE REL TABLE CONTAINS_PACKAGE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CONTAINS_FOLDER (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CONTAINS_FILE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE DEFINES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE DEFINES_METHOD (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE MEMBER_OF (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE ASYNC_CALLS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE IMPORTS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE USES_TYPE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE USAGE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE DATA_FLOWS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE WRITES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CONFIGURES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE HANDLES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE EMITS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE LISTENS_ON (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE SIMILAR_TO (FROM CodeNode TO CodeNode, score DOUBLE)",
-    "CREATE REL TABLE SEMANTICALLY_RELATED (FROM CodeNode TO CodeNode, score DOUBLE)",
-
+    "CREATE REL TABLE CALLS (FROM CodeNode TO CodeNode, line INT64)",
+    "CREATE REL TABLE IMPORTS (FROM CodeNode TO CodeNode, is_external BOOLEAN, import_text STRING)",
+    "CREATE REL TABLE INHERITS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE PARAMETER_OF (FROM CodeNode TO CodeNode, position INT64)",
+    "CREATE REL TABLE RETURNS (FROM CodeNode TO CodeNode)"
 ]
 
 def init_gorgonzola_schema(conn):
@@ -64,7 +39,8 @@ def init_gorgonzola_schema(conn):
     if "CodeNode" not in existing_tables:
         queries = [
             # Create node tables
-            "CREATE NODE TABLE CodeNode (id STRING, name STRING, node_type STRING, filepath STRING, start_line INT64, end_line INT64, complexity INT64, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, http_method STRING, path STRING, cf_type STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE CodeNode (id STRING, kind STRING, name STRING, qualified_name STRING, file STRING, line INT64, end_line INT64, mtime DOUBLE, complexity INT64, docstring STRING, embedding DOUBLE[384], PRIMARY KEY (id))",
+            "CREATE NODE TABLE Identifier (id STRING, raw STRING, tokens STRING[], case_style STRING, prefix STRING, suffix STRING, verb STRING, entity STRING, qualifier STRING, is_magic BOOLEAN, canonical_verb STRING, canonical_entity STRING, domain STRING, intent STRING, embedding DOUBLE[384], PRIMARY KEY (id))",
 
             # Create relationship tables
         ] + _RELATIONSHIP_SCHEMA
@@ -82,11 +58,7 @@ class GorgonzolaGraph:
         self._schema_initialized = False
         # Normalize path
         from src.mcp_server.index_db import get_graph_path_for_repo
-
-        if db_path.endswith(".duckdb"):
-            self.gorgonzola_db_path = get_graph_path_for_repo(db_path)
-        else:
-            self.gorgonzola_db_path = db_path
+        self.gorgonzola_db_path = get_graph_path_for_repo(db_path) if db_path.endswith('.duckdb') else db_path
 
         parent_dir = os.path.dirname(self.gorgonzola_db_path)
         if parent_dir:
@@ -99,9 +71,25 @@ class GorgonzolaGraph:
         if not self._schema_initialized:
             init_gorgonzola_schema(conn)
             self._schema_initialized = True
+
+    def build_indexes(self):
+        """Build FTS and Vector indexes after a bulk load."""
+        queries = [
+            "CALL CREATE_FTS_INDEX('CodeNode', 'id', ['name', 'docstring'], stemmer='porter')",
+            "CALL CREATE_FTS_INDEX('Identifier', 'id', ['raw', 'canonical_verb', 'canonical_entity'])",
+            "CALL CREATE_VECTOR_INDEX('Identifier', 'id', 'embedding', metric='cosine')",
+            "CALL CREATE_VECTOR_INDEX('CodeNode', 'id', 'embedding', metric='cosine')"
+        ]
+        if self._conn:
+            for q in queries:
+                try:
+                    r = self._conn.execute(q)
+                    r.close()
+                except Exception as e:
+                    logger.warning(f"Failed to build index with query {q}: {e}")
         try:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            ext_path = os.path.join(base_dir, "modules/gorgonzola/extension/algo/build/libalgo.gorgonzola_extension")
+            ext_path = os.path.join(base_dir, "modules/gorgonzola/modules/extension/algo/build/libalgo.gorgonzola_extension")
             conn.execute(f"LOAD EXTENSION '{ext_path}';")
         except Exception as e:
             logger.warning(f"Failed to load Leiden extension: {e}")
@@ -140,7 +128,7 @@ class GorgonzolaGraph:
         with self._label_cache_lock:
             if node_id in self._label_cache:
                 return self._label_cache[node_id]
-        res = conn.execute("MATCH (n:CodeNode {id: $id}) RETURN n.node_type", {"id": node_id})
+        res = conn.execute("MATCH (n:CodeNode {id: $id}) RETURN n.kind", {"id": node_id})
         lbl = None
         if res.has_next():
             lbl = res.get_next()[0]
@@ -171,13 +159,13 @@ class GorgonzolaGraph:
             label = m.group(2)
             brace = m.group(3)
             if '{' in brace:
-                return f"{var_part}:CodeNode {{node_type: '{label}', "
+                return f"{var_part}:CodeNode {{kind: '{label}', "
             else:
-                return f"{var_part}:CodeNode {{node_type: '{label}'}}{brace}"
+                return f"{var_part}:CodeNode {{kind: '{label}'}}{brace}"
         query = re.sub(pattern, repl, query)
         
-        # Rewrite label(x) to x.node_type to mask the underlying CodeNode table
-        query = re.sub(r'\blabel\(([a-zA-Z0-9_]+)\)', r'\1.node_type', query)
+        # Rewrite label(x) to x.kind to mask the underlying CodeNode table
+        query = re.sub(r'\blabel\(([a-zA-Z0-9_]+)\)', r'\1.kind', query)
         return query
 
     def query(self, query: str, parameters: dict = None) -> list:
@@ -282,14 +270,16 @@ class GorgonzolaGraph:
                     return self._insert_nodes_bulk_conn(nodes, conn)
 
     def _insert_nodes_bulk_conn(self, nodes, conn) -> dict:
-        # Group nodes by label (actually all will be CodeNode)
+        # Group nodes by label
         groups = {}
         for node_id, properties, label in nodes:
-            if "type" in properties:
-                properties["cf_type"] = properties["type"]
-                del properties["type"]
-            properties["node_type"] = label
-            groups.setdefault("CodeNode", []).append((node_id, properties))
+            if label == "Identifier":
+                groups.setdefault("Identifier", []).append((node_id, properties))
+            else:
+                if "type" in properties:
+                    properties["cf_type"] = properties.get("type", "")
+                properties["kind"] = label
+                groups.setdefault("CodeNode", []).append((node_id, properties))
 
         csv_dir = self._get_csv_dir()
 
@@ -315,6 +305,7 @@ class GorgonzolaGraph:
                     res = conn.execute(f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id", {"ids": chunk})
                     while res.has_next():
                         existing_ids.add(res.get_next()[0])
+                    res.close()
                 except Exception as e:
                     logger.warning(f"Failed to check existing ids for {label}: {e}")
 
@@ -342,6 +333,9 @@ class GorgonzolaGraph:
                         val = properties[col]
                         if col in _NUMERIC_COLUMNS:
                             row.append(int(val) if col != "mtime" else float(val))
+                        elif isinstance(val, list):
+                            # Kuzu expects [a,b,c] for array in CSV
+                            row.append("[" + ",".join(str(v).replace('\n', ' ').replace('\r', '') for v in val) + "]")
                         else:
                             row.append(str(val).replace('\n', ' ').replace('\r', ''))
                     else:
@@ -384,6 +378,8 @@ class GorgonzolaGraph:
         for src_id, dst_id, props, rel_type in edges:
             src_label = "CodeNode"
             dst_label = "CodeNode"
+            if rel_type == "HAS_IDENTIFIER":
+                dst_label = "Identifier"
 
             if not src_label or not dst_label:
                 continue
@@ -449,8 +445,8 @@ class GorgonzolaGraph:
 
                     conn.execute("""
                         CALL PROJECT_GRAPH('CodeGraph', 
-                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable', 'Folder', 'TestFile', 'Route', 'EnvVar'],
-                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS']
+                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable', 'Folder', 'TestFile', 'Route', 'EnvVar', 'Type'],
+                            ['DEPENDS_ON', 'CONTAINS', 'DEFINES', 'INHERITS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS', 'IMPORTS', 'READS', 'WRITES', 'RETURNS', 'HAS_PARAMETER', 'USES']
                         );
                     """)
 

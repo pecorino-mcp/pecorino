@@ -26,7 +26,7 @@ class DSLCompiler:
         sql_params = []
 
         if select == "nodes":
-            base_query = f"SELECT id, name, node_type, filepath, start_line, end_line FROM {db_path}.code_nodes WHERE 1=1"
+            base_query = f"SELECT id, name, kind, filepath, start_line, end_line FROM {db_path}.code_nodes WHERE 1=1"
         else:
             base_query = f"SELECT filepath, lang, mtime FROM {db_path}.files WHERE 1=1"
 
@@ -34,7 +34,7 @@ class DSLCompiler:
 
         # Parse WHERE clauses
         for key, condition in where.items():
-            if select == "nodes" and key not in ("node_type", "filepath", "name", "relationships"):
+            if select == "nodes" and key not in ("kind", "filepath", "name", "relationships"):
                 continue
             if select == "files" and key not in ("filepath", "lang"):
                 continue
