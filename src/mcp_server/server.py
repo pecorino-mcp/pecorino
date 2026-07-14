@@ -43,6 +43,8 @@ def main():
     parser.add_argument("--transport", choices=["stdio", "sse", "streamable-http"], help="Transport protocol (overrides MCP_TRANSPORT env var)")
     parser.add_argument("--host", help="Host address for network transports (overrides HOST env var)")
     parser.add_argument("--port", type=int, help="Port number for network transports (overrides PORT env var)")
+    parser.add_argument("--embedding-model", help="Embedding model ID (overrides PECORINO_EMBEDDING_MODEL env var)")
+    parser.add_argument("--embedding-dim", type=int, help="Embedding dimension (overrides PECORINO_EMBEDDING_DIM env var)")
 
     args, _ = parser.parse_known_args()
 
@@ -53,6 +55,20 @@ def main():
         settings.host = args.host
     if args.port:
         settings.port = args.port
+    if args.embedding_model:
+        settings.embedding_model = args.embedding_model
+        # Automatically update default dimension if not explicitly provided
+        if not args.embedding_dim:
+            if "nomic" in args.embedding_model.lower():
+                settings.embedding_dim = 768
+            elif "bge-large" in args.embedding_model.lower():
+                settings.embedding_dim = 1024
+            elif "bge-base" in args.embedding_model.lower():
+                settings.embedding_dim = 768
+            else:
+                settings.embedding_dim = 384
+    if args.embedding_dim:
+        settings.embedding_dim = args.embedding_dim
 
     # Removed global safe startup migration to prevent blocking MCP server startup.
     # Individual databases are migrated lazily in CodeSearchIndex.__init__().

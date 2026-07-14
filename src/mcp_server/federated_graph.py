@@ -97,7 +97,8 @@ class FederatedGraphAPI(GraphAPI):
                             for table in node_tables:
                                 out_csv = os.path.join(temp_dir, f"{table}_{repo['hash']}.csv")
                                 try:
-                                    conn.execute(f"COPY (MATCH (a:{table}) RETURN a.*) TO '{out_csv}'")
+                                    q = on_disk_graph._rewrite_cypher_query(f"COPY (MATCH (a:{table}) RETURN a.*) TO '{out_csv}'")
+                                    conn.execute(q)
                                     if os.path.exists(out_csv):
                                         with open(out_csv, newline='') as infile:
                                             with open(merged_csvs[table], 'a', newline='') as outfile:
@@ -119,7 +120,8 @@ class FederatedGraphAPI(GraphAPI):
                                 for from_table, to_table in pairs:
                                     out_csv = os.path.join(temp_dir, f"{table}_{from_table}_{to_table}_{repo['hash']}.csv")
                                     try:
-                                        conn.execute(f"COPY (MATCH (a:{from_table})-[e:{table}]->(b:{to_table}) RETURN a.id, b.id, e.*) TO '{out_csv}'")
+                                        q = on_disk_graph._rewrite_cypher_query(f"COPY (MATCH (a:{from_table})-[e:{table}]->(b:{to_table}) RETURN a.id, b.id, e.*) TO '{out_csv}'")
+                                        conn.execute(q)
                                         if os.path.exists(out_csv):
                                             key = f"{table}_{from_table}_{to_table}"
                                             with open(out_csv, newline='') as infile:
