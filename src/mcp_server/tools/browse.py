@@ -223,7 +223,7 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                 "start_byte": n.get('start_byte', 0),
                 "end_byte": n.get('end_byte', 0)
             }
-            for n in nodes if n['node_type'] in type_filter
+            for n in nodes if n['kind'] in type_filter
         ]
         result["structure"] = filtered
 

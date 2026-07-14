@@ -4,7 +4,10 @@ import logging
 import os
 import pathlib
 import shutil
+import tempfile
 import sys
+
+from src.mcp_server.naming_analyzer import analyze_name
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -39,10 +42,10 @@ class CodebaseIndexer:
         self.search_index = CodeSearchIndex(db_path=db_path)
         self.graph = self.search_index._ensure_graph()
         
-        self.enable_embeddings = settings.enable_embeddings
+        self.enable_embeddings = True # Force enable for Phase 5
         if self.enable_embeddings:
-            from src.mcp_server.embedding import EmbeddingPipeline
-            self.embedder = EmbeddingPipeline()
+            from src.mcp_server.embedder import Embedder
+            self.embedder = Embedder(self.search_index._conn)
         else:
             self.embedder = None
         self.enable_lsp = settings.enable_lsp
@@ -97,7 +100,12 @@ class CodebaseIndexer:
         for attr in attrs:
             var_id = make_id("Variable", class_name, attr)
             graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
-            graph_edges.append((parent_id, var_id, {"is_read": flags[0], "is_mutation": flags[1], "is_taint": flags[2]}, "ACCESSES_STATE"))
+            if flags[0]:
+                graph_edges.append((parent_id, var_id, {}, "READS"))
+            if flags[1]:
+                graph_edges.append((parent_id, var_id, {}, "WRITES"))
+            if flags[2]:
+                graph_edges.append((parent_id, var_id, {}, "WRITES")) # Taint is also writing/mutating or we can keep it as WRITES
             
             # Also emit explicit DATA_FLOWS_TO edges for Taint Analysis
             if kind == "mutate":
@@ -322,7 +330,7 @@ class CodebaseIndexer:
                 "body_text": content,
                 "start_line": 1,
                 "end_line": len(content.splitlines()) or 1,
-                "node_type": "ADR",
+                "kind": "ADR",
                 "metrics": {}
             }]
             graph_nodes_dict = {
@@ -335,279 +343,82 @@ class CodebaseIndexer:
             }
             return {
                 "nodes_to_index": nodes_to_index,
-                "graph_nodes": graph_nodes_dict,
+                "graph_nodes": list(graph_nodes_dict.values()),
                 "graph_edges": [],
-                "dependencies": []
+                "resolved_deps": []
             }
             
-        tree = parse_with_tree_sitter(content, file_extension)
+        ENABLE_PYTHON_AST_METRICS = False
+        
+        # 1. Tree-sitter extraction
+        from src.parsers.tree_sitter_parser import get_raw_tree_sitter_tree
+        from src.mcp_server.ast.extractor import TreeSitterExtractor
+        
+        tree = get_raw_tree_sitter_tree(content, file_extension)
         if not tree:
             return None
-
-        nodes_to_index = []
-        graph_nodes_dict = {}
-        graph_edges = []
-        dependencies = set()
-
-        # Determine if file is a test file
-        is_test_file = "/tests/" in filepath or "/test_" in filepath or "test_" in os.path.basename(filepath) or "_test" in os.path.basename(filepath)
-        file_label = "TestFile" if is_test_file else "File"
-        file_id = filepath
-
-        lang_name = get_language_for_extension(file_extension)
-        graph_nodes_dict[file_id] = (file_id, {
-            "name": os.path.basename(filepath),
-            "path": filepath,
-            "extension": file_extension,
-            "lang": lang_name
-        }, file_label)
-
-        def make_id(*parts):
-            return "::".join([filepath] + [str(p) for p in parts])
-
-        def process_methods(methods, class_id, class_name):
-            for m in methods:
-                m_cc = getattr(m, 'cyclomatic_complexity', 1)
-                m_cog = getattr(m, 'cognitive_complexity', 0)
-                m_rec = getattr(m, 'is_recursive', False)
-                m_is_test = getattr(m, 'is_test', False) or is_test_file
-                
-                method_metrics = {
-                    'cyclomatic_complexity': m_cc,
-                    'cognitive_complexity': m_cog,
-                    'is_recursive': m_rec,
-                    'is_test': m_is_test,
-                    'raised_exceptions': list(getattr(m, 'raised_exceptions', []))
-                }
-                
-                m_args = getattr(m, 'args', [])
-                sig = f"{class_name}.{m.name}({', '.join(m_args)})" if m_args else f"{class_name}.{m.name}()"
-                nodes_to_index.append({
-                    'name': f"{class_name}.{m.name}",
-                    'node_type': 'method',
-                    'filepath': filepath,
-                    'start_line': m.lineno,
-                    'end_line': m.end_lineno,
-                    'start_byte': getattr(m, 'start_byte', 0),
-                    'end_byte': getattr(m, 'end_byte', 0),
-                    'metrics': method_metrics,
-                    'relationships': self._build_relationships_text(m),
-                    'complexity': m_cc,
-                    'signature': sig,
-                })
-                method_id = make_id(class_name, m.name)
-                graph_nodes_dict[method_id] = (method_id, {
-                    "name": m.name,
-                    "complexity": m_cc,
-                    "filepath": filepath,
-                    "start_line": m.lineno,
-                    "end_line": m.end_lineno,
-                }, "Method")
-                graph_edges.append((class_id, method_id, {}, "CONTAINS"))
-
-                for call in getattr(m, 'called_methods', set()):
-                    symbol_id = f"Symbol::{call}"
-                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
-                    graph_edges.append((method_id, symbol_id, {}, "CALLS"))
-
-                for exc in getattr(m, 'raised_exceptions', set()):
-                    symbol_id = f"Symbol::{exc}"
-                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": exc}, "Symbol")
-                    graph_edges.append((method_id, symbol_id, {}, "RAISES"))
-
-                self._add_state_accesses(m, method_id, class_name, graph_nodes_dict, graph_edges, make_id)
-                self._add_lambdas(m, method_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
-
-                for stmt in getattr(m, 'statements', []):
-                    self._add_statement_to_graph(stmt, method_id, filepath, class_name, graph_nodes_dict, graph_edges, make_id)
-
-        for node in walk(tree):
-            if isinstance(node, ClassDef):
-                wmc = getattr(node, 'wmc', 0)
-                metrics = {'wmc': wmc, 'cbo': getattr(node, 'cbo', 0), 'rfc': getattr(node, 'rfc', 0), 'lcom': getattr(node, 'lcom', 0)}
-                nodes_to_index.append({
-                    'name': node.name,
-                    'node_type': 'class',
-                    'filepath': filepath,
-                    'start_line': node.lineno,
-                    'end_line': node.end_lineno,
-                    'start_byte': getattr(node, 'start_byte', 0),
-                    'end_byte': getattr(node, 'end_byte', 0),
-                    'metrics': metrics,
-                    'relationships': self._build_relationships_text(node)
-                })
-
-                class_id = make_id(node.name)
-                graph_nodes_dict[class_id] = (class_id, {
-                    "name": node.name,
-                    "filepath": filepath,
-                    "start_line": node.lineno,
-                    "end_line": node.end_lineno,
-                }, "Class")
-                graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-
-                for base in getattr(node, 'bases', []):
-                    symbol_id = f"Symbol::{base}"
-                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": base}, "Symbol")
-                    graph_edges.append((class_id, symbol_id, {}, "EXTENDS"))
-
-                for interface in getattr(node, 'interfaces', []):
-                    symbol_id = f"Symbol::{interface}"
-                    graph_nodes_dict[symbol_id] = (symbol_id, {"name": interface}, "Symbol")
-                    graph_edges.append((class_id, symbol_id, {}, "IMPLEMENTS"))
-
-                process_methods(node.methods, class_id, node.name)
-
-            elif isinstance(node, InterfaceDef):
-                nodes_to_index.append({
-                    'name': node.name,
-                    'node_type': 'interface',
-                    'filepath': filepath,
-                    'start_line': node.lineno,
-                    'end_line': node.end_lineno,
-                    'start_byte': getattr(node, 'start_byte', 0),
-                    'end_byte': getattr(node, 'end_byte', 0),
-                    'metrics': {},
-                    'relationships': self._build_relationships_text(node)
-                })
-                class_id = make_id(node.name)
-                graph_nodes_dict[class_id] = (class_id, {
-                    "name": node.name,
-                    "filepath": filepath,
-                    "start_line": node.lineno,
-                    "end_line": node.end_lineno,
-                }, "Interface")
-                graph_edges.append((file_id, class_id, {}, "CONTAINS"))
-
-                process_methods(node.methods, class_id, node.name)
-
-            elif type(node).__name__ == 'ImportDef':
-                if node.module:
-                    dependencies.add(node.module)
-
-        for func in tree.functions:
-            f_cc = getattr(func, 'cyclomatic_complexity', 1)
-            f_cog = getattr(func, 'cognitive_complexity', 0)
-            f_rec = getattr(func, 'is_recursive', False)
-            f_is_test = getattr(func, 'is_test', False) or is_test_file
             
-            func_metrics = {
-                'cyclomatic_complexity': f_cc,
-                'cognitive_complexity': f_cog,
-                'is_recursive': f_rec,
-                'is_test': f_is_test,
-                'raised_exceptions': list(getattr(func, 'raised_exceptions', []))
+        def resolve_import_cb(import_text, current_file, project_root):
+            return self._resolve_dependency(import_text, current_file, file_extension)
+            
+        extractor = TreeSitterExtractor(filepath, self.repo_path, resolve_import_cb)
+        nodes_dict, edges_dict = extractor.extract(tree, content.encode('utf-8'))
+        
+        # 2. Python AST Enrichment (Optional)
+        if file_extension == '.py' and ENABLE_PYTHON_AST_METRICS:
+            from src.parsers.tree_sitter_parser import parse_with_tree_sitter
+            from src.parsers.ast import walk, ClassDef, FunctionDef
+            py_tree = parse_with_tree_sitter(content, file_extension)
+            if py_tree:
+                for node in walk(py_tree):
+                    if isinstance(node, FunctionDef) or isinstance(node, ClassDef):
+                        # match by name and line
+                        for n_id, n_props in nodes_dict.items():
+                            if n_props["name"] == node.name and n_props["line"] == getattr(node, 'lineno', 0):
+                                n_props["complexity"] = getattr(node, 'cyclomatic_complexity', 1) if isinstance(node, FunctionDef) else getattr(node, 'wmc', 0)
+                                break
+                                
+        # Map to expected output format
+        graph_nodes = []
+        for n_id, n_props in nodes_dict.items():
+            props = {
+                "name": n_props.get("name"),
+                "qualified_name": n_props.get("qualified_name"),
+                "file": n_props.get("file"),
+                "line": n_props.get("line"),
+                "end_line": n_props.get("end_line"),
+                "complexity": n_props.get("complexity")
             }
-            f_args = getattr(func, 'args', [])
-            sig = f"{func.name}({', '.join(f_args)})" if f_args else f"{func.name}()"
-            nodes_to_index.append({
-                'name': func.name,
-                'node_type': 'function',
-                'filepath': filepath,
-                'start_line': func.lineno,
-                'end_line': func.end_lineno,
-                'start_byte': getattr(func, 'start_byte', 0),
-                'end_byte': getattr(func, 'end_byte', 0),
-                'metrics': func_metrics,
-                'relationships': self._build_relationships_text(func),
-                'complexity': f_cc,
-                'signature': sig,
-            })
-            func_id = make_id(func.name)
-            graph_nodes_dict[func_id] = (func_id, {
-                "name": func.name,
-                "complexity": f_cc,
-                "filepath": filepath,
-                "start_line": func.lineno,
-                "end_line": func.end_lineno,
-            }, "Function")
-            graph_edges.append((file_id, func_id, {}, "CONTAINS"))
-
-            for call in getattr(func, 'called_methods', set()):
-                symbol_id = f"Symbol::{call}"
-                graph_nodes_dict[symbol_id] = (symbol_id, {"name": call}, "Symbol")
-                graph_edges.append((func_id, symbol_id, {}, "CALLS"))
-
-            for exc in getattr(func, 'raised_exceptions', set()):
-                symbol_id = f"Symbol::{exc}"
-                graph_nodes_dict[symbol_id] = (symbol_id, {"name": exc}, "Symbol")
-                graph_edges.append((func_id, symbol_id, {}, "RAISES"))
-
-            self._add_state_accesses(func, func_id, "Global", graph_nodes_dict, graph_edges, make_id)
-            self._add_lambdas(func, func_id, filepath, "Global", graph_nodes_dict, graph_edges, make_id)
-
-            for stmt in getattr(func, 'statements', []):
-                self._add_statement_to_graph(stmt, func_id, filepath, "Global", graph_nodes_dict, graph_edges, make_id)
-
-        # Process HTTP Routes
-        for r in getattr(tree, 'routes', []):
-            route_id = make_id("Route", r.http_method, r.path)
-            graph_nodes_dict[route_id] = (route_id, {
-                "name": r.name,
-                "http_method": r.http_method,
-                "path": r.path
-            }, "Route")
-            graph_edges.append((file_id, route_id, {}, "CONTAINS"))
-
-            nodes_to_index.append({
-                'name': r.name,
-                'node_type': 'route',
-                'filepath': filepath,
-                'start_line': r.lineno,
-                'end_line': r.end_lineno,
-                'start_byte': getattr(r, 'start_byte', 0),
-                'end_byte': getattr(r, 'end_byte', 0),
-                'metrics': {},
-                'relationships': ""
-            })
-
-            # Map CONTAINS from parent Function/Method
-            parent_id = None
-            for func in tree.functions:
-                if func.start_byte <= r.start_byte and r.end_byte <= func.end_byte:
-                    parent_id = make_id(func.name)
-                    break
-            if not parent_id:
-                for cls in tree.classes:
-                    for m in cls.methods:
-                        if m.start_byte <= r.start_byte and r.end_byte <= m.end_byte:
-                            parent_id = make_id(cls.name, m.name)
-                            break
-                    if parent_id:
-                        break
-            if parent_id:
-                graph_edges.append((parent_id, route_id, {}, "CONTAINS"))
-
-        # Process Environment Variables
-        for ev in getattr(tree, 'env_vars', []):
-            ev_id = f"EnvVar::{ev.name}"
-            graph_nodes_dict[ev_id] = (ev_id, {
-                "name": ev.name
-            }, "EnvVar")
-            graph_edges.append((file_id, ev_id, {}, "CONTAINS"))
-
-            nodes_to_index.append({
-                'name': ev.name,
-                'node_type': 'env_var',
-                'filepath': filepath,
-                'start_line': 1,
-                'end_line': 1,
-                'start_byte': 0,
-                'end_byte': 0,
-                'metrics': {},
-                'relationships': ""
-            })
-
-        resolved_deps = []
-        for dep in dependencies:
-            resolved_dep = self._resolve_dependency(dep, filepath, file_extension)
-            resolved_deps.append((dep, resolved_dep))
+            if n_props["kind"] == "File":
+                props["path"] = n_props.get("file")
+                props["lang"] = get_language_for_extension(file_extension)
+            graph_nodes.append((n_id, props, n_props["kind"]))
+            
+        graph_edges = []
+        for rel_type, rel_list in edges_dict.items():
+            for edge in rel_list:
+                src, dst, props = edge
+                graph_edges.append((src, dst, props, rel_type))
+                
+        nodes_to_index = []
+        for n_id, n_props in nodes_dict.items():
+            if n_props["kind"] in ("Function", "Method", "Class"):
+                nodes_to_index.append({
+                    "id": n_id,
+                    "name": n_props["name"],
+                    "kind": n_props["kind"].lower(),
+                    "filepath": n_props["file"],
+                    "start_line": n_props["line"],
+                    "end_line": n_props["end_line"],
+                    "metrics": {"complexity": n_props.get("complexity", 1)},
+                    "relationships": ""
+                })
 
         return {
             "nodes_to_index": nodes_to_index,
-            "graph_nodes": list(graph_nodes_dict.values()),
+            "graph_nodes": graph_nodes,
             "graph_edges": graph_edges,
-            "resolved_deps": resolved_deps
+            "resolved_deps": []
         }
 
     def index_file(self, filepath: str, content: str, file_extension: str, rebuild_fts: bool = False):
@@ -625,26 +436,57 @@ class CodebaseIndexer:
 
         self.search_index.clear_file(filepath)
 
-        nodes_to_index = records["nodes_to_index"]
-        graph_nodes_dict = {nid: (nid, props, lbl) for nid, props, lbl in records["graph_nodes"]}
-        graph_edges = records["graph_edges"]
+        nodes_to_index = records.get("nodes_to_index", [])
+        graph_nodes = records.get("graph_nodes", [])
+        graph_edges = records.get("graph_edges", [])
         file_id = filepath
-
-        for dep, resolved_dep in records["resolved_deps"]:
-            if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
-                graph_nodes_dict[resolved_dep] = (resolved_dep, {"name": os.path.basename(resolved_dep), "path": resolved_dep}, "File")
-                graph_edges.append((file_id, resolved_dep, {}, "DEPENDS_ON"))
-            else:
-                graph_nodes_dict[resolved_dep] = (resolved_dep, {"name": resolved_dep}, "Module")
-                graph_edges.append((file_id, resolved_dep, {}, "DEPENDS_ON"))
 
         if nodes_to_index:
             self.search_index.index_nodes(nodes_to_index)
 
-        graph_nodes = list(graph_nodes_dict.values())
-        if graph_nodes:
+        final_graph_nodes = []
+        identifier_nodes_dict = {}
+        for nid, props, lbl in graph_nodes:
+            if "name" in props:
+                raw_name = props["name"]
+                if lbl == "File":
+                    raw_name = Path(raw_name).stem
+                
+                ident_id = raw_name
+                if ident_id not in identifier_nodes_dict:
+                    analysis = analyze_name(raw_name, filepath)
+                    identifier_nodes_dict[ident_id] = (ident_id, {
+                        "raw": raw_name,
+                        **analysis
+                    }, "Identifier")
+                
+                graph_edges.append((nid, ident_id, {}, "HAS_IDENTIFIER"))
+            final_graph_nodes.append((nid, props, lbl))
+
+        if identifier_nodes_dict:
+            final_graph_nodes.extend(identifier_nodes_dict.values())
+
+        if self.embedder:
+            texts_to_embed = []
+            for nid, props, lbl in final_graph_nodes:
+                if lbl == "Identifier":
+                    text = f"{props.get('raw', '')} {props.get('canonical_verb', '')} {props.get('canonical_entity', '')}"
+                else:
+                    name = props.get("name", "")
+                    doc = props.get("docstring", "")
+                    # Try to get canonical verb for CodeNode using analyze_name
+                    cv = analyze_name(name, filepath).get("canonical_verb", "")
+                    text = f"{name} {doc} {filepath} {cv}"
+                texts_to_embed.append(text)
+            
+            embeddings = self.embedder.embed_texts(texts_to_embed)
+            for i, (nid, props, lbl) in enumerate(final_graph_nodes):
+                if i < len(embeddings):
+                    props["embedding"] = embeddings[i]
+
+        if final_graph_nodes:
             try:
-                id_map = self.graph.insert_nodes_bulk(graph_nodes)
+                id_map = self.graph.insert_nodes_bulk(final_graph_nodes)
                 if graph_edges:
                     self.graph.insert_edges_bulk(graph_edges, id_map)
             except Exception as e:
@@ -725,7 +567,7 @@ class CodebaseIndexer:
                 text = ""
             texts_to_embed.append(text)
             
-        embeddings = self.embedder.embed_batch(texts_to_embed)
+        embeddings = self.embedder.embed_texts(texts_to_embed)
         for i, n in enumerate(nodes_to_index):
             if i < len(embeddings):
                 n['embedding'] = embeddings[i]
@@ -837,8 +679,8 @@ class CodebaseIndexer:
                 SELECT a.id as from_id, b.id as to_id, 1.0 - array_cosine_distance(a.embedding, b.embedding) as score
                 FROM code_nodes a, code_nodes b
                 WHERE a.id < b.id
-                  AND a.node_type IN ('Function', 'Method', 'Class')
-                  AND b.node_type IN ('Function', 'Method', 'Class')
+                  AND a.kind IN ('Function', 'Method', 'Class')
+                  AND b.kind IN ('Function', 'Method', 'Class')
                   AND a.filepath != b.filepath
                   AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
                   AND array_cosine_distance(a.embedding, b.embedding) <= 0.20
@@ -872,7 +714,7 @@ class CodebaseIndexer:
             try:
                 from datasketch import MinHash, MinHashLSH
                 # Fetch text content for code nodes
-                text_query = "SELECT id, content FROM code_nodes WHERE node_type IN ('Function', 'Method', 'Class')"
+                text_query = "SELECT id, content FROM code_nodes WHERE kind IN ('Function', 'Method', 'Class')"
                 df_texts = self.search_index._conn.execute(text_query).df()
                 
                 if not df_texts.empty:
@@ -933,27 +775,27 @@ class CodebaseIndexer:
         self._compute_similarity_edges()
         
         queries = [
-            "MATCH (m:CodeNode {node_type: 'Method'})-[r:RECURSES_TO]->(m) DELETE r",
-            "MATCH (f:CodeNode {node_type: 'Function'})-[r:RECURSES_TO]->(f) DELETE r",
-            "MATCH (m:CodeNode {node_type: 'Method'})-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
-            "MATCH (f:CodeNode {node_type: 'Function'})-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
+            "MATCH (m:CodeNode {kind: 'Method'})-[r:RECURSES_TO]->(m) DELETE r",
+            "MATCH (f:CodeNode {kind: 'Function'})-[r:RECURSES_TO]->(f) DELETE r",
+            "MATCH (m:CodeNode {kind: 'Method'})-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
+            "MATCH (f:CodeNode {kind: 'Function'})-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
             # Resolve CALLS to Symbol nodes into direct CALLS to Method/Function nodes.
             # Handle dotted attribute access: 'self.rebuild_fts' → match Method named 'rebuild_fts'
             # Handle class-qualified: 'search_index.rebuild_fts' → match 'rebuild_fts'
             # Method callers → Method targets
-            "MATCH (caller:CodeNode {node_type: 'Method'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {kind: 'Method'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (m:CodeNode {kind: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
             # Method callers → Function targets
-            "MATCH (caller:CodeNode {node_type: 'Method'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {kind: 'Method'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (f:CodeNode {kind: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # Function callers → Method targets
-            "MATCH (caller:CodeNode {node_type: 'Function'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {kind: 'Function'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (m:CodeNode {kind: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
             # Function callers → Function targets
-            "MATCH (caller:CodeNode {node_type: 'Function'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {kind: 'Function'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (f:CodeNode {kind: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # ControlFlow callers → Method/Function targets
-            "MATCH (caller:CodeNode {node_type: 'ControlFlow'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
-            "MATCH (caller:CodeNode {node_type: 'ControlFlow'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {kind: 'ControlFlow'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (m:CodeNode {kind: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {kind: 'ControlFlow'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (f:CodeNode {kind: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # Lambda callers → Method/Function targets
-            "MATCH (caller:CodeNode {node_type: 'Lambda'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
-            "MATCH (caller:CodeNode {node_type: 'Lambda'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {kind: 'Lambda'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (m:CodeNode {kind: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {kind: 'Lambda'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (f:CodeNode {kind: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
         ]
         try:
             with self.graph:
@@ -963,8 +805,8 @@ class CodebaseIndexer:
             try:
                 with self.graph:
                     total_calls = self.graph.query("MATCH ()-[r:CALLS]->() RETURN count(r) AS cnt")
-                    to_symbol = self.graph.query("MATCH ()-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}) RETURN count(s) AS cnt")
-                    to_resolved = self.graph.query("MATCH ()-[:CALLS]->(t:CodeNode) WHERE t.node_type <> 'Symbol' RETURN count(t) AS cnt")
+                    to_symbol = self.graph.query("MATCH ()-[:CALLS]->(s:CodeNode {kind: 'Symbol'}) RETURN count(s) AS cnt")
+                    to_resolved = self.graph.query("MATCH ()-[:CALLS]->(t:CodeNode) WHERE t.kind <> 'Symbol' RETURN count(t) AS cnt")
                     total = total_calls[0].get('cnt', 0) if total_calls else 0
                     sym = to_symbol[0].get('cnt', 0) if to_symbol else 0
                     res = to_resolved[0].get('cnt', 0) if to_resolved else 0
@@ -993,11 +835,11 @@ class CodebaseIndexer:
             try:
                 with self.graph:
                     out_rows = self.graph.query(
-                        "MATCH (n)-[:CALLS]->(t:CodeNode) WHERE t.node_type <> 'Symbol' "
+                        "MATCH (n)-[:CALLS]->(t:CodeNode) WHERE t.kind <> 'Symbol' "
                         "RETURN n.name AS name, count(t) AS deg"
                     )
                     in_rows = self.graph.query(
-                        "MATCH (s:CodeNode)-[:CALLS]->(n) WHERE s.node_type <> 'Symbol' "
+                        "MATCH (s:CodeNode)-[:CALLS]->(n) WHERE s.kind <> 'Symbol' "
                         "RETURN n.name AS name, count(s) AS deg"
                     )
                 degree_map = {}
@@ -1194,7 +1036,7 @@ class CodebaseIndexer:
                 if progress_callback:
                     progress_callback(total_files, total_files, f"Generating vector embeddings for {len(texts_to_embed)} code symbols...")
                 try:
-                    embeddings = self.embedder.embed_batch(texts_to_embed)
+                    embeddings = self.embedder.embed_texts(texts_to_embed)
                     for i, n in enumerate(all_nodes_to_embed):
                         if i < len(embeddings):
                             n['embedding'] = embeddings[i]
@@ -1301,11 +1143,11 @@ class CodebaseIndexer:
                             dep_ext = os.path.splitext(resolved_dep)[1]
                             if resolved_dep not in all_graph_nodes:
                                 all_graph_nodes[resolved_dep] = ({"name": dep_name, "path": resolved_dep, "extension": dep_ext}, "File")
-                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "DEPENDS_ON"))
+                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "IMPORTS"))
                         else:
                             if resolved_dep not in all_graph_nodes:
                                 all_graph_nodes[resolved_dep] = ({"name": resolved_dep}, "Module")
-                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "DEPENDS_ON"))
+                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "IMPORTS"))
 
                     lang_name = get_language_for_extension(res["lang"])
                     files_metadata.append((file_str, res["content_hash"], res["mtime"], lang_name))
@@ -1319,7 +1161,15 @@ class CodebaseIndexer:
                     if all_graph_nodes:
                         if progress_callback:
                             progress_callback(total_files, total_files, "Inserting graph nodes into RAM Gorgonzola...")
-                        nodes_list = [(nid, props, lbl) for nid, (props, lbl) in all_graph_nodes.items()]
+                        nodes_list = []
+                        for nid, (props, lbl) in all_graph_nodes.items():
+                            if "name" in props:
+                                # For RAM graph, we don't have filepath easily accessible here for all nodes,
+                                # but we can try to extract it from nid which is "filepath::kind::qname::line"
+                                fp = nid.split("::")[0] if "::" in nid else ""
+                                analysis = analyze_name(props["name"], fp)
+                                props.update(analysis)
+                            nodes_list.append((nid, props, lbl))
                         id_map = ram_graph.insert_nodes_bulk(nodes_list)
 
                         # Resolve LSP definitions into concrete CALLS edges
@@ -1349,7 +1199,7 @@ class CodebaseIndexer:
                                 if not callee_id and self.search_index:
                                     try:
                                         row = self.search_index._conn.execute(
-                                            "SELECT id FROM code_nodes WHERE filepath = ? AND start_line <= ? AND end_line >= ? AND node_type IN ('method', 'function', 'class')",
+                                            "SELECT id FROM code_nodes WHERE filepath = ? AND start_line <= ? AND end_line >= ? AND kind IN ('method', 'function', 'class')",
                                             (def_filepath, def_line, def_line)
                                         ).fetchone()
                                         if row:
