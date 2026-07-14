@@ -295,6 +295,36 @@ class CodebaseIndexer:
             return dep_string
 
     def _extract_records(self, content: str, filepath: str, file_extension: str) -> dict:
+        if file_extension == ".md" and "docs/adr" in filepath.replace("\\", "/"):
+            # Simple markdown parsing for ADRs
+            first_line = content.splitlines()[0] if content else "Untitled"
+            title = first_line.lstrip('# ') if first_line.startswith('#') else "Untitled"
+            nodes_to_index = [{
+                "id": filepath,
+                "name": title,
+                "filepath": filepath,
+                "signature": "",
+                "body_text": content,
+                "start_line": 1,
+                "end_line": len(content.splitlines()) or 1,
+                "node_type": "ADR",
+                "metrics": {}
+            }]
+            graph_nodes_dict = {
+                filepath: (filepath, {
+                    "name": title,
+                    "path": filepath,
+                    "extension": ".md",
+                    "lang": "markdown"
+                }, "ADR")
+            }
+            return {
+                "nodes_to_index": nodes_to_index,
+                "graph_nodes": graph_nodes_dict,
+                "graph_edges": [],
+                "dependencies": []
+            }
+            
         tree = parse_with_tree_sitter(content, file_extension)
         if not tree:
             return None
@@ -838,7 +868,7 @@ class CodebaseIndexer:
                 communities = self.graph.compute_leiden_communities()
                 if communities:
                     partitions = [{'node_id': k, 'community_id': v} for k, v in communities.items()]
-                    self.search_index.update_communities_bulk(partitions)
+                    self.search_index.update_community_bulk(partitions)
             except Exception as e:
                 logger.warning("Failed to calculate or build Leiden communities: %s", e)
 
