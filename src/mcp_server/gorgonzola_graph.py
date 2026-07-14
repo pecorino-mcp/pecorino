@@ -162,9 +162,29 @@ class GorgonzolaGraph:
             if os.path.exists(csv_path):
                 os.remove(csv_path)
 
+    def _rewrite_cypher_query(self, query: str) -> str:
+        import re
+        target_nodes = ["Project", "Package", "Folder", "File", "Module", "Class", "Function", "Method", "Interface", "Enum", "Type", "Route", "Resource", "Symbol"]
+        pattern = r'(\([a-zA-Z0-9_]*)\s*:\s*(' + '|'.join(target_nodes) + r')\b(\s*\{?)'
+        def repl(m):
+            var_part = m.group(1)
+            label = m.group(2)
+            brace = m.group(3)
+            if '{' in brace:
+                return f"{var_part}:CodeNode {{node_type: '{label}', "
+            else:
+                return f"{var_part}:CodeNode {{node_type: '{label}'}}{brace}"
+        query = re.sub(pattern, repl, query)
+        
+        # Rewrite label(x) to x.node_type to mask the underlying CodeNode table
+        query = re.sub(r'\blabel\(([a-zA-Z0-9_]+)\)', r'\1.node_type', query)
+        return query
+
     def query(self, query: str, parameters: dict = None) -> list:
         if parameters is None:
             parameters = {}
+            
+        query = self._rewrite_cypher_query(query)
 
         if self._in_context:
             return self._query_conn(query, parameters, self._conn)
