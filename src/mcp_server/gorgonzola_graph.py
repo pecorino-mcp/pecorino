@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 # Column orders for each node table (matching CREATE statements, used for CSV COPY)
 _NODE_COLUMNS = {
-    "CodeNode": ["id", "name", "node_type", "filepath", "start_line", "end_line", "complexity", "extension", "content_hash", "mtime", "lang", "http_method", "path", "cf_type"]
+    "CodeNode": ["id", "name", "node_type", "filepath", "start_line", "end_line", "complexity", "extension", "content_hash", "mtime", "lang", "http_method", "path", "cf_type", "case_style", "prefix", "suffix", "is_magic"]
 }
 
 # Columns that should default to 0 instead of empty string when missing
@@ -69,7 +69,7 @@ def init_gorgonzola_schema(conn):
     if "CodeNode" not in existing_tables:
         queries = [
             # Create node tables
-            "CREATE NODE TABLE CodeNode (id STRING, name STRING, node_type STRING, filepath STRING, start_line INT64, end_line INT64, complexity INT64, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, http_method STRING, path STRING, cf_type STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE CodeNode (id STRING, name STRING, node_type STRING, filepath STRING, start_line INT64, end_line INT64, complexity INT64, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, http_method STRING, path STRING, cf_type STRING, case_style STRING, prefix STRING, suffix STRING, is_magic BOOLEAN, PRIMARY KEY (id))",
 
             # Create relationship tables
         ] + _RELATIONSHIP_SCHEMA
