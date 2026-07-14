@@ -4,8 +4,6 @@ Pecorino - Modular Git Repository Statistics Package
 This package provides comprehensive git repository analysis and HTML report generation.
 All functionality is organized into focused modules for better maintainability.
 """
-__path__ = __import__('pkgutil').extend_path(__path__, __name__)
-
 import sys
 from pathlib import Path
 workspace_root = Path(__file__).resolve().parent.parent
@@ -14,6 +12,8 @@ if str(utils_path) not in sys.path:
     sys.path.insert(0, str(utils_path))
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
+
+__path__ = __import__('pkgutil').extend_path(__path__, __name__)
 
 # Configuration
 # Parsers
