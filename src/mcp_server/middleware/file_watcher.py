@@ -77,10 +77,6 @@ class FileWatcherService:
         self.observer = None
         self._sync_lock = threading.Lock()
 
-        # Load .gitignore patterns (simplified version, we rely on the core exclusion logic)
-        from src.core.gitdatacollector import GitDataCollector
-        self.git_collector = GitDataCollector()
-
         from src.core.constants import SUPPORTED_EXTENSIONS
         self.supported_extensions = SUPPORTED_EXTENSIONS
 
@@ -95,10 +91,18 @@ class FileWatcherService:
             return False
 
         # Check gitignore
+        import subprocess
         rel_path = os.path.relpath(filepath, self.workspace_root)
-        # Assuming we don't want to re-parse gitignore every time, but checking it once is okay.
-        # A more robust check might use `git check-ignore` or the loaded spec.
-        return not self.git_collector.is_ignored(rel_path)
+        try:
+            res = subprocess.run(
+                ["git", "check-ignore", "-q", rel_path],
+                cwd=self.workspace_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            return res.returncode != 0
+        except Exception:
+            return True
 
     def start(self):
         """Start the file watcher in a background thread."""
