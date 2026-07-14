@@ -688,7 +688,7 @@ class CodeSearchIndex:
                     )
                     SELECT c.id, c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            COALESCE(b.bm25_score, 0) as bm25_score,
-                           ((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0)))) * (1.0 + COALESCE(c.pagerank, 0.0)) AS score
+                           (((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0)) AS score
                     FROM code_nodes c
                     LEFT JOIN bm25_scores b ON c.id = b.id
                     LEFT JOIN vector_scores v ON c.id = v.id
@@ -761,41 +761,60 @@ class CodeSearchIndex:
                 graph = self._ensure_graph()
                 if graph and results:
                     import math
-                    ids = [r['id'] for r in results]
-                    cypher_query = "MATCH ()-[r]->(n) WHERE n.id IN $ids RETURN n.id as id, count(r) AS in_degree"
-                    boost_res = graph.query(cypher_query, {"ids": ids})
-                    boost_map = {row['id']: row['in_degree'] for row in boost_res}
+                    
+                    def to_kuzu_id(r):
+                        filepath = r.get('filepath')
+                        name = r.get('name')
+                        nt = r.get('node_type', '').lower()
+                        if not filepath or not name:
+                            return r.get('id')
+                        if nt == 'method' and '.' in name:
+                            parts = name.split('.', 1)
+                            return f"{filepath}::{parts[0]}::{parts[1]}"
+                        return f"{filepath}::{name}"
+
+                    kuzu_to_result = {}
                     for r in results:
-                        in_deg = boost_map.get(r['id'], 0)
+                        kuzu_to_result[to_kuzu_id(r)] = r
+
+                    kuzu_ids = list(kuzu_to_result.keys())
+                    cypher_query = "MATCH ()-[r]->(n:CodeNode) WHERE n.id IN $ids RETURN n.id as id, count(r) AS in_degree"
+                    boost_res = graph.query(cypher_query, {"ids": kuzu_ids})
+                    boost_map = {row['id']: row['in_degree'] for row in boost_res}
+                    
+                    for k_id, r in kuzu_to_result.items():
+                        in_deg = boost_map.get(k_id, 0)
                         if 'score' in r and in_deg > 0:
                             r['score'] *= (1.0 + math.log1p(in_deg))
                     results.sort(key=lambda x: x.get('score', 0), reverse=True)
 
                     # Fetch immediate usages (callers) for top results
                     top_results = results[:5]
-                    top_ids = [r['id'] for r in top_results]
-                    if top_ids:
+                    top_kuzu_to_res = {}
+                    for r in top_results:
+                        top_kuzu_to_res[to_kuzu_id(r)] = r
+                        
+                    top_kuzu_ids = list(top_kuzu_to_res.keys())
+                    if top_kuzu_ids:
                         usage_query = """
-                            MATCH (caller)-[r]->(target) 
+                            MATCH (caller:CodeNode)-[r:CALLS]->(target:CodeNode) 
                             WHERE target.id IN $top_ids 
                             RETURN target.id as target_id, caller.id as caller_id, 
                                    caller.name as caller_name, caller.filepath as filepath, 
                                    caller.start_line as start_line 
                             LIMIT 50
                         """
-                        usage_res = graph.query(usage_query, {"top_ids": top_ids})
-                        usages_by_target = {}
+                        usage_res = graph.query(usage_query, {"top_ids": top_kuzu_ids})
                         for row in usage_res:
                             target_id = row['target_id']
-                            usages_by_target.setdefault(target_id, []).append({
-                                "caller_id": row['caller_id'],
-                                "name": row['caller_name'],
-                                "filepath": row['filepath'],
-                                "start_line": row['start_line']
-                            })
-                        for r in top_results:
-                            if usages_by_target.get(r['id']):
-                                r['usages'] = usages_by_target[r['id']]
+                            r = top_kuzu_to_res.get(target_id)
+                            if r:
+                                r.setdefault('usages', []).append({
+                                    "caller_id": row['caller_id'],
+                                    "name": row['caller_name'],
+                                    "filepath": row['filepath'],
+                                    "start_line": row['start_line']
+                                })
 
                     for r in results:
                         r.pop('id', None)  # Remove internal ID to avoid cluttering response
