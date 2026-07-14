@@ -97,7 +97,12 @@ class CodebaseIndexer:
         for attr in attrs:
             var_id = make_id("Variable", class_name, attr)
             graph_nodes_dict[var_id] = (var_id, {"name": f"{class_name}.{attr}"}, "Variable")
-            graph_edges.append((parent_id, var_id, {"is_read": flags[0], "is_mutation": flags[1], "is_taint": flags[2]}, "ACCESSES_STATE"))
+            if flags[0]:
+                graph_edges.append((parent_id, var_id, {}, "READS"))
+            if flags[1]:
+                graph_edges.append((parent_id, var_id, {}, "WRITES"))
+            if flags[2]:
+                graph_edges.append((parent_id, var_id, {}, "WRITES")) # Taint is also writing/mutating or we can keep it as WRITES
             
             # Also emit explicit DATA_FLOWS_TO edges for Taint Analysis
             if kind == "mutate":
@@ -403,7 +408,18 @@ class CodebaseIndexer:
                     "start_line": m.lineno,
                     "end_line": m.end_lineno,
                 }, "Method")
-                graph_edges.append((class_id, method_id, {}, "CONTAINS"))
+                graph_edges.append((class_id, method_id, {}, "DEFINES"))
+
+                for param in getattr(m, 'args', []):
+                    if param in ('self', 'cls'): continue
+                    var_id = f"Variable::{class_name}.{m.name}.{param}"
+                    graph_nodes_dict[var_id] = (var_id, {"name": param}, "Variable")
+                    graph_edges.append((method_id, var_id, {}, "HAS_PARAMETER"))
+                
+                if getattr(m, 'return_type', None):
+                    type_id = f"Type::{m.return_type}"
+                    graph_nodes_dict[type_id] = (type_id, {"name": m.return_type}, "Type")
+                    graph_edges.append((method_id, type_id, {}, "RETURNS"))
 
                 for call in getattr(m, 'called_methods', set()):
                     symbol_id = f"Symbol::{call}"
@@ -444,12 +460,12 @@ class CodebaseIndexer:
                     "start_line": node.lineno,
                     "end_line": node.end_lineno,
                 }, "Class")
-                graph_edges.append((file_id, class_id, {}, "CONTAINS"))
+                graph_edges.append((file_id, class_id, {}, "DEFINES"))
 
                 for base in getattr(node, 'bases', []):
                     symbol_id = f"Symbol::{base}"
                     graph_nodes_dict[symbol_id] = (symbol_id, {"name": base}, "Symbol")
-                    graph_edges.append((class_id, symbol_id, {}, "EXTENDS"))
+                    graph_edges.append((class_id, symbol_id, {}, "INHERITS"))
 
                 for interface in getattr(node, 'interfaces', []):
                     symbol_id = f"Symbol::{interface}"
@@ -477,7 +493,7 @@ class CodebaseIndexer:
                     "start_line": node.lineno,
                     "end_line": node.end_lineno,
                 }, "Interface")
-                graph_edges.append((file_id, class_id, {}, "CONTAINS"))
+                graph_edges.append((file_id, class_id, {}, "DEFINES"))
 
                 process_methods(node.methods, class_id, node.name)
 
@@ -521,7 +537,17 @@ class CodebaseIndexer:
                 "start_line": func.lineno,
                 "end_line": func.end_lineno,
             }, "Function")
-            graph_edges.append((file_id, func_id, {}, "CONTAINS"))
+            graph_edges.append((file_id, func_id, {}, "DEFINES"))
+
+            for param in getattr(func, 'args', []):
+                var_id = f"Variable::{func.name}.{param}"
+                graph_nodes_dict[var_id] = (var_id, {"name": param}, "Variable")
+                graph_edges.append((func_id, var_id, {}, "HAS_PARAMETER"))
+                
+            if getattr(func, 'return_type', None):
+                type_id = f"Type::{func.return_type}"
+                graph_nodes_dict[type_id] = (type_id, {"name": func.return_type}, "Type")
+                graph_edges.append((func_id, type_id, {}, "RETURNS"))
 
             for call in getattr(func, 'called_methods', set()):
                 symbol_id = f"Symbol::{call}"
@@ -547,7 +573,7 @@ class CodebaseIndexer:
                 "http_method": r.http_method,
                 "path": r.path
             }, "Route")
-            graph_edges.append((file_id, route_id, {}, "CONTAINS"))
+            graph_edges.append((file_id, route_id, {}, "DEFINES"))
 
             nodes_to_index.append({
                 'name': r.name,
@@ -576,7 +602,7 @@ class CodebaseIndexer:
                     if parent_id:
                         break
             if parent_id:
-                graph_edges.append((parent_id, route_id, {}, "CONTAINS"))
+                graph_edges.append((parent_id, route_id, {}, "DEFINES"))
 
         # Process Environment Variables
         for ev in getattr(tree, 'env_vars', []):
@@ -584,7 +610,7 @@ class CodebaseIndexer:
             graph_nodes_dict[ev_id] = (ev_id, {
                 "name": ev.name
             }, "EnvVar")
-            graph_edges.append((file_id, ev_id, {}, "CONTAINS"))
+            graph_edges.append((file_id, ev_id, {}, "DEFINES"))
 
             nodes_to_index.append({
                 'name': ev.name,
@@ -633,10 +659,10 @@ class CodebaseIndexer:
         for dep, resolved_dep in records["resolved_deps"]:
             if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
                 graph_nodes_dict[resolved_dep] = (resolved_dep, {"name": os.path.basename(resolved_dep), "path": resolved_dep}, "File")
-                graph_edges.append((file_id, resolved_dep, {}, "DEPENDS_ON"))
+                graph_edges.append((file_id, resolved_dep, {}, "IMPORTS"))
             else:
                 graph_nodes_dict[resolved_dep] = (resolved_dep, {"name": resolved_dep}, "Module")
-                graph_edges.append((file_id, resolved_dep, {}, "DEPENDS_ON"))
+                graph_edges.append((file_id, resolved_dep, {}, "IMPORTS"))
 
         if nodes_to_index:
             self.search_index.index_nodes(nodes_to_index)
@@ -1301,11 +1327,11 @@ class CodebaseIndexer:
                             dep_ext = os.path.splitext(resolved_dep)[1]
                             if resolved_dep not in all_graph_nodes:
                                 all_graph_nodes[resolved_dep] = ({"name": dep_name, "path": resolved_dep, "extension": dep_ext}, "File")
-                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "DEPENDS_ON"))
+                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "IMPORTS"))
                         else:
                             if resolved_dep not in all_graph_nodes:
                                 all_graph_nodes[resolved_dep] = ({"name": resolved_dep}, "Module")
-                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "DEPENDS_ON"))
+                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "IMPORTS"))
 
                     lang_name = get_language_for_extension(res["lang"])
                     files_metadata.append((file_str, res["content_hash"], res["mtime"], lang_name))
