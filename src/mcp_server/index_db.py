@@ -565,7 +565,7 @@ class CodeSearchIndex:
                 UPDATE code_nodes
                 SET community_id = temp_comm.community_id
                 FROM temp_comm
-                WHERE code_nodes.id = temp_comm.id
+                WHERE starts_with(code_nodes.id, temp_comm.id)
             ''')
             conn.execute("DROP TABLE temp_comm")
             conn.execute("COMMIT")
