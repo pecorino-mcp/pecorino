@@ -9,6 +9,15 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
+from pathlib import Path
+
+# Add modules/pecorino-utils to sys.path to resolve src.metrics
+workspace_root = Path(__file__).resolve().parent.parent.parent
+utils_path = workspace_root / "modules" / "pecorino-utils"
+if str(utils_path) not in sys.path:
+    sys.path.insert(0, str(utils_path))
+if str(workspace_root) not in sys.path:
+    sys.path.insert(0, str(workspace_root))
 
 from src.core.constants import SUPPORTED_EXTENSIONS, get_language_for_extension
 from src.mcp_server.index_db import CodeSearchIndex, find_repo_root, get_db_path_for_repo
