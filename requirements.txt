@@ -29,3 +29,5 @@ httpx2
 
 # trigger update
 filelock
+datasketch
+pandas
