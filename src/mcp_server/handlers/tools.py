@@ -150,7 +150,7 @@ async def handle_list_tools(
                     "include_source": {
                         "type": "boolean",
                         "default": False,
-                        "description": "If True, include source code in results (fts mode). Auto-enabled when ≤3 results."
+                        "description": "If true, attempts to include full source code. Use with caution on large result sets."
                     },
                     "max_depth": {
                         "type": "integer",
