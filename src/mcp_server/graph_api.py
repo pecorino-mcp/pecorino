@@ -328,9 +328,14 @@ class GraphAPI:
         '''
         unresolved = self.graph.query(unresolved_q)
         if unresolved:
+            import duckdb
             from src.mcp_server.index_db import CodeSearchIndex
             # Need to avoid blocking the graph during FTS query, so we do it carefully
-            index = CodeSearchIndex(db_path=self.db_path, read_only=True)
+            try:
+                index = CodeSearchIndex(db_path=self.db_path, read_only=True)
+            except duckdb.ConnectionException:
+                # If already opened as read-write, connect with read_only=False to match existing config
+                index = CodeSearchIndex(db_path=self.db_path, read_only=False)
             try:
                 for row in unresolved:
                     symbol_name = row.get("symbol_name")
