@@ -49,16 +49,23 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     if not is_safe_path(str(repo_root_path), allow_external):
         raise SecurityValidationError(f"Repository root blocked by security rules: {repo_root_path}")
 
-    if path.is_dir():
-        # Spawn index_pipeline.py in a subprocess using same python executable
-        python_bin = sys.executable or "python"
+    # Stop the background file watcher during indexing to prevent conflicting locks
+    from src.mcp_server.middleware.file_watcher import get_file_watcher
+    watcher = get_file_watcher()
+    if watcher:
+        watcher.stop()
 
-        proc = await asyncio.create_subprocess_exec(
-            python_bin, "-m", "src.mcp_server.index_pipeline", repo_root, str(path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(workspace_root)
-        )
+    try:
+        if path.is_dir():
+            # Spawn index_pipeline.py in a subprocess using same python executable
+            python_bin = sys.executable or "python"
+
+            proc = await asyncio.create_subprocess_exec(
+                python_bin, "-m", "src.mcp_server.index_pipeline", repo_root, str(path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(workspace_root)
+            )
 
         final_res = {}
 
@@ -147,28 +154,31 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
 
         return final_res
 
-    if path.suffix not in SUPPORTED:
-        raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
+        if path.suffix not in SUPPORTED:
+            raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
 
-    content = await asyncio.to_thread(read_limited, path)
+        content = await asyncio.to_thread(read_limited, path)
 
-    def _index_file():
-        with CodebaseIndexer(repo_path=repo_root) as indexer:
-            indexer.index_file(str(path), content, path.suffix, rebuild_fts=False)
+        def _index_file():
+            with CodebaseIndexer(repo_path=repo_root) as indexer:
+                indexer.index_file(str(path), content, path.suffix, rebuild_fts=False)
 
-    await asyncio.to_thread(_index_file)
+        await asyncio.to_thread(_index_file)
 
-    from src.mcp_server.index_db import get_db_path_for_repo, get_graph_path_for_repo
-    from src.mcp_server.registry import registry
-    duck_path = get_db_path_for_repo(repo_root)
-    graph_path = get_graph_path_for_repo(duck_path)
-    registry.register_repo(repo_root, duck_path, graph_path)
+        from src.mcp_server.index_db import get_db_path_for_repo, get_graph_path_for_repo
+        from src.mcp_server.registry import registry
+        duck_path = get_db_path_for_repo(repo_root)
+        graph_path = get_graph_path_for_repo(duck_path)
+        registry.register_repo(repo_root, duck_path, graph_path)
 
-    res = {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
-    try:
-        summary_res = await do_browse(target=path.as_posix(), view="summary")
-        res["summary"] = summary_res.get("structure", summary_res)
-    except Exception as e:
-        logger.warning("Failed to generate summary after indexing: %s", e)
-    return res
+        res = {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
+        try:
+            summary_res = await do_browse(target=path.as_posix(), view="summary")
+            res["summary"] = summary_res.get("structure", summary_res)
+        except Exception as e:
+            logger.warning("Failed to generate summary after indexing: %s", e)
+        return res
+    finally:
+        if watcher:
+            watcher.start()
 
