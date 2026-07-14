@@ -22,7 +22,12 @@ _RELATIONSHIP_SCHEMA = [
     "CREATE REL TABLE CALLS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE RECURSES_TO (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE DEPENDS_ON (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE ACCESSES_STATE (FROM CodeNode TO CodeNode, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
+    "CREATE REL TABLE READS (FROM CodeNode TO CodeNode)",
+
+    "CREATE REL TABLE INHERITS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE RETURNS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE HAS_PARAMETER (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE USES (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE HTTP_CALLS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
@@ -449,8 +454,8 @@ class GorgonzolaGraph:
 
                     conn.execute("""
                         CALL PROJECT_GRAPH('CodeGraph', 
-                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable', 'Folder', 'TestFile', 'Route', 'EnvVar'],
-                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS']
+                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable', 'Folder', 'TestFile', 'Route', 'EnvVar', 'Type'],
+                            ['DEPENDS_ON', 'CONTAINS', 'DEFINES', 'INHERITS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS', 'IMPORTS', 'READS', 'WRITES', 'RETURNS', 'HAS_PARAMETER', 'USES']
                         );
                     """)
 
