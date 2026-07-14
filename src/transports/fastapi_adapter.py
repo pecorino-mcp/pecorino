@@ -8,21 +8,32 @@ from src.mcp_server.config import settings
 from src.mcp_server.prometheus_metrics import ACTIVE_SESSIONS
 from src.transports.auth import verify_oauth_token
 
+from starlette.types import ASGIApp, Scope, Receive, Send
 
-async def oauth_middleware(request: Request, call_next):
-    try:
-        verify_oauth_token(request)
-    except HTTPException as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content={"error": "invalid_token", "error_description": e.detail},
-            headers=e.headers
-        )
-    return await call_next(request)
+class OAuthASGIMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+
+        request = Request(scope)
+        try:
+            verify_oauth_token(request)
+        except HTTPException as e:
+            response = JSONResponse(
+                status_code=e.status_code,
+                content={"error": "invalid_token", "error_description": e.detail},
+                headers=e.headers
+            )
+            return await response(scope, receive, send)
+            
+        return await self.app(scope, receive, send)
 
 def create_base_app(title: str) -> FastAPI:
     app = FastAPI(title=title)
-    app.middleware("http")(oauth_middleware)
+    app.add_middleware(OAuthASGIMiddleware)
 
     @app.get("/metrics")
     async def handle_metrics(request: Request):
