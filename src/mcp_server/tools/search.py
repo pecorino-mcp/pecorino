@@ -887,7 +887,7 @@ async def _do_snippet(
         res = conn.execute(
             """
             SELECT id, name, kind, filepath, start_line, end_line 
-            FROM nodes 
+            FROM code_nodes 
             WHERE name = ? OR id = ?
             LIMIT 10
             """,
@@ -898,7 +898,7 @@ async def _do_snippet(
             res = conn.execute(
                 """
                 SELECT id, name, kind, filepath, start_line, end_line 
-                FROM nodes 
+                FROM code_nodes 
                 WHERE name LIKE ?
                 LIMIT 10
                 """,
@@ -959,9 +959,9 @@ async def _do_explain(
         )
 
     def _fetch_explain():
-        idx = CodeSearchIndex(db_path=db_path)
+        idx = _get_cached_api(repo_root, db_path, "index")
         graph = idx._ensure_graph()
-        cypher = f"MATCH (n)-[e]->(m) WHERE n.id = '{node_id}' RETURN n.id, type(e), m.id"
+        cypher = f"MATCH (n)-[e]->(m) WHERE n.id = '{node_id}' RETURN n.id, LABEL(e), m.id"
         res = graph.query(cypher)
         return res
 
