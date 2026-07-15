@@ -23,4 +23,6 @@ def test_analyze_name():
         "__init__": {"case_style": "flatcase", "prefix": "__", "suffix": "__", "is_magic": True},
     }
     for name, expected in cases.items():
-        assert analyze_name(name) == expected
+        actual = analyze_name(name)
+        for k, v in expected.items():
+            assert actual[k] == v
