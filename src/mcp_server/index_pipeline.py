@@ -42,10 +42,10 @@ class CodebaseIndexer:
         self.search_index = CodeSearchIndex(db_path=db_path)
         self.graph = self.search_index._ensure_graph()
         
-        self.enable_embeddings = settings.enable_embeddings
+        self.enable_embeddings = True # Force enable for Phase 5
         if self.enable_embeddings:
-            from src.mcp_server.embedding import EmbeddingPipeline
-            self.embedder = EmbeddingPipeline()
+            from src.mcp_server.embedder import Embedder
+            self.embedder = Embedder(self.search_index._conn)
         else:
             self.embedder = None
         self.enable_lsp = settings.enable_lsp
@@ -330,7 +330,7 @@ class CodebaseIndexer:
                 "body_text": content,
                 "start_line": 1,
                 "end_line": len(content.splitlines()) or 1,
-                "node_type": "ADR",
+                "kind": "ADR",
                 "metrics": {}
             }]
             graph_nodes_dict = {
@@ -406,7 +406,7 @@ class CodebaseIndexer:
                 nodes_to_index.append({
                     "id": n_id,
                     "name": n_props["name"],
-                    "node_type": n_props["kind"].lower(),
+                    "kind": n_props["kind"].lower(),
                     "filepath": n_props["file"],
                     "start_line": n_props["line"],
                     "end_line": n_props["end_line"],
@@ -454,7 +454,7 @@ class CodebaseIndexer:
                 
                 ident_id = raw_name
                 if ident_id not in identifier_nodes_dict:
-                    analysis = analyze_name(raw_name)
+                    analysis = analyze_name(raw_name, filepath)
                     identifier_nodes_dict[ident_id] = (ident_id, {
                         "raw": raw_name,
                         **analysis
@@ -465,6 +465,24 @@ class CodebaseIndexer:
 
         if identifier_nodes_dict:
             final_graph_nodes.extend(identifier_nodes_dict.values())
+
+        if self.embedder:
+            texts_to_embed = []
+            for nid, props, lbl in final_graph_nodes:
+                if lbl == "Identifier":
+                    text = f"{props.get('raw', '')} {props.get('canonical_verb', '')} {props.get('canonical_entity', '')}"
+                else:
+                    name = props.get("name", "")
+                    doc = props.get("docstring", "")
+                    # Try to get canonical verb for CodeNode using analyze_name
+                    cv = analyze_name(name, filepath).get("canonical_verb", "")
+                    text = f"{name} {doc} {filepath} {cv}"
+                texts_to_embed.append(text)
+            
+            embeddings = self.embedder.embed_texts(texts_to_embed)
+            for i, (nid, props, lbl) in enumerate(final_graph_nodes):
+                if i < len(embeddings):
+                    props["embedding"] = embeddings[i]
 
         if final_graph_nodes:
             try:
@@ -549,7 +567,7 @@ class CodebaseIndexer:
                 text = ""
             texts_to_embed.append(text)
             
-        embeddings = self.embedder.embed_batch(texts_to_embed)
+        embeddings = self.embedder.embed_texts(texts_to_embed)
         for i, n in enumerate(nodes_to_index):
             if i < len(embeddings):
                 n['embedding'] = embeddings[i]
@@ -661,8 +679,8 @@ class CodebaseIndexer:
                 SELECT a.id as from_id, b.id as to_id, 1.0 - array_cosine_distance(a.embedding, b.embedding) as score
                 FROM code_nodes a, code_nodes b
                 WHERE a.id < b.id
-                  AND a.node_type IN ('Function', 'Method', 'Class')
-                  AND b.node_type IN ('Function', 'Method', 'Class')
+                  AND a.kind IN ('Function', 'Method', 'Class')
+                  AND b.kind IN ('Function', 'Method', 'Class')
                   AND a.filepath != b.filepath
                   AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
                   AND array_cosine_distance(a.embedding, b.embedding) <= 0.20
@@ -696,7 +714,7 @@ class CodebaseIndexer:
             try:
                 from datasketch import MinHash, MinHashLSH
                 # Fetch text content for code nodes
-                text_query = "SELECT id, content FROM code_nodes WHERE node_type IN ('Function', 'Method', 'Class')"
+                text_query = "SELECT id, content FROM code_nodes WHERE kind IN ('Function', 'Method', 'Class')"
                 df_texts = self.search_index._conn.execute(text_query).df()
                 
                 if not df_texts.empty:
@@ -757,27 +775,27 @@ class CodebaseIndexer:
         self._compute_similarity_edges()
         
         queries = [
-            "MATCH (m:CodeNode {node_type: 'Method'})-[r:RECURSES_TO]->(m) DELETE r",
-            "MATCH (f:CodeNode {node_type: 'Function'})-[r:RECURSES_TO]->(f) DELETE r",
-            "MATCH (m:CodeNode {node_type: 'Method'})-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
-            "MATCH (f:CodeNode {node_type: 'Function'})-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
+            "MATCH (m:CodeNode {kind: 'Method'})-[r:RECURSES_TO]->(m) DELETE r",
+            "MATCH (f:CodeNode {kind: 'Function'})-[r:RECURSES_TO]->(f) DELETE r",
+            "MATCH (m:CodeNode {kind: 'Method'})-[:CALLS]->(m) CREATE (m)-[:RECURSES_TO]->(m)",
+            "MATCH (f:CodeNode {kind: 'Function'})-[:CALLS]->(f) CREATE (f)-[:RECURSES_TO]->(f)",
             # Resolve CALLS to Symbol nodes into direct CALLS to Method/Function nodes.
             # Handle dotted attribute access: 'self.rebuild_fts' → match Method named 'rebuild_fts'
             # Handle class-qualified: 'search_index.rebuild_fts' → match 'rebuild_fts'
             # Method callers → Method targets
-            "MATCH (caller:CodeNode {node_type: 'Method'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {kind: 'Method'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (m:CodeNode {kind: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
             # Method callers → Function targets
-            "MATCH (caller:CodeNode {node_type: 'Method'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {kind: 'Method'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (f:CodeNode {kind: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # Function callers → Method targets
-            "MATCH (caller:CodeNode {node_type: 'Function'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {kind: 'Function'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (m:CodeNode {kind: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
             # Function callers → Function targets
-            "MATCH (caller:CodeNode {node_type: 'Function'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {kind: 'Function'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (f:CodeNode {kind: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # ControlFlow callers → Method/Function targets
-            "MATCH (caller:CodeNode {node_type: 'ControlFlow'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
-            "MATCH (caller:CodeNode {node_type: 'ControlFlow'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {kind: 'ControlFlow'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (m:CodeNode {kind: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {kind: 'ControlFlow'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (f:CodeNode {kind: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
             # Lambda callers → Method/Function targets
-            "MATCH (caller:CodeNode {node_type: 'Lambda'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (m:CodeNode {node_type: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
-            "MATCH (caller:CodeNode {node_type: 'Lambda'})-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}), (f:CodeNode {node_type: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
+            "MATCH (caller:CodeNode {kind: 'Lambda'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (m:CodeNode {kind: 'Method'}) WHERE s.name = m.name OR ends_with(s.name, '.' + m.name) CREATE (caller)-[:CALLS]->(m)",
+            "MATCH (caller:CodeNode {kind: 'Lambda'})-[:CALLS]->(s:CodeNode {kind: 'Symbol'}), (f:CodeNode {kind: 'Function'}) WHERE s.name = f.name OR ends_with(s.name, '.' + f.name) CREATE (caller)-[:CALLS]->(f)",
         ]
         try:
             with self.graph:
@@ -787,8 +805,8 @@ class CodebaseIndexer:
             try:
                 with self.graph:
                     total_calls = self.graph.query("MATCH ()-[r:CALLS]->() RETURN count(r) AS cnt")
-                    to_symbol = self.graph.query("MATCH ()-[:CALLS]->(s:CodeNode {node_type: 'Symbol'}) RETURN count(s) AS cnt")
-                    to_resolved = self.graph.query("MATCH ()-[:CALLS]->(t:CodeNode) WHERE t.node_type <> 'Symbol' RETURN count(t) AS cnt")
+                    to_symbol = self.graph.query("MATCH ()-[:CALLS]->(s:CodeNode {kind: 'Symbol'}) RETURN count(s) AS cnt")
+                    to_resolved = self.graph.query("MATCH ()-[:CALLS]->(t:CodeNode) WHERE t.kind <> 'Symbol' RETURN count(t) AS cnt")
                     total = total_calls[0].get('cnt', 0) if total_calls else 0
                     sym = to_symbol[0].get('cnt', 0) if to_symbol else 0
                     res = to_resolved[0].get('cnt', 0) if to_resolved else 0
@@ -817,11 +835,11 @@ class CodebaseIndexer:
             try:
                 with self.graph:
                     out_rows = self.graph.query(
-                        "MATCH (n)-[:CALLS]->(t:CodeNode) WHERE t.node_type <> 'Symbol' "
+                        "MATCH (n)-[:CALLS]->(t:CodeNode) WHERE t.kind <> 'Symbol' "
                         "RETURN n.name AS name, count(t) AS deg"
                     )
                     in_rows = self.graph.query(
-                        "MATCH (s:CodeNode)-[:CALLS]->(n) WHERE s.node_type <> 'Symbol' "
+                        "MATCH (s:CodeNode)-[:CALLS]->(n) WHERE s.kind <> 'Symbol' "
                         "RETURN n.name AS name, count(s) AS deg"
                     )
                 degree_map = {}
@@ -1018,7 +1036,7 @@ class CodebaseIndexer:
                 if progress_callback:
                     progress_callback(total_files, total_files, f"Generating vector embeddings for {len(texts_to_embed)} code symbols...")
                 try:
-                    embeddings = self.embedder.embed_batch(texts_to_embed)
+                    embeddings = self.embedder.embed_texts(texts_to_embed)
                     for i, n in enumerate(all_nodes_to_embed):
                         if i < len(embeddings):
                             n['embedding'] = embeddings[i]
@@ -1146,7 +1164,10 @@ class CodebaseIndexer:
                         nodes_list = []
                         for nid, (props, lbl) in all_graph_nodes.items():
                             if "name" in props:
-                                analysis = analyze_name(props["name"])
+                                # For RAM graph, we don't have filepath easily accessible here for all nodes,
+                                # but we can try to extract it from nid which is "filepath::kind::qname::line"
+                                fp = nid.split("::")[0] if "::" in nid else ""
+                                analysis = analyze_name(props["name"], fp)
                                 props.update(analysis)
                             nodes_list.append((nid, props, lbl))
                         id_map = ram_graph.insert_nodes_bulk(nodes_list)
@@ -1178,7 +1199,7 @@ class CodebaseIndexer:
                                 if not callee_id and self.search_index:
                                     try:
                                         row = self.search_index._conn.execute(
-                                            "SELECT id FROM code_nodes WHERE filepath = ? AND start_line <= ? AND end_line >= ? AND node_type IN ('method', 'function', 'class')",
+                                            "SELECT id FROM code_nodes WHERE filepath = ? AND start_line <= ? AND end_line >= ? AND kind IN ('method', 'function', 'class')",
                                             (def_filepath, def_line, def_line)
                                         ).fetchone()
                                         if row:

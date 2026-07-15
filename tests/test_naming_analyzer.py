@@ -26,3 +26,19 @@ def test_analyze_name():
         actual = analyze_name(name)
         for k, v in expected.items():
             assert actual[k] == v
+
+def test_canonicalize():
+    from src.mcp_server.naming_analyzer import canonicalize_verb, canonicalize_entity
+    
+    # Test retrieve
+    assert canonicalize_verb(["get", "user", "by", "id"]) == "retrieve"
+    assert canonicalize_verb(["fetch", "user", "by", "id"]) == "retrieve"
+    assert canonicalize_entity(["get", "user", "by", "id"]) == "user"
+    assert canonicalize_entity(["fetch", "user", "by", "id"]) == "user"
+    
+    # Test persist
+    assert canonicalize_verb(["save", "user"]) == "persist"
+    assert canonicalize_verb(["persist", "user"]) == "persist"
+    assert canonicalize_verb(["insert"]) == "persist"  # UserRepository.insert tokens
+    assert canonicalize_entity(["save", "user"]) == "user"
+    assert canonicalize_entity(["persist", "user"]) == "user"

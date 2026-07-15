@@ -58,7 +58,7 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         CREATE TABLE IF NOT EXISTS code_nodes (
             id VARCHAR PRIMARY KEY,
             name VARCHAR,
-            node_type VARCHAR,
+            kind VARCHAR,
             filepath VARCHAR,
             start_line INTEGER,
             end_line INTEGER
@@ -254,7 +254,7 @@ class CodeSearchIndex:
         # Let the FTS extension manage the overwrite internally
         # which avoids the catalog dependency bookkeeping bugs
         try:
-            conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'node_type', 'filepath', 'relationships', overwrite=1)")
+            conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'kind', 'filepath', 'relationships', overwrite=1)")
         except Exception as e:
             logger.warning("FTS rebuild failed: %s", e)
 
@@ -333,7 +333,7 @@ class CodeSearchIndex:
             data.append((
                 node_id,
                 n['name'],
-                n['node_type'],
+                n['kind'],
                 n['filepath'],
                 n['start_line'],
                 n['end_line'],
@@ -359,7 +359,7 @@ class CodeSearchIndex:
                     SELECT * FROM temp_code_nodes
                     ON CONFLICT(id) DO UPDATE SET
                         name=excluded.name,
-                        node_type=excluded.node_type,
+                        kind=excluded.kind,
                         filepath=excluded.filepath,
                         start_line=excluded.start_line,
                         end_line=excluded.end_line,
@@ -385,11 +385,11 @@ class CodeSearchIndex:
             graph = self._ensure_graph()
             with graph:
                 graph.query_batch([
-                    "MATCH (f:CodeNode {node_type: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {node_type: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {node_type: 'Variable'}) DETACH DELETE v",
-                    "MATCH (f:CodeNode {node_type: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {node_type: 'Lambda'}) DETACH DELETE l",
-                    "MATCH (f:CodeNode {node_type: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {node_type: 'Variable'}) DETACH DELETE v",
-                    "MATCH (f:CodeNode {node_type: 'File', id: $id})-[:CONTAINS*1..10]->(child) DETACH DELETE child",
-                    "MATCH (f:CodeNode {node_type: 'File', id: $id}) DETACH DELETE f",
+                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) DETACH DELETE v",
+                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) DETACH DELETE l",
+                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) DETACH DELETE v",
+                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(child) DETACH DELETE child",
+                    "MATCH (f:CodeNode {kind: 'File', id: $id}) DETACH DELETE f",
                 ], {"id": filepath})
         except Exception:
             pass
@@ -411,11 +411,11 @@ class CodeSearchIndex:
             try:
                 graph = self._ensure_graph()
                 graph.query_batch([
-                    "MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {node_type: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {node_type: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
-                    "MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {node_type: 'Lambda'}) WHERE f.id IN $ids DETACH DELETE l",
-                    "MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {node_type: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
-                    "MATCH (f:CodeNode {node_type: 'File'})-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
-                    "MATCH (f:CodeNode {node_type: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
+                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
+                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) WHERE f.id IN $ids DETACH DELETE l",
+                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
+                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
+                    "MATCH (f:CodeNode {kind: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
                 ], {"ids": chunk})
             except Exception:
                 pass
@@ -686,7 +686,7 @@ class CodeSearchIndex:
                         ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC
                         LIMIT 100
                     )
-                    SELECT c.id, c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                    SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            COALESCE(b.bm25_score, 0) as bm25_score,
                            (((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0)) AS score
                     FROM code_nodes c
@@ -727,7 +727,7 @@ class CodeSearchIndex:
                 # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
                 # WHERE clause for filtering and in the SELECT clause to retrieve the score.
                 res = conn.execute(f'''
-                    SELECT c.id, c.name, c.node_type, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                    SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
                     FROM code_nodes c
                     WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
@@ -741,7 +741,7 @@ class CodeSearchIndex:
                 entry = {
                     'id': row[0],
                     'name': row[1],
-                    'node_type': row[2],
+                    'kind': row[2],
                     'filepath': row[3],
                     'body_text': self._lazy_load_body(row[3], row[4], row[5], start_byte=row[6] if row[6] is not None else 0, end_byte=row[7] if row[7] is not None else 0),
                     'start_line': row[4],
@@ -765,7 +765,7 @@ class CodeSearchIndex:
                     def to_kuzu_id(r):
                         filepath = r.get('filepath')
                         name = r.get('name')
-                        nt = r.get('node_type', '').lower()
+                        nt = r.get('kind', '').lower()
                         if not filepath or not name:
                             return r.get('id')
                         if nt == 'method' and '.' in name:
@@ -837,7 +837,7 @@ class CodeSearchIndex:
         """Get all nodes for a specific file."""
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte,
+            SELECT name, kind, filepath, start_line, end_line, start_byte, end_byte,
                    pagerank, complexity, signature, in_degree, out_degree
             FROM code_nodes
             WHERE filepath = ?
@@ -847,7 +847,7 @@ class CodeSearchIndex:
         for row in res:
             results.append({
                 'name': row[0],
-                'node_type': row[1],
+                'kind': row[1],
                 'filepath': row[2],
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'start_line': row[3],
@@ -865,7 +865,7 @@ class CodeSearchIndex:
         prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte,
+            SELECT name, kind, filepath, start_line, end_line, start_byte, end_byte,
                    pagerank, complexity, signature, in_degree, out_degree
             FROM code_nodes
             WHERE filepath LIKE ?
@@ -875,7 +875,7 @@ class CodeSearchIndex:
         for row in res:
             results.append({
                 'name': row[0],
-                'node_type': row[1],
+                'kind': row[1],
                 'filepath': row[2],
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'start_line': row[3],
@@ -892,7 +892,7 @@ class CodeSearchIndex:
         """Get all nodes belonging to a specific community."""
         conn = self._conn
         res = conn.execute('''
-            SELECT name, node_type, filepath, start_line, end_line, start_byte, end_byte, pagerank
+            SELECT name, kind, filepath, start_line, end_line, start_byte, end_byte, pagerank
             FROM code_nodes
             WHERE community_id = ?
             ORDER BY pagerank DESC
@@ -902,7 +902,7 @@ class CodeSearchIndex:
         for row in res:
             results.append({
                 'name': row[0],
-                'node_type': row[1],
+                'kind': row[1],
                 'filepath': row[2],
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'metrics': {},
