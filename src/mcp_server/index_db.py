@@ -638,7 +638,7 @@ class CodeSearchIndex:
                 pass  # File deleted or inaccessible — stale removal handled elsewhere
         return stale
 
-    def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts") -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts", boost_ids: list[str] = None) -> List[Dict[str, Any]]:
         """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
         from src.core.errors import AnalysisError, IndexNotFoundError
         from src.mcp_server.config import settings
@@ -666,6 +666,13 @@ class CodeSearchIndex:
                 
                 # We need array representation for duckdb:
                 # But executemany/execute in python handles lists for array parameters natively in duckdb
+                boost_clause = ""
+                boost_params = []
+                if boost_ids:
+                    placeholders = ",".join(["?"] * len(boost_ids))
+                    boost_clause = f" + CASE WHEN c.id IN ({placeholders}) THEN 100.0 ELSE 0.0 END"
+                    boost_params = boost_ids
+
                 # Let's construct the RRF query
                 sql = f'''
                     WITH bm25_scores AS (
@@ -688,11 +695,11 @@ class CodeSearchIndex:
                     )
                     SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            COALESCE(b.bm25_score, 0) as bm25_score,
-                           (((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0)) AS score
+                           ((((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0))){boost_clause} AS score
                     FROM code_nodes c
                     LEFT JOIN bm25_scores b ON c.id = b.id
                     LEFT JOIN vector_scores v ON c.id = v.id
-                    WHERE b.id IS NOT NULL OR v.id IS NOT NULL
+                    WHERE b.id IS NOT NULL OR v.id IS NOT NULL {("OR c.id IN (" + placeholders + ")") if boost_ids else ""}
                     ORDER BY score DESC
                     LIMIT ? OFFSET ?
                 '''
@@ -712,7 +719,13 @@ class CodeSearchIndex:
                     else:
                         params.append(f"{prefix}%")
                         
-                params.extend([q_emb, limit, offset])
+                params.append(q_emb)
+                
+                if boost_params:
+                    params.extend(boost_params)
+                    params.extend(boost_params)
+                    
+                params.extend([limit, offset])
                 
                 res = conn.execute(sql, params).fetchall()
             elif mode == "semantic":
