@@ -72,11 +72,13 @@ class FederatedGraphAPI(GraphAPI):
                 # To avoid ID collisions (if any, though IDs are usually hash-based or file-based),
                 # we just append them.
                 merged_node_csv = os.path.join(temp_dir, "CodeNode_merged.csv")
+                merged_identifier_csv = os.path.join(temp_dir, "Identifier_merged.csv")
                 merged_rel_csvs = {t: os.path.join(temp_dir, f"{t}_merged.csv") for t in rel_tables}
                 
                 import csv
 
                 seen_node_ids = set()
+                seen_ident_ids = set()
                 seen_edges = {}
                 for table, pairs in rel_pairs.items():
                     for from_table, to_table in pairs:
@@ -112,6 +114,27 @@ class FederatedGraphAPI(GraphAPI):
                                                     writer.writerow(row)
                             except Exception as e:
                                 logger.warning("Failed to export nodes: %s", e)
+
+                            # Export Identifiers
+                            out_ident_csv = os.path.join(temp_dir, f"Identifier_{repo['hash']}.csv")
+                            try:
+                                cols_ident = "a.id, a.raw, a.tokens, a.case_style, a.prefix, a.suffix, a.verb, a.entity, a.qualifier, a.is_magic"
+                                q_ident = f"COPY (MATCH (a:Identifier) RETURN {cols_ident}) TO '{out_ident_csv}'"
+                                conn.execute(q_ident)
+                                if os.path.exists(out_ident_csv):
+                                    with open(out_ident_csv, newline='') as infile:
+                                        with open(merged_identifier_csv, 'a', newline='') as outfile:
+                                            reader = csv.reader(infile)
+                                            writer = csv.writer(outfile)
+                                            for row in reader:
+                                                if not row: continue
+                                                node_id = row[0]
+                                                if not node_id: continue
+                                                if node_id not in seen_ident_ids:
+                                                    seen_ident_ids.add(node_id)
+                                                    writer.writerow(row)
+                            except Exception as e:
+                                logger.warning("Failed to export Identifiers: %s", e)
 
                             # Export rels per valid pair
                             for table, pairs in rel_pairs.items():
@@ -150,11 +173,19 @@ class FederatedGraphAPI(GraphAPI):
                         except Exception as e:
                             logger.warning("Failed to import CodeNode: %s", e)
 
+                    if os.path.exists(merged_identifier_csv) and os.path.getsize(merged_identifier_csv) > 0:
+                        try:
+                            conn.execute(f"COPY Identifier FROM '{merged_identifier_csv}' (HEADER=false, ESCAPE='\"', QUOTE='\"', DELIM=',')")
+                        except Exception as e:
+                            logger.warning("Failed to import Identifier: %s", e)
+
                     for table in rel_tables:
                         merged_csv = merged_rel_csvs[table]
                         if os.path.exists(merged_csv) and os.path.getsize(merged_csv) > 0:
                             try:
-                                conn.execute(f"COPY {table} FROM '{merged_csv}' (FROM='CodeNode', TO='CodeNode', HEADER=false, ESCAPE='\"', QUOTE='\"', DELIM=',')")
+                                pairs = rel_pairs.get(table, [("CodeNode", "CodeNode")])
+                                from_table, to_table = pairs[0]
+                                conn.execute(f"COPY {table} FROM '{merged_csv}' (FROM='{from_table}', TO='{to_table}', HEADER=false, ESCAPE='\"', QUOTE='\"', DELIM=',')")
                             except Exception as e:
                                 logger.warning("Failed to import %s: %s", table, e)
 
