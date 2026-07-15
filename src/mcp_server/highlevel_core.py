@@ -63,6 +63,7 @@ def format_output(res: dict | list) -> str:
 @server.tool()
 async def browse(
     roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
+    ctx: Context,
     target: Optional[str] = None,
     view: str = "tree",
     start_line: Optional[int] = None,
@@ -77,13 +78,14 @@ async def browse(
     from src.mcp_server.tools.browse import do_browse
     res = await do_browse(
         target=resolved_target, view=view, limit=limit, offset=offset,
-        allow_external=allow_external, start_line=start_line, end_line=end_line, ctx=None
+        allow_external=allow_external, start_line=start_line, end_line=end_line, ctx=ctx.request_context
     )
     return format_output(res)
 
 @server.tool()
 async def search(
     roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
+    ctx: Context,
     query: Optional[str] = None,
     target: Optional[str] = None,
     mode: str = "hybrid",
@@ -102,7 +104,7 @@ async def search(
     res = await do_search(
         target=resolved_target, query=query, mode=mode, limit=limit, offset=offset,
         include_source=include_source, max_depth=max_depth, intent=intent,
-        query_json=query_json, allow_external=allow_external, ctx=None
+        query_json=query_json, allow_external=allow_external, ctx=ctx.request_context
     )
     return format_output(res)
 
@@ -110,6 +112,7 @@ async def search(
 async def get_code_snippet(
     symbol: str,
     roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
+    ctx: Context,
     target: Optional[str] = None,
     allow_external: bool = True
 ) -> str:
@@ -118,13 +121,14 @@ async def get_code_snippet(
     check_suspicious(resolved_target, "target")
     from src.mcp_server.tools.code_snippet import get_code_snippet as do_get_code_snippet
     res = await do_get_code_snippet(
-        target=resolved_target, symbol=symbol, allow_external=allow_external, ctx=None
+        target=resolved_target, symbol=symbol, allow_external=allow_external, ctx=ctx.request_context
     )
     return format_output(res)
 
 @server.tool()
 async def detect_changes(
     roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
+    ctx: Context,
     target: Optional[str] = None,
     diff_target: str = "HEAD",
     allow_external: bool = True
@@ -134,7 +138,7 @@ async def detect_changes(
     check_suspicious(resolved_target, "target")
     from src.mcp_server.tools.detect_changes import do_detect_changes
     res = await do_detect_changes(
-        target=resolved_target, diff_target=diff_target, allow_external=allow_external, ctx=None
+        target=resolved_target, diff_target=diff_target, allow_external=allow_external, ctx=ctx.request_context
     )
     return format_output(res)
 
@@ -142,6 +146,7 @@ async def detect_changes(
 async def query_graph(
     query: str,
     roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
+    ctx: Context,
     target: Optional[str] = None,
     max_rows: Optional[int] = None,
     allow_external: bool = True
@@ -153,13 +158,14 @@ async def query_graph(
         query = f"{query} LIMIT {max_rows}"
     from src.mcp_server.tools.query_graph import do_query_graph
     res = await do_query_graph(
-        target=resolved_target, query=query, allow_external=allow_external, ctx=None
+        target=resolved_target, query=query, allow_external=allow_external, ctx=ctx.request_context
     )
     return format_output(res)
 
 @server.tool()
 async def update_index(
     roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
+    ctx: Context,
     target: Optional[str] = None,
     allow_external: bool = True
 ) -> str:
@@ -168,7 +174,7 @@ async def update_index(
     check_suspicious(resolved_target, "target")
     from src.mcp_server.tools.update_index import do_update_index
     res = await do_update_index(
-        target=resolved_target, allow_external=allow_external, ctx=None
+        target=resolved_target, allow_external=allow_external, ctx=ctx.request_context
     )
     return format_output(res)
 
@@ -176,6 +182,7 @@ async def update_index(
 async def manage_adr(
     action: str,
     roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
+    ctx: Context,
     target: Optional[str] = None,
     title: Optional[str] = None,
     content: Optional[str] = None,
@@ -188,7 +195,7 @@ async def manage_adr(
     from src.mcp_server.tools.manage_adr import do_manage_adr
     res = await do_manage_adr(
         action=action, target=resolved_target, title=title, content=content,
-        adr_id=adr_id, allow_external=allow_external, ctx=None
+        adr_id=adr_id, allow_external=allow_external, ctx=ctx.request_context
     )
     return format_output(res)
 
@@ -196,6 +203,7 @@ async def manage_adr(
 async def manage_snapshot(
     action: str,
     roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
+    ctx: Context,
     target: Optional[str] = None,
     output_path: Optional[str] = None,
     allow_external: bool = True
@@ -206,7 +214,7 @@ async def manage_snapshot(
     from src.mcp_server.tools.snapshot import do_manage_snapshot
     res = await do_manage_snapshot(
         action=action, target=resolved_target, output_path=output_path,
-        allow_external=allow_external, ctx=None
+        allow_external=allow_external, ctx=ctx.request_context
     )
     return format_output(res)
 

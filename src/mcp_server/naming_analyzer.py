@@ -2,8 +2,8 @@ import re
 from typing import Dict, Any, List, Tuple
 
 PREFIX_DENYLIST = {"m_", "_", "__", "g_", "s_", "k_"}
-TYPE_PREFIXES = {"I", "C", "T", "E"}
-SUFFIX_DENYLIST = {"_t", "_v", "_impl"}
+TYPE_PREFIXES = {"I", "C", "T", "E", "k"}
+SUFFIX_DENYLIST = {"_t", "_v", "_impl", "_"}
 VERB_SET = {
     "get", "fetch", "load", "query", "find", "read", "retrieve",
     "set", "put", "update", "patch",
@@ -17,23 +17,18 @@ STOP_WORDS = {"by", "with", "for", "of", "and", "or", "to", "in", "on"}
 
 def strip_affixes(raw: str) -> Tuple[str, str, str, bool]:
     if not raw:
-        return "", None, None, False
+        return "", "", "", False
 
     is_magic = raw.startswith("__") and raw.endswith("__") and len(raw) > 4
     if is_magic:
         return raw[2:-2], "__", "__", True
 
     core = raw
-    prefix = None
-    suffix = None
-
-    # Handle private marker without setting prefix
-    m_leading = re.match(r'^(_+)(.*)', core)
-    if m_leading:
-        core = m_leading.group(2)
+    prefix = ""
+    suffix = ""
 
     # Prefix denylist
-    for p in PREFIX_DENYLIST:
+    for p in sorted(PREFIX_DENYLIST, key=len, reverse=True):
         if core.startswith(p):
             prefix = p
             core = core[len(p):]
@@ -45,7 +40,7 @@ def strip_affixes(raw: str) -> Tuple[str, str, str, bool]:
         core = core[1:]
 
     # Suffix denylist
-    for s in SUFFIX_DENYLIST:
+    for s in sorted(SUFFIX_DENYLIST, key=len, reverse=True):
         if core.endswith(s):
             suffix = s
             core = core[:-len(s)]
@@ -56,7 +51,13 @@ def strip_affixes(raw: str) -> Tuple[str, str, str, bool]:
 def detect_case_style(core: str) -> str:
     if not core:
         return "unknown"
+    if "." in core:
+        return "dot.case"
     if "-" in core:
+        if core.isupper():
+            return "COBOL-CASE"
+        if core.istitle() or (core[0].isupper() and any(c.isupper() for c in core[1:])):
+            return "Train-Case"
         return "kebab-case"
     if "_" in core:
         if core.isupper():
@@ -66,10 +67,10 @@ def detect_case_style(core: str) -> str:
         return "camelCase"
     if core[0].isupper() and any(c.islower() for c in core):
         return "PascalCase"
-    if core.isupper() and len(core) > 1:
-        return "SCREAMING"
+    if core.isupper():
+        return "UPPERFLATCASE"
     if core.islower():
-        return "lowercase"
+        return "flatcase"
     return "unknown"
 
 def tokenize_identifier(core: str) -> List[str]:
@@ -103,8 +104,8 @@ def analyze_name(raw: str) -> Dict[str, Any]:
         return {
             "tokens": [],
             "case_style": "unknown",
-            "prefix": None,
-            "suffix": None,
+            "prefix": "",
+            "suffix": "",
             "verb": None,
             "entity": None,
             "qualifier": None,
