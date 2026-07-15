@@ -95,69 +95,62 @@ class FederatedGraphAPI(GraphAPI):
                         with on_disk_graph:
                             conn = on_disk_graph._conn
                             # Export all nodes in one go from CodeNode table
-                            out_csv = os.path.join(temp_dir, f"CodeNode_{repo['hash']}.csv")
                             try:
-                                cols = "a.id, a.name, a.node_type, a.filepath, a.start_line, a.end_line, a.complexity, a.extension, a.content_hash, a.mtime, a.lang, a.http_method, a.path, a.cf_type"
-                                q = f"COPY (MATCH (a:CodeNode) RETURN {cols}) TO '{out_csv}'"
-                                conn.execute(q)
-                                if os.path.exists(out_csv):
-                                    with open(out_csv, newline='') as infile:
-                                        with open(merged_node_csv, 'a', newline='') as outfile:
-                                            reader = csv.reader(infile)
-                                            writer = csv.writer(outfile)
-                                            for row in reader:
-                                                if not row: continue
-                                                node_id = row[0]
-                                                if not node_id: continue
-                                                if node_id not in seen_node_ids:
-                                                    seen_node_ids.add(node_id)
-                                                    writer.writerow(row)
+                                cols = "a.id, a.kind, a.name, a.qualified_name, a.file, a.line, a.end_line, a.mtime, a.complexity"
+                                q = f"MATCH (a:CodeNode) RETURN {cols}"
+                                res = conn.execute(q)
+                                with open(merged_node_csv, 'a', newline='', encoding='utf-8') as outfile:
+                                    writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='"')
+                                    while res.has_next():
+                                        row = res.get_next()
+                                        if not row: continue
+                                        node_id = row[0]
+                                        if not node_id: continue
+                                        if node_id not in seen_node_ids:
+                                            seen_node_ids.add(node_id)
+                                            writer.writerow(row)
+                                res.close()
                             except Exception as e:
                                 logger.warning("Failed to export nodes: %s", e)
 
                             # Export Identifiers
-                            out_ident_csv = os.path.join(temp_dir, f"Identifier_{repo['hash']}.csv")
                             try:
                                 cols_ident = "a.id, a.raw, a.tokens, a.case_style, a.prefix, a.suffix, a.verb, a.entity, a.qualifier, a.is_magic"
-                                q_ident = f"COPY (MATCH (a:Identifier) RETURN {cols_ident}) TO '{out_ident_csv}'"
-                                conn.execute(q_ident)
-                                if os.path.exists(out_ident_csv):
-                                    with open(out_ident_csv, newline='') as infile:
-                                        with open(merged_identifier_csv, 'a', newline='') as outfile:
-                                            reader = csv.reader(infile)
-                                            writer = csv.writer(outfile)
-                                            for row in reader:
-                                                if not row: continue
-                                                node_id = row[0]
-                                                if not node_id: continue
-                                                if node_id not in seen_ident_ids:
-                                                    seen_ident_ids.add(node_id)
-                                                    writer.writerow(row)
+                                q_ident = f"MATCH (a:Identifier) RETURN {cols_ident}"
+                                res = conn.execute(q_ident)
+                                with open(merged_identifier_csv, 'a', newline='', encoding='utf-8') as outfile:
+                                    writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='"')
+                                    while res.has_next():
+                                        row = res.get_next()
+                                        if not row: continue
+                                        node_id = row[0]
+                                        if not node_id: continue
+                                        if node_id not in seen_ident_ids:
+                                            seen_ident_ids.add(node_id)
+                                            writer.writerow(row)
+                                res.close()
                             except Exception as e:
                                 logger.warning("Failed to export Identifiers: %s", e)
 
                             # Export rels per valid pair
                             for table, pairs in rel_pairs.items():
                                 for from_table, to_table in pairs:
-                                    out_csv = os.path.join(temp_dir, f"{table}_{from_table}_{to_table}_{repo['hash']}.csv")
                                     try:
-                                        q = on_disk_graph._rewrite_cypher_query(f"COPY (MATCH (a:{from_table})-[e:{table}]->(b:{to_table}) RETURN a.id, b.id, e.*) TO '{out_csv}'")
-                                        conn.execute(q)
-                                        if os.path.exists(out_csv):
-                                            key = f"{table}_{from_table}_{to_table}"
-                                            with open(out_csv, newline='') as infile:
-                                                with open(merged_rel_csvs[table], 'a', newline='') as outfile:
-                                                    reader = csv.reader(infile)
-                                                    writer = csv.writer(outfile)
-
-                                                    for row in reader:
-                                                        if not row: continue
-                                                        if len(row) >= 2:
-                                                            if not row[0] or not row[1]: continue
-                                                            edge_id = (row[0], row[1])
-                                                            if edge_id not in seen_edges[key]:
-                                                                seen_edges[key].add(edge_id)
-                                                                writer.writerow(row)
+                                        q = on_disk_graph._rewrite_cypher_query(f"MATCH (a:{from_table})-[e:{table}]->(b:{to_table}) RETURN a.id, b.id, e.*")
+                                        res = conn.execute(q)
+                                        key = f"{table}_{from_table}_{to_table}"
+                                        with open(merged_rel_csvs[table], 'a', newline='', encoding='utf-8') as outfile:
+                                            writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='"')
+                                            while res.has_next():
+                                                row = res.get_next()
+                                                if not row: continue
+                                                if len(row) >= 2:
+                                                    if not row[0] or not row[1]: continue
+                                                    edge_id = (row[0], row[1])
+                                                    if edge_id not in seen_edges[key]:
+                                                        seen_edges[key].add(edge_id)
+                                                        writer.writerow(row)
+                                        res.close()
                                     except Exception:
                                         pass
                     except Exception as e:
