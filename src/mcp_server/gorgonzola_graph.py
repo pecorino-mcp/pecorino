@@ -8,54 +8,21 @@ logger = logging.getLogger(__name__)
 
 # Column orders for each node table (matching CREATE statements, used for CSV COPY)
 _NODE_COLUMNS = {
-    "CodeNode": ["id", "name", "node_type", "filepath", "start_line", "end_line", "complexity", "extension", "content_hash", "mtime", "lang", "http_method", "path", "cf_type"],
+    "CodeNode": ["id", "kind", "name", "qualified_name", "file", "line", "end_line", "mtime", "complexity"],
     "Identifier": ["id", "raw", "tokens", "case_style", "prefix", "suffix", "verb", "entity", "qualifier", "is_magic"]
 }
 
 # Columns that should default to 0 instead of empty string when missing
-_NUMERIC_COLUMNS = {"complexity", "start_line", "end_line", "mtime"}
+_NUMERIC_COLUMNS = {"complexity", "line", "end_line", "mtime"}
 
 _RELATIONSHIP_SCHEMA = [
-    "CREATE REL TABLE CONTAINS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CONTAINS_LAMBDA (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE EXTENDS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE IMPLEMENTS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CALLS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE RECURSES_TO (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE DEPENDS_ON (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE READS (FROM CodeNode TO CodeNode)",
-
-    "CREATE REL TABLE INHERITS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE RETURNS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE HAS_PARAMETER (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE USES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE HTTP_CALLS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE FILE_CHANGES_WITH (FROM CodeNode TO CodeNode, weight DOUBLE)",
-    
     "CREATE REL TABLE HAS_IDENTIFIER (FROM CodeNode TO Identifier)",
-    
-    # Advanced / codebase-memory-mcp compat schemas
-    "CREATE REL TABLE CONTAINS_PACKAGE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CONTAINS_FOLDER (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CONTAINS_FILE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE DEFINES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE DEFINES_METHOD (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE MEMBER_OF (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE ASYNC_CALLS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE IMPORTS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE USES_TYPE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE USAGE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE DATA_FLOWS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE WRITES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE CONFIGURES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE HANDLES (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE EMITS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE LISTENS_ON (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE SIMILAR_TO (FROM CodeNode TO CodeNode, score DOUBLE)",
-    "CREATE REL TABLE SEMANTICALLY_RELATED (FROM CodeNode TO CodeNode, score DOUBLE)",
-
+    "CREATE REL TABLE CONTAINS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE CALLS (FROM CodeNode TO CodeNode, line INT64)",
+    "CREATE REL TABLE IMPORTS (FROM CodeNode TO CodeNode, is_external BOOLEAN, import_text STRING)",
+    "CREATE REL TABLE INHERITS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE PARAMETER_OF (FROM CodeNode TO CodeNode, position INT64)",
+    "CREATE REL TABLE RETURNS (FROM CodeNode TO CodeNode)"
 ]
 
 def init_gorgonzola_schema(conn):
@@ -72,7 +39,7 @@ def init_gorgonzola_schema(conn):
     if "CodeNode" not in existing_tables:
         queries = [
             # Create node tables
-            "CREATE NODE TABLE CodeNode (id STRING, name STRING, node_type STRING, filepath STRING, start_line INT64, end_line INT64, complexity INT64, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, http_method STRING, path STRING, cf_type STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE CodeNode (id STRING, kind STRING, name STRING, qualified_name STRING, file STRING, line INT64, end_line INT64, mtime DOUBLE, complexity INT64, PRIMARY KEY (id))",
             "CREATE NODE TABLE Identifier (id STRING, raw STRING, tokens STRING[], case_style STRING, prefix STRING, suffix STRING, verb STRING, entity STRING, qualifier STRING, is_magic BOOLEAN, PRIMARY KEY (id))",
 
             # Create relationship tables
@@ -149,7 +116,7 @@ class GorgonzolaGraph:
         with self._label_cache_lock:
             if node_id in self._label_cache:
                 return self._label_cache[node_id]
-        res = conn.execute("MATCH (n:CodeNode {id: $id}) RETURN n.node_type", {"id": node_id})
+        res = conn.execute("MATCH (n:CodeNode {id: $id}) RETURN n.kind", {"id": node_id})
         lbl = None
         if res.has_next():
             lbl = res.get_next()[0]
@@ -180,13 +147,13 @@ class GorgonzolaGraph:
             label = m.group(2)
             brace = m.group(3)
             if '{' in brace:
-                return f"{var_part}:CodeNode {{node_type: '{label}', "
+                return f"{var_part}:CodeNode {{kind: '{label}', "
             else:
-                return f"{var_part}:CodeNode {{node_type: '{label}'}}{brace}"
+                return f"{var_part}:CodeNode {{kind: '{label}'}}{brace}"
         query = re.sub(pattern, repl, query)
         
-        # Rewrite label(x) to x.node_type to mask the underlying CodeNode table
-        query = re.sub(r'\blabel\(([a-zA-Z0-9_]+)\)', r'\1.node_type', query)
+        # Rewrite label(x) to x.kind to mask the underlying CodeNode table
+        query = re.sub(r'\blabel\(([a-zA-Z0-9_]+)\)', r'\1.kind', query)
         return query
 
     def query(self, query: str, parameters: dict = None) -> list:
@@ -298,9 +265,8 @@ class GorgonzolaGraph:
                 groups.setdefault("Identifier", []).append((node_id, properties))
             else:
                 if "type" in properties:
-                    properties["cf_type"] = properties["type"]
-                    del properties["type"]
-                properties["node_type"] = label
+                    properties["cf_type"] = properties.get("type", "")
+                properties["kind"] = label
                 groups.setdefault("CodeNode", []).append((node_id, properties))
 
         csv_dir = self._get_csv_dir()
