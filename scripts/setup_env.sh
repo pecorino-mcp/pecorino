@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -e
 
+# Always run from the project root
+cd "$(dirname "$0")/.."
+
 echo "1. Removing broken .venv and initializing a clean one..."
 rm -rf .venv
 python3 -m venv .venv
 source .venv/bin/activate
 
 echo "2. Installing requirements..."
-pip install -r requirements.txt
+pip install -v -r requirements.txt
 
 echo "3. Compiling gorgonzola Python package using cmake (forced lite configuration)..."
 rm -rf modules/gorgonzola/build/release
-cmake -B modules/gorgonzola/build/release -G Ninja -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_PCH=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=OFF modules/gorgonzola
+cmake -B modules/gorgonzola/build/release -G Ninja -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_PCH=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON -DGORGONZOLA_LITE_ENABLE_GDS=ON -DGORGONZOLA_LITE_ENABLE_EXTENSIONS=ON modules/gorgonzola
 cmake --build modules/gorgonzola/build/release --config Release --target _gorgonzola
 COMPILED_SO=$(find modules/gorgonzola/modules/gorgonzola-api-langs/python_api/build -name "_gorgonzola*.so" -print -quit)
 
