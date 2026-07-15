@@ -37,7 +37,7 @@ async def get_code_snippet(
         # Search by exact name match first or fallback to LIKE
         res = conn.execute(
             """
-            SELECT id, name, node_type, filepath, start_line, end_line 
+            SELECT id, name, kind, filepath, start_line, end_line 
             FROM nodes 
             WHERE name = ? OR id = ?
             LIMIT 10
@@ -48,7 +48,7 @@ async def get_code_snippet(
         if not res:
             res = conn.execute(
                 """
-                SELECT id, name, node_type, filepath, start_line, end_line 
+                SELECT id, name, kind, filepath, start_line, end_line 
                 FROM nodes 
                 WHERE name LIKE ?
                 LIMIT 10
@@ -61,12 +61,12 @@ async def get_code_snippet(
 
         results = []
         for r in res:
-            node_id, name, node_type, filepath, start_line, end_line = r
+            node_id, name, kind, filepath, start_line, end_line = r
             body_text = index._lazy_load_body(filepath, start_line, end_line)
             results.append({
                 "id": node_id,
                 "name": name,
-                "node_type": node_type,
+                "kind": kind,
                 "filepath": filepath,
                 "start_line": start_line,
                 "end_line": end_line,

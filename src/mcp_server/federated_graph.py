@@ -3,6 +3,8 @@ import os
 import shutil
 import tempfile
 import threading
+import json
+import csv
 
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 from src.mcp_server.graph_api import GraphAPI
@@ -96,7 +98,7 @@ class FederatedGraphAPI(GraphAPI):
                             conn = on_disk_graph._conn
                             # Export all nodes in one go from CodeNode table
                             try:
-                                cols = "a.id, a.kind, a.name, a.qualified_name, a.file, a.line, a.end_line, a.mtime, a.complexity"
+                                cols = "a.id, a.kind, a.name, a.qualified_name, a.file, a.line, a.end_line, a.mtime, a.complexity, a.docstring, a.embedding"
                                 q = f"MATCH (a:CodeNode) RETURN {cols}"
                                 res = conn.execute(q)
                                 with open(merged_node_csv, 'a', newline='', encoding='utf-8') as outfile:
@@ -108,14 +110,16 @@ class FederatedGraphAPI(GraphAPI):
                                         if not node_id: continue
                                         if node_id not in seen_node_ids:
                                             seen_node_ids.add(node_id)
-                                            writer.writerow(row)
+                                            # Format lists as JSON string for CSV
+                                            formatted_row = [json.dumps(x) if isinstance(x, list) else x for x in row]
+                                            writer.writerow(formatted_row)
                                 res.close()
                             except Exception as e:
                                 logger.warning("Failed to export nodes: %s", e)
 
                             # Export Identifiers
                             try:
-                                cols_ident = "a.id, a.raw, a.tokens, a.case_style, a.prefix, a.suffix, a.verb, a.entity, a.qualifier, a.is_magic"
+                                cols_ident = "a.id, a.raw, a.tokens, a.case_style, a.prefix, a.suffix, a.verb, a.entity, a.qualifier, a.is_magic, a.canonical_verb, a.canonical_entity, a.domain, a.intent, a.embedding"
                                 q_ident = f"MATCH (a:Identifier) RETURN {cols_ident}"
                                 res = conn.execute(q_ident)
                                 with open(merged_identifier_csv, 'a', newline='', encoding='utf-8') as outfile:
@@ -127,7 +131,8 @@ class FederatedGraphAPI(GraphAPI):
                                         if not node_id: continue
                                         if node_id not in seen_ident_ids:
                                             seen_ident_ids.add(node_id)
-                                            writer.writerow(row)
+                                            formatted_row = [json.dumps(x) if isinstance(x, list) else x for x in row]
+                                            writer.writerow(formatted_row)
                                 res.close()
                             except Exception as e:
                                 logger.warning("Failed to export Identifiers: %s", e)
