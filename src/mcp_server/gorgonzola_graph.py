@@ -110,7 +110,7 @@ class GorgonzolaGraph:
             self._schema_initialized = True
         try:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            ext_path = os.path.join(base_dir, "modules/gorgonzola/extension/algo/build/libalgo.gorgonzola_extension")
+            ext_path = os.path.join(base_dir, "modules/gorgonzola/modules/extension/algo/build/libalgo.gorgonzola_extension")
             conn.execute(f"LOAD EXTENSION '{ext_path}';")
         except Exception as e:
             logger.warning(f"Failed to load Leiden extension: {e}")
