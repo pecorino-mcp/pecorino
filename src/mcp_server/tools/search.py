@@ -32,8 +32,11 @@ ALLOWED_MODES = frozenset({
     "functional-analysis",  # Functional purity analysis
     "cypher",           # Native Cypher read-only queries
     "hybrid",           # Hybrid Vector+BM25 search
+    "semantic",         # Semantic vector search
     "community",        # Semantic neighborhood of a symbol
     "trace",             # Multi-hop call graph traversal (like CBM trace_path)
+    "snippet",          # Fetch full source code body of a specific symbol
+    "explain",          # Explain a node by showing its graph relationships
 })
 
 # ── Intent-based presets (from query_codebase) ────────────────
@@ -107,8 +110,12 @@ async def do_search(
       intent    — Preset AST queries (use 'intent' param).
       dsl       — Custom JSON DSL query (use 'query_json' param).
       functional-analysis — Functional purity analysis.
+      functional-analysis — Functional purity analysis.
       cypher    — Native Cypher read-only queries (query = cypher string, required).
       trace     — Multi-hop call graph traversal (query = symbol name, required).
+      semantic  — Semantic vector search.
+      snippet   — Fetch full source code body of a specific symbol (query = symbol name).
+      explain   — Explain a node by showing its graph relationships (query = node id).
     """
     mode = mode.strip().lower()
     if mode not in ALLOWED_MODES:
@@ -129,7 +136,7 @@ async def do_search(
         check_suspicious(query, "query")
 
     # ── Route to mode-specific handlers ───────────────────────
-    if mode in ("fts", "hybrid"):
+    if mode in ("fts", "hybrid", "semantic"):
         return await _do_fts(target, query, mode, limit, offset, include_source,
                              auto_expand_source, output_file, allow_external, ctx)
     elif mode in ("callers", "callees"):
@@ -152,6 +159,10 @@ async def do_search(
         return await _do_community(target, query, limit, offset, allow_external, ctx)
     elif mode == "trace":
         return await _do_trace(target, query, max_depth, allow_external, ctx)
+    elif mode == "snippet":
+        return await _do_snippet(target, query, allow_external, ctx)
+    elif mode == "explain":
+        return await _do_explain(target, query, allow_external, ctx)
 
     return {"error": "Unknown mode"}
 
@@ -844,3 +855,115 @@ async def _do_trace(
         result["summary"] = "No relations found."
 
     return {"status": "ok", "mode": "trace", **result}
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: snippet
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_snippet(
+    target: str,
+    symbol: str,
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    if not symbol:
+        raise SecurityValidationError("'query' (symbol name) is required for snippet mode")
+
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    import os
+    if allow_external and not os.path.exists(db_path):
+        raise IndexNotFoundError(
+            f"External repository at '{repo_root}' has not been indexed yet. "
+        )
+
+    index = _get_cached_api(repo_root, db_path, "index")
+
+    def _fetch_snippet():
+        conn = index._conn
+        res = conn.execute(
+            """
+            SELECT id, name, kind, filepath, start_line, end_line 
+            FROM nodes 
+            WHERE name = ? OR id = ?
+            LIMIT 10
+            """,
+            [symbol, symbol]
+        ).fetchall()
+        
+        if not res:
+            res = conn.execute(
+                """
+                SELECT id, name, kind, filepath, start_line, end_line 
+                FROM nodes 
+                WHERE name LIKE ?
+                LIMIT 10
+                """,
+                [f"%{symbol}"]
+            ).fetchall()
+
+        if not res:
+            return None
+
+        results = []
+        for r in res:
+            node_id, name, kind, filepath, start_line, end_line = r
+            body_text = index._lazy_load_body(filepath, start_line, end_line)
+            results.append({
+                "id": node_id,
+                "name": name,
+                "kind": kind,
+                "filepath": filepath,
+                "start_line": start_line,
+                "end_line": end_line,
+                "body_text": body_text
+            })
+        return results
+
+    results = await asyncio.to_thread(_fetch_snippet)
+    
+    if not results:
+        return {"status": "not_found", "message": f"Symbol '{symbol}' not found in index."}
+
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "results": results
+    }
+
+# ═══════════════════════════════════════════════════════════════
+#  Mode: explain
+# ═══════════════════════════════════════════════════════════════
+
+async def _do_explain(
+    target: str,
+    node_id: str,
+    allow_external: bool,
+    ctx: Optional[ServerRequestContext]
+) -> dict:
+    if not node_id:
+        raise SecurityValidationError("'query' (node id) is required for explain mode")
+
+    path = safe_path(target, allow_external)
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo, CodeSearchIndex
+    repo_root = find_repo_root(str(path))
+    db_path = get_db_path_for_repo(repo_root)
+
+    import os
+    if allow_external and not os.path.exists(db_path):
+        raise IndexNotFoundError(
+            f"External repository at '{repo_root}' has not been indexed yet. "
+        )
+
+    def _fetch_explain():
+        idx = CodeSearchIndex(db_path=db_path)
+        graph = idx._ensure_graph()
+        cypher = f"MATCH (n)-[e]->(m) WHERE n.id = '{node_id}' RETURN n.id, type(e), m.id"
+        res = graph.query(cypher)
+        return res
+
+    res = await asyncio.to_thread(_fetch_explain)
+    return {"results": res, "node_id": node_id, "type": "explain"}

@@ -108,22 +108,6 @@ async def search(
     )
     return format_output(res)
 
-@server.tool()
-async def get_code_snippet(
-    symbol: str,
-    roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
-    ctx: Context,
-    target: Optional[str] = None,
-    allow_external: bool = True
-) -> str:
-    """Fetch the full source code body of a specific function, class, or symbol by exact name or AST ID."""
-    resolved_target = await _resolve_target(target, roots_result)
-    check_suspicious(resolved_target, "target")
-    from src.mcp_server.tools.code_snippet import get_code_snippet as do_get_code_snippet
-    res = await do_get_code_snippet(
-        target=resolved_target, symbol=symbol, allow_external=allow_external, ctx=ctx.request_context
-    )
-    return format_output(res)
 
 @server.tool()
 async def detect_changes(
@@ -237,55 +221,3 @@ async def metrics(
     )
     return format_output(res)
 
-@server.tool()
-async def semantic_search(
-    query: str,
-    roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
-    ctx: Context,
-    target: Optional[str] = None,
-    limit: int = 10,
-    allow_external: bool = True
-) -> str:
-    """Perform a semantic search using vector embeddings."""
-    resolved_target = await _resolve_target(target, roots_result)
-    check_suspicious(resolved_target, "target")
-    from src.mcp_server.tools.hybrid_search import do_semantic_search
-    res = await do_semantic_search(
-        query=query, target=resolved_target, limit=limit, allow_external=allow_external, ctx=ctx.request_context
-    )
-    return format_output(res)
-
-@server.tool()
-async def hybrid_search(
-    query: str,
-    roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
-    ctx: Context,
-    target: Optional[str] = None,
-    limit: int = 10,
-    allow_external: bool = True
-) -> str:
-    """Perform a hybrid search combining vector, FTS, graph, and structure."""
-    resolved_target = await _resolve_target(target, roots_result)
-    check_suspicious(resolved_target, "target")
-    from src.mcp_server.tools.hybrid_search import do_hybrid_search
-    res = await do_hybrid_search(
-        query=query, target=resolved_target, limit=limit, allow_external=allow_external, ctx=ctx.request_context
-    )
-    return format_output(res)
-
-@server.tool()
-async def explain(
-    node_id: str,
-    roots_result: Annotated[ListRootsResult, Resolve(_get_roots)],
-    ctx: Context,
-    target: Optional[str] = None,
-    allow_external: bool = True
-) -> str:
-    """Explain a node by showing its graph relationships."""
-    resolved_target = await _resolve_target(target, roots_result)
-    check_suspicious(resolved_target, "target")
-    from src.mcp_server.tools.hybrid_search import do_explain
-    res = await do_explain(
-        node_id=node_id, target=resolved_target, allow_external=allow_external, ctx=ctx.request_context
-    )
-    return format_output(res)

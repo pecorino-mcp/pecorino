@@ -715,6 +715,30 @@ class CodeSearchIndex:
                 params.extend([q_emb, limit, offset])
                 
                 res = conn.execute(sql, params).fetchall()
+            elif mode == "semantic":
+                # Compute query embedding
+                embedder = self._get_embedder()
+                q_emb = embedder.embed_batch([query])[0]
+                
+                sql = f'''
+                    SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                           (1.0 - array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}])) AS score
+                    FROM code_nodes c
+                    WHERE c.embedding IS NOT NULL
+                    {path_filter}
+                    ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC
+                    LIMIT ? OFFSET ?
+                '''
+                
+                params = [q_emb]
+                if target_path:
+                    if path_filter == "AND c.filepath = ?":
+                        params.append(target_path)
+                    else:
+                        params.append(f"{prefix}%")
+                        
+                params.extend([q_emb, limit, offset])
+                res = conn.execute(sql, params).fetchall()
             else:
                 params = [query, query]
                 if target_path:
