@@ -84,12 +84,12 @@ async def do_detect_changes(
             continue
             
         cond_str = " OR ".join(conditions)
-        query = f"SELECT id, name, node_type FROM code_nodes WHERE filepath = ? AND ({cond_str})"
+        query = f"SELECT id, name, kind FROM code_nodes WHERE filepath = ? AND ({cond_str})"
         
         try:
             rows = conn.execute(query, (abs_file,)).fetchall()
             for r in rows:
-                changed_nodes.append({"id": r[0], "name": r[1], "node_type": r[2]})
+                changed_nodes.append({"id": r[0], "name": r[1], "kind": r[2]})
         except Exception as e:
             logger.warning(f"DuckDB query failed for {abs_file}: {e}")
             

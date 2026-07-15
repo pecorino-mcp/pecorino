@@ -40,12 +40,12 @@ ALLOWED_MODES = frozenset({
 INTENT_PRESETS: dict[str, dict] = {
     "all_classes": {
         "select": "nodes",
-        "where": {"node_type": {"in": ["class", "interface"]}},
+        "where": {"kind": {"in": ["class", "interface"]}},
         "limit": 50,
     },
     "all_functions": {
         "select": "nodes",
-        "where": {"node_type": {"in": ["function", "method"]}},
+        "where": {"kind": {"in": ["function", "method"]}},
         "limit": 50,
     },
     "files_by_language": {
@@ -55,13 +55,13 @@ INTENT_PRESETS: dict[str, dict] = {
     "entry_points": {
         "_graph_intent": "entry_points",
         "select": "nodes",
-        "where": {"node_type": {"in": ["function", "method"]}},
+        "where": {"kind": {"in": ["function", "method"]}},
         "limit": 20,
     },
     "dead_code": {
         "_graph_intent": "dead_code",
         "select": "nodes",
-        "where": {"node_type": {"in": ["function", "method"]}},
+        "where": {"kind": {"in": ["function", "method"]}},
         "limit": 50,
     },
 }
@@ -499,7 +499,7 @@ async def _do_dsl(
     if query_json is None:
         raise SecurityValidationError(
             "'query_json' parameter is required for dsl mode",
-            suggestion="Provide a JSON object like {\"select\": \"nodes\", \"where\": {\"node_type\": \"function\"}}",
+            suggestion="Provide a JSON object like {\"select\": \"nodes\", \"where\": {\"kind\": \"function\"}}",
         )
 
     if isinstance(query_json, str):
@@ -514,7 +514,7 @@ async def _do_dsl(
     if not isinstance(query_json, dict):
         raise SecurityValidationError(
             "query_json must be a JSON object",
-            suggestion='Provide a JSON object like {"select": "nodes", "where": {"node_type": "function"}}',
+            suggestion='Provide a JSON object like {"select": "nodes", "where": {"kind": "function"}}',
         )
 
     # Extract and strip internal graph intent marker
@@ -549,7 +549,7 @@ async def _do_dsl(
         index = _get_cached_api(repo_root, db_path, "index")
         limit = min(query_json.get("limit", 50), 100)
         nodes = await asyncio.to_thread(index.get_dir_nodes, str(path))
-        fn_nodes = [n for n in nodes if n.get("node_type") in ("function", "method")]
+        fn_nodes = [n for n in nodes if n.get("kind") in ("function", "method")]
 
         caller_counts = {}
         try:

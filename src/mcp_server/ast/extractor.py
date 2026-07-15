@@ -24,7 +24,7 @@ class TreeSitterExtractor:
             "RETURNS": []
         }
     
-    def ensure_node(self, id: str, kind: str, name: str, qualified_name: str, file: str, line: int, end_line: int):
+    def ensure_node(self, id: str, kind: str, name: str, qualified_name: str, file: str, line: int, end_line: int, docstring: str = ""):
         if id not in self.nodes:
             self.nodes[id] = {
                 "id": id,
@@ -33,14 +33,32 @@ class TreeSitterExtractor:
                 "qualified_name": qualified_name,
                 "file": file,
                 "line": line,
-                "end_line": end_line
+                "end_line": end_line,
+                "docstring": docstring
             }
+        elif docstring:
+            self.nodes[id]["docstring"] = docstring
         return id
         
     def ts_text(self, node, source: bytes) -> str:
         if not node:
             return ""
         return source[node.start_byte:node.end_byte].decode('utf-8', errors='ignore').strip()
+
+    def extract_docstring(self, node, source: bytes) -> str:
+        body = node.child_by_field_name('body')
+        if body and body.type == 'block' and len(body.children) > 0:
+            first_stmt = body.children[0]
+            if first_stmt.type == 'expression_statement' and len(first_stmt.children) > 0:
+                first_expr = first_stmt.children[0]
+                if first_expr.type == 'string':
+                    doc = self.ts_text(first_expr, source)
+                    if doc.startswith('"""') and doc.endswith('"""'): return doc[3:-3].strip()
+                    if doc.startswith("'''") and doc.endswith("'''"): return doc[3:-3].strip()
+                    if doc.startswith('"') and doc.endswith('"'): return doc[1:-1].strip()
+                    if doc.startswith("'") and doc.endswith("'"): return doc[1:-1].strip()
+                    return doc.strip()
+        return ""
 
     def extract(self, tree, source: bytes):
         file_node_id = self.file_path
@@ -69,7 +87,8 @@ class TreeSitterExtractor:
                 name = self.ts_text(name_node, source)
                 current_qname = make_qname(parent_qname, name)
                 current_id = make_id(self.file_path, "Class", current_qname, node.start_point[0] + 1)
-                self.ensure_node(current_id, "Class", name, current_qname, self.file_path, node.start_point[0] + 1, node.end_point[0] + 1)
+                docstring = self.extract_docstring(node, source)
+                self.ensure_node(current_id, "Class", name, current_qname, self.file_path, node.start_point[0] + 1, node.end_point[0] + 1, docstring)
                 self.symbol_table[name] = current_id
                 self.edges["CONTAINS"].append((parent_id, current_id, {}))
                 
@@ -94,7 +113,8 @@ class TreeSitterExtractor:
                 current_qname = make_qname(parent_qname, name)
                 kind = "Method" if "Class" in parent_id else "Function"
                 current_id = make_id(self.file_path, kind, current_qname, node.start_point[0] + 1)
-                self.ensure_node(current_id, kind, name, current_qname, self.file_path, node.start_point[0] + 1, node.end_point[0] + 1)
+                docstring = self.extract_docstring(node, source)
+                self.ensure_node(current_id, kind, name, current_qname, self.file_path, node.start_point[0] + 1, node.end_point[0] + 1, docstring)
                 self.symbol_table[name] = current_id
                 self.edges["CONTAINS"].append((parent_id, current_id, {}))
                 

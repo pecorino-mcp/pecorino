@@ -8,8 +8,8 @@ logger = logging.getLogger(__name__)
 
 # Column orders for each node table (matching CREATE statements, used for CSV COPY)
 _NODE_COLUMNS = {
-    "CodeNode": ["id", "kind", "name", "qualified_name", "file", "line", "end_line", "mtime", "complexity"],
-    "Identifier": ["id", "raw", "tokens", "case_style", "prefix", "suffix", "verb", "entity", "qualifier", "is_magic"]
+    "CodeNode": ["id", "kind", "name", "qualified_name", "file", "line", "end_line", "mtime", "complexity", "docstring", "embedding"],
+    "Identifier": ["id", "raw", "tokens", "case_style", "prefix", "suffix", "verb", "entity", "qualifier", "is_magic", "canonical_verb", "canonical_entity", "domain", "intent", "embedding"]
 }
 
 # Columns that should default to 0 instead of empty string when missing
@@ -39,8 +39,8 @@ def init_gorgonzola_schema(conn):
     if "CodeNode" not in existing_tables:
         queries = [
             # Create node tables
-            "CREATE NODE TABLE CodeNode (id STRING, kind STRING, name STRING, qualified_name STRING, file STRING, line INT64, end_line INT64, mtime DOUBLE, complexity INT64, PRIMARY KEY (id))",
-            "CREATE NODE TABLE Identifier (id STRING, raw STRING, tokens STRING[], case_style STRING, prefix STRING, suffix STRING, verb STRING, entity STRING, qualifier STRING, is_magic BOOLEAN, PRIMARY KEY (id))",
+            "CREATE NODE TABLE CodeNode (id STRING, kind STRING, name STRING, qualified_name STRING, file STRING, line INT64, end_line INT64, mtime DOUBLE, complexity INT64, docstring STRING, embedding DOUBLE[384], PRIMARY KEY (id))",
+            "CREATE NODE TABLE Identifier (id STRING, raw STRING, tokens STRING[], case_style STRING, prefix STRING, suffix STRING, verb STRING, entity STRING, qualifier STRING, is_magic BOOLEAN, canonical_verb STRING, canonical_entity STRING, domain STRING, intent STRING, embedding DOUBLE[384], PRIMARY KEY (id))",
 
             # Create relationship tables
         ] + _RELATIONSHIP_SCHEMA
@@ -58,11 +58,7 @@ class GorgonzolaGraph:
         self._schema_initialized = False
         # Normalize path
         from src.mcp_server.index_db import get_graph_path_for_repo
-
-        if db_path.endswith(".duckdb"):
-            self.gorgonzola_db_path = get_graph_path_for_repo(db_path)
-        else:
-            self.gorgonzola_db_path = db_path
+        self.gorgonzola_db_path = get_graph_path_for_repo(db_path) if db_path.endswith('.duckdb') else db_path
 
         parent_dir = os.path.dirname(self.gorgonzola_db_path)
         if parent_dir:
@@ -75,6 +71,22 @@ class GorgonzolaGraph:
         if not self._schema_initialized:
             init_gorgonzola_schema(conn)
             self._schema_initialized = True
+
+    def build_indexes(self):
+        """Build FTS and Vector indexes after a bulk load."""
+        queries = [
+            "CALL CREATE_FTS_INDEX('CodeNode', 'id', ['name', 'docstring'], stemmer='porter')",
+            "CALL CREATE_FTS_INDEX('Identifier', 'id', ['raw', 'canonical_verb', 'canonical_entity'])",
+            "CALL CREATE_VECTOR_INDEX('Identifier', 'id', 'embedding', metric='cosine')",
+            "CALL CREATE_VECTOR_INDEX('CodeNode', 'id', 'embedding', metric='cosine')"
+        ]
+        if self._conn:
+            for q in queries:
+                try:
+                    r = self._conn.execute(q)
+                    r.close()
+                except Exception as e:
+                    logger.warning(f"Failed to build index with query {q}: {e}")
         try:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             ext_path = os.path.join(base_dir, "modules/gorgonzola/modules/extension/algo/build/libalgo.gorgonzola_extension")

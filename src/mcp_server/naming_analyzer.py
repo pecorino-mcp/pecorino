@@ -99,7 +99,7 @@ def analyze_grammar(tokens: List[str]) -> Dict[str, Any]:
 
     return {"verb": verb, "entity": entity, "qualifier": qualifier}
 
-def analyze_name(raw: str) -> Dict[str, Any]:
+def analyze_name(raw: str, file_path: str = "") -> Dict[str, Any]:
     if not raw:
         return {
             "tokens": [],
@@ -109,13 +109,21 @@ def analyze_name(raw: str) -> Dict[str, Any]:
             "verb": None,
             "entity": None,
             "qualifier": None,
-            "is_magic": False
+            "is_magic": False,
+            "canonical_verb": "unknown",
+            "canonical_entity": "unknown",
+            "domain": "unknown",
+            "intent": "unknown"
         }
         
     core, prefix, suffix, is_magic = strip_affixes(raw)
     case_style = detect_case_style(core)
     tokens = tokenize_identifier(core)
     grammar = analyze_grammar(tokens)
+    c_verb = canonicalize_verb(tokens)
+    c_entity = canonicalize_entity(tokens)
+    domain = infer_domain(file_path) if file_path else "unknown"
+    intent = infer_intent(c_verb)
 
     return {
         "tokens": tokens,
@@ -125,5 +133,72 @@ def analyze_name(raw: str) -> Dict[str, Any]:
         "verb": grammar["verb"],
         "entity": grammar["entity"],
         "qualifier": grammar["qualifier"],
-        "is_magic": is_magic
+        "is_magic": is_magic,
+        "canonical_verb": c_verb,
+        "canonical_entity": c_entity,
+        "domain": domain,
+        "intent": intent
     }
+
+VERB_SYNONYMS = {
+    # retrieve
+    "get": "retrieve", "fetch": "retrieve", "load": "retrieve",
+    "query": "retrieve", "find": "retrieve", "read": "retrieve", "select": "retrieve",
+    # persist
+    "save": "persist", "store": "persist", "write": "persist",
+    "persist": "persist", "insert": "persist", "upsert": "persist",
+    # update, create, delete, check
+    "set": "update", "put": "update", "update": "update", "patch": "update",
+    "create": "create", "make": "create", "build": "create", "new": "create",
+    "delete": "delete", "remove": "delete", "drop": "delete", "clear": "delete",
+    "destroy": "delete",
+    "is": "check", "has": "check", "can": "check", "should": "check",
+    "validate": "check", "verify": "check",
+}
+
+INTENT_MAP = {
+    'retrieve': 'query',
+    'persist': 'mutation',
+    'create': 'mutation',
+    'update': 'mutation',
+    'delete': 'mutation',
+    'check': 'validation',
+    'validate': 'validation'
+}
+
+def canonicalize_verb(tokens: List[str]) -> str:
+    for t in tokens:
+        if t in VERB_SYNONYMS:
+            return VERB_SYNONYMS[t]
+    return "unknown"
+
+def canonicalize_entity(tokens: List[str]) -> str:
+    # Filter out verbs, stop words, and common noisy trailing tokens
+    noisy = {"id", "type", "status", "state", "list", "array"}
+    filtered = [t for t in tokens if t not in VERB_SYNONYMS and t not in STOP_WORDS and t not in noisy]
+    
+    if not filtered:
+        # Fallback to just non-verbs if filtering removed everything
+        filtered = [t for t in tokens if t not in VERB_SYNONYMS]
+    
+    if not filtered: return "unknown"
+    
+    # take first meaningful token (which is usually the entity in get_user_by_id)
+    # wait, if it's UserRepository.insert -> user, repository -> repository
+    # Actually let's use the first non-verb token as entity
+    entity = filtered[0].lower()
+    if entity.endswith('s') and len(entity) > 3 and not entity.endswith('ss'):
+        entity = entity[:-1]
+    entity = re.sub(r'(info|data|record|model|repository|service|controller|handler)$', '', entity)
+    return entity or "unknown"
+
+def infer_domain(file_path: str) -> str:
+    p = file_path.lower()
+    if "/auth" in p or "auth" in p.split("/")[-1]: return "auth"
+    if "/payment" in p or "/pay" in p or "/billing" in p: return "payment"
+    if "/user" in p or "/account" in p: return "user"
+    if "/infra" in p or "/config" in p: return "infra"
+    return "core"
+
+def infer_intent(canonical_verb: str) -> str:
+    return INTENT_MAP.get(canonical_verb, 'operation')
