@@ -671,11 +671,27 @@ class CodebaseIndexer:
             self.search_index.index_nodes(nodes_to_index)
 
         graph_nodes = []
+        identifier_nodes_dict = {}
         for nid, props, lbl in graph_nodes_dict.values():
             if "name" in props:
-                analysis = analyze_name(props["name"])
-                props.update(analysis)
+                raw_name = props["name"]
+                if lbl == "File":
+                    raw_name = Path(raw_name).stem
+                
+                ident_id = raw_name
+                if ident_id not in identifier_nodes_dict:
+                    analysis = analyze_name(raw_name)
+                    identifier_nodes_dict[ident_id] = (ident_id, {
+                        "raw": raw_name,
+                        **analysis
+                    }, "Identifier")
+                
+                graph_edges.append((nid, ident_id, {}, "HAS_IDENTIFIER"))
             graph_nodes.append((nid, props, lbl))
+
+        if identifier_nodes_dict:
+            graph_nodes.extend(identifier_nodes_dict.values())
+
         if graph_nodes:
             try:
                 id_map = self.graph.insert_nodes_bulk(graph_nodes)

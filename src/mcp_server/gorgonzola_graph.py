@@ -8,7 +8,8 @@ logger = logging.getLogger(__name__)
 
 # Column orders for each node table (matching CREATE statements, used for CSV COPY)
 _NODE_COLUMNS = {
-    "CodeNode": ["id", "name", "node_type", "filepath", "start_line", "end_line", "complexity", "extension", "content_hash", "mtime", "lang", "http_method", "path", "cf_type", "case_style", "prefix", "suffix", "is_magic"]
+    "CodeNode": ["id", "name", "node_type", "filepath", "start_line", "end_line", "complexity", "extension", "content_hash", "mtime", "lang", "http_method", "path", "cf_type"],
+    "Identifier": ["id", "raw", "tokens", "case_style", "prefix", "suffix", "verb", "entity", "qualifier", "is_magic"]
 }
 
 # Columns that should default to 0 instead of empty string when missing
@@ -32,6 +33,8 @@ _RELATIONSHIP_SCHEMA = [
     "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE FILE_CHANGES_WITH (FROM CodeNode TO CodeNode, weight DOUBLE)",
+    
+    "CREATE REL TABLE HAS_IDENTIFIER (FROM CodeNode TO Identifier)",
     
     # Advanced / codebase-memory-mcp compat schemas
     "CREATE REL TABLE CONTAINS_PACKAGE (FROM CodeNode TO CodeNode)",
@@ -69,7 +72,8 @@ def init_gorgonzola_schema(conn):
     if "CodeNode" not in existing_tables:
         queries = [
             # Create node tables
-            "CREATE NODE TABLE CodeNode (id STRING, name STRING, node_type STRING, filepath STRING, start_line INT64, end_line INT64, complexity INT64, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, http_method STRING, path STRING, cf_type STRING, case_style STRING, prefix STRING, suffix STRING, is_magic BOOLEAN, PRIMARY KEY (id))",
+            "CREATE NODE TABLE CodeNode (id STRING, name STRING, node_type STRING, filepath STRING, start_line INT64, end_line INT64, complexity INT64, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, http_method STRING, path STRING, cf_type STRING, PRIMARY KEY (id))",
+            "CREATE NODE TABLE Identifier (id STRING, raw STRING, tokens STRING[], case_style STRING, prefix STRING, suffix STRING, verb STRING, entity STRING, qualifier STRING, is_magic BOOLEAN, PRIMARY KEY (id))",
 
             # Create relationship tables
         ] + _RELATIONSHIP_SCHEMA
@@ -287,14 +291,17 @@ class GorgonzolaGraph:
                     return self._insert_nodes_bulk_conn(nodes, conn)
 
     def _insert_nodes_bulk_conn(self, nodes, conn) -> dict:
-        # Group nodes by label (actually all will be CodeNode)
+        # Group nodes by label
         groups = {}
         for node_id, properties, label in nodes:
-            if "type" in properties:
-                properties["cf_type"] = properties["type"]
-                del properties["type"]
-            properties["node_type"] = label
-            groups.setdefault("CodeNode", []).append((node_id, properties))
+            if label == "Identifier":
+                groups.setdefault("Identifier", []).append((node_id, properties))
+            else:
+                if "type" in properties:
+                    properties["cf_type"] = properties["type"]
+                    del properties["type"]
+                properties["node_type"] = label
+                groups.setdefault("CodeNode", []).append((node_id, properties))
 
         csv_dir = self._get_csv_dir()
 
@@ -320,6 +327,7 @@ class GorgonzolaGraph:
                     res = conn.execute(f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id", {"ids": chunk})
                     while res.has_next():
                         existing_ids.add(res.get_next()[0])
+                    res.close()
                 except Exception as e:
                     logger.warning(f"Failed to check existing ids for {label}: {e}")
 
@@ -347,6 +355,9 @@ class GorgonzolaGraph:
                         val = properties[col]
                         if col in _NUMERIC_COLUMNS:
                             row.append(int(val) if col != "mtime" else float(val))
+                        elif isinstance(val, list):
+                            # Kuzu expects [a,b,c] for array in CSV
+                            row.append("[" + ",".join(str(v).replace('\n', ' ').replace('\r', '') for v in val) + "]")
                         else:
                             row.append(str(val).replace('\n', ' ').replace('\r', ''))
                     else:
@@ -389,6 +400,8 @@ class GorgonzolaGraph:
         for src_id, dst_id, props, rel_type in edges:
             src_label = "CodeNode"
             dst_label = "CodeNode"
+            if rel_type == "HAS_IDENTIFIER":
+                dst_label = "Identifier"
 
             if not src_label or not dst_label:
                 continue
