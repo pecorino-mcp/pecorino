@@ -275,7 +275,29 @@ async def _do_fts(
                 index = _get_cached_api(repo_root, db_path, "index")
 
     _fts_start = time.time()
-    results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset, mode=mode)
+    
+    boost_ids = None
+    if mode == "hybrid" and query:
+        try:
+            import re
+            from src.mcp_server.naming_analyzer import canonicalize_verb, canonicalize_entity
+            tokens = [t.lower() for t in re.findall(r'\b[a-zA-Z]+\b', query)]
+            cv = canonicalize_verb(tokens)
+            ce = canonicalize_entity(tokens)
+            if cv != "unknown" and ce != "unknown":
+                graph_api = _get_cached_api(repo_root, db_path, "graph")
+                cypher = """
+                    MATCH (c:CodeNode)-[:HAS_IDENTIFIER]->(i:Identifier)
+                    WHERE i.canonical_verb = $cv AND i.canonical_entity = $ce
+                    RETURN c.id LIMIT 100
+                """
+                rows = graph_api.graph.query(cypher, {"cv": cv, "ce": ce})
+                if rows:
+                    boost_ids = [r["c.id"] for r in rows]
+        except Exception as e:
+            logger.warning(f"Failed to fetch canonical boost IDs: {e}")
+
+    results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset, mode=mode, boost_ids=boost_ids)
     FTS_SCAN_DURATION.observe(time.time() - _fts_start)
 
     # Auto-expand: include source when few results
