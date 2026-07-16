@@ -81,7 +81,7 @@ class TreeSitterExtractor:
         current_id = parent_id
         current_qname = parent_qname
         
-        if node.type == 'class_definition':
+        if node.type in ('class_definition', 'class_specifier', 'struct_specifier'):
             name_node = node.child_by_field_name('name')
             if name_node:
                 name = self.ts_text(name_node, source)
@@ -159,7 +159,7 @@ class TreeSitterExtractor:
                 # CALLS uses `line` property in the edge
                 self.edges["CALLS"].append((parent_id, target_id, {"line": node.start_point[0] + 1}))
                 
-        elif node.type in ('import_statement', 'import_from_statement'):
+        elif node.type in ('import_statement', 'import_from_statement', 'preproc_include'):
             import_text = self.ts_text(node, source)
             resolved_path = self.resolve_import_fn(import_text, self.file_path, self.repo_path) if self.resolve_import_fn else None
             if resolved_path:
