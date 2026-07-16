@@ -44,13 +44,7 @@ async def handle_list_prompts(
                 types.PromptArgument(name="target", description="Target path to update index for", required=False)
             ]
         ),
-        types.Prompt(
-            name="set_workspace",
-            description="Change the server's workspace root directory at runtime.",
-            arguments=[
-                types.PromptArgument(name="path", description="Absolute path to the new workspace directory", required=True)
-            ]
-        ),
+
     ]
 
     if role == "admin":
@@ -110,12 +104,7 @@ async def handle_get_prompt(
             description="Update codebase index.",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the update_index tool{target_str}."))]
         )
-    elif name == "set_workspace":
-        path = arguments.get("path", "")
-        return types.GetPromptResult(
-            description="Set the workspace directory.",
-            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the set_workspace tool with path '{path}'."))]
-        )
+
     elif name == "metrics":
         target = arguments.get("target", "")
         what = arguments.get("what", "all")
@@ -157,9 +146,7 @@ async def handle_completion(
             val = (context or {}).get("target", "")
             return _complete_target_path(val)
 
-        elif ref.name == "set_workspace" and argument.name == "path":
-            val = (context or {}).get("path", "")
-            return _complete_target_path(val, filter_supported=False)
+
 
         elif ref.name == "browse" and argument.name == "view":
             views = ["classes", "functions", "deps", "tree", "all", "pagerank", "summary"]
