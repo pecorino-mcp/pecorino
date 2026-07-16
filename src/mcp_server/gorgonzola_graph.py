@@ -56,6 +56,7 @@ def init_gorgonzola_schema(conn):
             # Create node tables
             "CREATE NODE TABLE CodeNode (id STRING, kind STRING, name STRING, qualified_name STRING, file STRING, line INT64, end_line INT64, mtime DOUBLE, complexity INT64, docstring STRING, embedding DOUBLE[384], PRIMARY KEY (id))",
             "CREATE NODE TABLE Identifier (id STRING, raw STRING, tokens STRING[], case_style STRING, prefix STRING, suffix STRING, verb STRING, entity STRING, qualifier STRING, is_magic BOOLEAN, canonical_verb STRING, canonical_entity STRING, domain STRING, intent STRING, embedding DOUBLE[384], PRIMARY KEY (id))",
+            "CREATE NODE TABLE File (id STRING, name STRING, path STRING, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, PRIMARY KEY (id))",
 
             # Create relationship tables
         ] + _RELATIONSHIP_SCHEMA
@@ -293,7 +294,7 @@ class GorgonzolaGraph:
             else:
                 if "type" in properties:
                     properties["cf_type"] = properties.get("type", "")
-                properties["kind"] = label
+                properties.setdefault("kind", label)
                 groups.setdefault("CodeNode", []).append((node_id, properties))
 
         csv_dir = self._get_csv_dir()
