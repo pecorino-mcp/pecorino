@@ -9,11 +9,14 @@ from typing import Annotated, Any, Dict, Optional
 workspace_root = Path(__file__).resolve().parent.parent.parent
 sdk_src = workspace_root / "modules" / "python-sdk" / "src"
 mcp_types_src = sdk_src / "mcp-types"
+utils_src = workspace_root / "modules" / "pecorino-utils"
 
 if str(sdk_src) not in sys.path:
     sys.path.insert(0, str(sdk_src))
 if str(mcp_types_src) not in sys.path:
     sys.path.insert(0, str(mcp_types_src))
+if str(utils_src) not in sys.path:
+    sys.path.insert(0, str(utils_src))
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.resolve import Resolve, ListRoots
@@ -267,7 +270,7 @@ def query_graph(query: str) -> list[dict]:
 
 
 @server.prompt()
-def metrics(target: str, what: str = "all") -> list[dict]:
+def metrics(target: str = "", what: str = "all") -> list[dict]:
     """Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis."""
     target_str = f" on target '{target}'" if target else ""
     return [{"role": "user", "content": {"type": "text", "text": f"Please calculate {what} metrics{target_str}."}}]
