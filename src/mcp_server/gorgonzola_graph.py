@@ -418,6 +418,16 @@ class GorgonzolaGraph:
                         row.append(str(props.get("is_read", False)).lower())
                         row.append(str(props.get("is_mutation", False)).lower())
                         row.append(str(props.get("is_taint", False)).lower())
+                    elif rel_type == "CALLS":
+                        props = props or {}
+                        row.append(str(props.get("line", 0)))
+                    elif rel_type == "IMPORTS":
+                        props = props or {}
+                        row.append(str(props.get("is_external", False)).lower())
+                        row.append(str(props.get("import_text", "")).replace('\n', ' ').replace('\r', ''))
+                    elif rel_type == "PARAMETER_OF":
+                        props = props or {}
+                        row.append(str(props.get("position", 0)))
                     rows.append(row)
 
                 copy_query = f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"

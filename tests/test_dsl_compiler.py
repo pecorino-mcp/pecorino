@@ -5,14 +5,14 @@ def test_compiler_nodes_select():
     query_json = {
         "select": "nodes",
         "where": {
-            "node_type": {"eq": "function"},
+            "kind": {"eq": "function"},
             "filepath": {"like": "%/src/%"}
         },
         "limit": 10
     }
     sql, cypher, params = DSLCompiler.compile(query_json)
-    assert "SELECT id, name, node_type, filepath, start_line, end_line FROM main.code_nodes" in sql
-    assert "AND node_type = ?" in sql
+    assert "SELECT id, name, kind, filepath, start_line, end_line FROM main.code_nodes" in sql
+    assert "AND kind = ?" in sql
     assert "AND filepath LIKE ?" in sql
     assert params == ["function", "%/src/%"]
     assert cypher is None
