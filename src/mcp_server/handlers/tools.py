@@ -194,24 +194,6 @@ async def handle_list_tools(
             }
         ),
         types.Tool(
-            name="set_workspace",
-            description="Change the server's workspace root directory at runtime.",
-            annotations=types.ToolAnnotations(
-                title="Set Workspace",
-                **{k: v for k, v in _MUTATING.model_dump(exclude_none=True).items() if k != "title"},
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to the new workspace directory."
-                    }
-                },
-                "required": ["path"]
-            }
-        ),
-        types.Tool(
             name="detect_changes",
             description="Detect changed symbols and their impact using git diff and the AST index. Use this to understand the blast radius of uncommitted changes.",
             annotations=types.ToolAnnotations(
@@ -581,34 +563,7 @@ async def handle_call_tool(
             )
             # Notify client that resources have changed after re-indexing
             await helper.notify_resource_list_changed()
-        elif name == "set_workspace":
-            path_arg = arguments.get("path")
-            if not path_arg:
-                raise SecurityValidationError("Missing 'path' argument")
 
-            new_path = Path(path_arg).expanduser().resolve()
-            if not new_path.is_dir():
-                raise SecurityValidationError(f"Path does not exist or is not a directory: {new_path}")
-
-            # Update settings
-            settings.workspace_root = new_path
-
-            # Restart file watcher with new path if it's running
-            from src.mcp_server.middleware.file_watcher import get_file_watcher
-            watcher = get_file_watcher()
-            if watcher:
-                watcher.stop()
-                watcher.start(new_path)
-
-            # Clear index cache to force re-indexing of the new workspace
-            from src.mcp_server.index_db import clear_index_cache
-            clear_index_cache()
-
-            # Notify clients that roots and resources changed
-            await helper.notify_roots_list_changed()
-            await helper.notify_resource_list_changed()
-
-            res = [{"type": "text", "text": f"Workspace root successfully changed to: {new_path}"}]
         else:
             raise SecurityValidationError(f"Unknown tool: {name}")
 
