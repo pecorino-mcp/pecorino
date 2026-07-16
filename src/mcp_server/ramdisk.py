@@ -186,7 +186,7 @@ class RamdiskIndex:
                     logger.info(f"[ramdisk] Synced Gorgonzola to SSD: "
                           f"{gorg_size / 1024 / 1024:.2f} MB")
                 elif os.path.isdir(self.gorgonzola_path):
-                    # Fallback: if it's a directory (future Kuzu versions)
+                    # Fallback: if it's a directory (future Gorgonzola versions)
                     tmp_gorgonzola = self.ssd_gorgonzola_path + ".tmp"
                     if os.path.exists(tmp_gorgonzola):
                         shutil.rmtree(tmp_gorgonzola)

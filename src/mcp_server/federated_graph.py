@@ -35,7 +35,7 @@ class FederatedGraphAPI(GraphAPI):
             # Otherwise, build a new one
             logger.info("Building federated graph for %d repositories...", len(repos))
             from src.mcp_server.config import settings
-            federated_path = os.path.join(settings.index_dir, "federated_kuzu")
+            federated_path = os.path.join(settings.index_dir, "federated_gorgonzola")
 
             # Wipe old federated graph to rebuild cleanly
             if os.path.exists(federated_path):
@@ -88,7 +88,7 @@ class FederatedGraphAPI(GraphAPI):
 
                 for repo in repos:
                     logger.debug("Exporting graph for %s", repo['name'])
-                    graph_path = repo['kuzu_path']
+                    graph_path = repo['gorgonzola_path']
                     if not os.path.exists(graph_path):
                         continue
 
