@@ -466,23 +466,7 @@ class CodebaseIndexer:
         if identifier_nodes_dict:
             final_graph_nodes.extend(identifier_nodes_dict.values())
 
-        if self.embedder:
-            texts_to_embed = []
-            for nid, props, lbl in final_graph_nodes:
-                if lbl == "Identifier":
-                    text = f"{props.get('raw', '')} {props.get('canonical_verb', '')} {props.get('canonical_entity', '')}"
-                else:
-                    name = props.get("name", "")
-                    doc = props.get("docstring", "")
-                    # Try to get canonical verb for CodeNode using analyze_name
-                    cv = analyze_name(name, filepath).get("canonical_verb", "")
-                    text = f"{name} {doc} {filepath} {cv}"
-                texts_to_embed.append(text)
-            
-            embeddings = self.embedder.embed_texts(texts_to_embed)
-            for i, (nid, props, lbl) in enumerate(final_graph_nodes):
-                if i < len(embeddings):
-                    props["embedding"] = embeddings[i]
+        # Embeddings for graph nodes have been moved to _index_directory_impl for global batching
 
         if final_graph_nodes:
             try:
@@ -971,7 +955,7 @@ class CodebaseIndexer:
 
         results = []
         if parse_jobs:
-            max_workers = min(8, os.cpu_count() or 4)
+            max_workers = max(1, int((os.cpu_count() or 4) * 0.75))
             current_processed = skipped_count
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1041,7 +1025,34 @@ class CodebaseIndexer:
                         if i < len(embeddings):
                             n['embedding'] = embeddings[i]
                 except Exception as e:
-                    logger.warning("Failed to generate vector embeddings during bulk run: %s", e)
+                    logger.debug(traceback.format_exc())
+
+            # Batch embed all graph nodes in one go
+            all_graph_nodes_to_embed = []
+            graph_texts_to_embed = []
+            for res in results:
+                for nid, props, lbl in res.get("graph_nodes", []):
+                    if lbl == "Identifier":
+                        text = f"{props.get('raw', '')} {props.get('canonical_verb', '')} {props.get('canonical_entity', '')}"
+                    else:
+                        name = props.get("name", "")
+                        doc = props.get("docstring", "")
+                        fp = nid.split("::")[0] if "::" in nid else ""
+                        cv = props.get("canonical_verb", "")
+                        text = f"{name} {doc} {fp} {cv}"
+                    graph_texts_to_embed.append(text)
+                    all_graph_nodes_to_embed.append(props)
+
+            if graph_texts_to_embed:
+                if progress_callback:
+                    progress_callback(total_files, total_files, f"Generating vector embeddings for {len(graph_texts_to_embed)} graph nodes...")
+                try:
+                    graph_embeddings = self.embedder.embed_texts(graph_texts_to_embed)
+                    for i, props in enumerate(all_graph_nodes_to_embed):
+                        if i < len(graph_embeddings):
+                            props["embedding"] = graph_embeddings[i]
+                except Exception as e:
+                    logger.warning("Failed to generate vector embeddings for graph nodes during bulk run: %s", e)
                     logger.debug(traceback.format_exc())
 
         # Clear content_bytes to save memory
@@ -1164,12 +1175,11 @@ class CodebaseIndexer:
                         nodes_list = []
                         for nid, (props, lbl) in all_graph_nodes.items():
                             if "name" in props:
-                                # For RAM graph, we don't have filepath easily accessible here for all nodes,
-                                # but we can try to extract it from nid which is "filepath::kind::qname::line"
                                 fp = nid.split("::")[0] if "::" in nid else ""
                                 analysis = analyze_name(props["name"], fp)
                                 props.update(analysis)
                             nodes_list.append((nid, props, lbl))
+
                         id_map = ram_graph.insert_nodes_bulk(nodes_list)
 
                         # Resolve LSP definitions into concrete CALLS edges
