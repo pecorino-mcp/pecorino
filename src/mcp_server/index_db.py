@@ -47,7 +47,7 @@ def get_db_path_for_repo(repo_path: str) -> str:
     return str(Path(get_indexes_dir()) / f"{hash_str}_code_search.duckdb")
 
 def get_graph_path_for_repo(duckdb_path: str) -> str:
-    """Convert a duckdb file path to the corresponding kuzu directory path."""
+    """Convert a duckdb file path to the corresponding gorgonzola directory path."""
     p = Path(duckdb_path)
     graph_dir_name = p.stem.replace("_code_search", "_gorgonzola")
     return str(p.parent / graph_dir_name)
@@ -799,7 +799,7 @@ class CodeSearchIndex:
                 if graph and results:
                     import math
                     
-                    def to_kuzu_id(r):
+                    def to_gorgonzola_id(r):
                         filepath = r.get('filepath')
                         name = r.get('name')
                         nt = r.get('kind', '').lower()
@@ -810,16 +810,16 @@ class CodeSearchIndex:
                             return f"{filepath}::{parts[0]}::{parts[1]}"
                         return f"{filepath}::{name}"
 
-                    kuzu_to_result = {}
+                    gorgonzola_to_result = {}
                     for r in results:
-                        kuzu_to_result[to_kuzu_id(r)] = r
+                        gorgonzola_to_result[to_gorgonzola_id(r)] = r
 
-                    kuzu_ids = list(kuzu_to_result.keys())
+                    gorgonzola_ids = list(gorgonzola_to_result.keys())
                     cypher_query = "MATCH ()-[r]->(n:CodeNode) WHERE n.id IN $ids RETURN n.id as id, count(r) AS in_degree"
-                    boost_res = graph.query(cypher_query, {"ids": kuzu_ids})
+                    boost_res = graph.query(cypher_query, {"ids": gorgonzola_ids})
                     boost_map = {row['id']: row['in_degree'] for row in boost_res}
                     
-                    for k_id, r in kuzu_to_result.items():
+                    for k_id, r in gorgonzola_to_result.items():
                         in_deg = boost_map.get(k_id, 0)
                         if 'score' in r and in_deg > 0:
                             r['score'] *= (1.0 + math.log1p(in_deg))
@@ -827,12 +827,12 @@ class CodeSearchIndex:
 
                     # Fetch immediate usages (callers) for top results
                     top_results = results[:5]
-                    top_kuzu_to_res = {}
+                    top_gorgonzola_to_res = {}
                     for r in top_results:
-                        top_kuzu_to_res[to_kuzu_id(r)] = r
+                        top_gorgonzola_to_res[to_gorgonzola_id(r)] = r
                         
-                    top_kuzu_ids = list(top_kuzu_to_res.keys())
-                    if top_kuzu_ids:
+                    top_gorgonzola_ids = list(top_gorgonzola_to_res.keys())
+                    if top_gorgonzola_ids:
                         usage_query = """
                             MATCH (caller:CodeNode)-[r:CALLS]->(target:CodeNode) 
                             WHERE target.id IN $top_ids 
@@ -841,10 +841,10 @@ class CodeSearchIndex:
                                    caller.start_line as start_line 
                             LIMIT 50
                         """
-                        usage_res = graph.query(usage_query, {"top_ids": top_kuzu_ids})
+                        usage_res = graph.query(usage_query, {"top_ids": top_gorgonzola_ids})
                         for row in usage_res:
                             target_id = row['target_id']
-                            r = top_kuzu_to_res.get(target_id)
+                            r = top_gorgonzola_to_res.get(target_id)
                             if r:
                                 r.setdefault('usages', []).append({
                                     "caller_id": row['caller_id'],
