@@ -42,7 +42,7 @@ class CodebaseIndexer:
         self.search_index = CodeSearchIndex(db_path=db_path)
         self.graph = self.search_index._ensure_graph()
         
-        self.enable_embeddings = True # Force enable for Phase 5
+        self.enable_embeddings = getattr(settings, 'enable_embeddings', True)
         if self.enable_embeddings:
             from src.mcp_server.embedder import Embedder
             self.embedder = Embedder(self.search_index._conn)
