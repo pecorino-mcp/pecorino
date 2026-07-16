@@ -16,7 +16,7 @@ from src.mcp_server.tools.browse import do_browse
 
 logger = logging.getLogger(__name__)
 workspace_root = Path(__file__).resolve().parent.parent.parent.parent
-INDEX_TIMEOUT_S = 300
+INDEX_TIMEOUT_S = 3600
 
 async def do_update_index(target: str, ctx: ServerRequestContext | None = None, allow_external: bool = False) -> dict:
     # Invalidate pagerank cache on the existing GraphAPI if cached, before clearing

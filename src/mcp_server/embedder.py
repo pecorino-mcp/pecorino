@@ -27,6 +27,13 @@ class Embedder:
         if self._model is not None:
             return
         try:
+            import os
+            import torch
+            max_threads = max(1, int((os.cpu_count() or 4) * 0.75))
+            torch.set_num_threads(max_threads)
+            os.environ["OMP_NUM_THREADS"] = str(max_threads)
+            os.environ["TOKENIZERS_PARALLELISM"] = "false"
+            
             from sentence_transformers import SentenceTransformer
             self._model = SentenceTransformer(self.model_name)
             self._encode = lambda texts: self._model.encode(texts).tolist()
@@ -34,9 +41,7 @@ class Embedder:
         except ImportError:
             logger.warning("sentence-transformers not found. Falling back to fastembed.")
             from fastembed import TextEmbedding
-            # Note: Fastembed uses slightly different model names. 
-            # We use their default v2 model mapping.
-            self._model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
+            self._model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2", threads=max_threads)
             self._encode = lambda texts: [list(v) for v in self._model.embed(texts)]
             logger.info(f"Loaded fastembed model {self.model_name}")
 
