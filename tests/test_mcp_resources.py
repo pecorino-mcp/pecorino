@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 @pytest.mark.asyncio
 async def test_list_resources():
     repo_path = "/tmp/mock_repo_resources"
-    registry.register_repo(repo_path, "duckdb_path", "kuzu_path")
+    registry.register_repo(repo_path, "duckdb_path", "gorgonzola_path")
     
     ctx_mock = MagicMock()
     # Mock require_roots to avoid fetching from real context

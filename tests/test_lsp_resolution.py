@@ -33,7 +33,7 @@ def caller_function():
         res = indexer.index_directory(str(workspace))
         assert res["status"] == "success"
         
-        # Verify direct CALLS edge in Kuzu DB: caller_function -> target_function
+        # Verify direct CALLS edge in gorgonzola DB: caller_function -> target_function
         with indexer.graph as g:
             q = (
                 "MATCH (c:Function)-[:CALLS]->(t:Function) "

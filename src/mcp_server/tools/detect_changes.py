@@ -93,7 +93,7 @@ async def do_detect_changes(
         except Exception as e:
             logger.warning(f"DuckDB query failed for {abs_file}: {e}")
             
-    # Deduplicate nodes by name (since DuckDB IDs include line numbers, we want Kuzu IDs which are usually prefixes)
+    # Deduplicate nodes by name (since DuckDB IDs include line numbers, we want Gorgonzola IDs which are usually prefixes)
     unique_names = list(set(n["name"] for n in changed_nodes))
     
     impact_results = []
