@@ -29,12 +29,12 @@ class RegistryDB:
                     repo_path VARCHAR UNIQUE,
                     name VARCHAR,
                     duckdb_path VARCHAR,
-                    kuzu_path VARCHAR,
+                    gorgonzola_path VARCHAR,
                     last_indexed TIMESTAMP DEFAULT now()
                 )
             ''')
 
-    def register_repo(self, repo_path: str, duckdb_path: str, kuzu_path: str):
+    def register_repo(self, repo_path: str, duckdb_path: str, gorgonzola_path: str):
         """Register or update a repository in the global registry."""
         resolved = Path(repo_path).resolve()
         hash_str = hashlib.md5(str(resolved).encode('utf-8')).hexdigest()
@@ -42,25 +42,25 @@ class RegistryDB:
 
         with self._get_conn() as conn:
             conn.execute('''
-                INSERT INTO repositories (hash, repo_path, name, duckdb_path, kuzu_path, last_indexed)
+                INSERT INTO repositories (hash, repo_path, name, duckdb_path, gorgonzola_path, last_indexed)
                 VALUES (?, ?, ?, ?, ?, now())
                 ON CONFLICT (hash) DO UPDATE SET
                     duckdb_path = excluded.duckdb_path,
-                    kuzu_path = excluded.kuzu_path,
+                    gorgonzola_path = excluded.gorgonzola_path,
                     last_indexed = now()
-            ''', (hash_str, str(resolved), name, duckdb_path, kuzu_path))
+            ''', (hash_str, str(resolved), name, duckdb_path, gorgonzola_path))
 
     def get_all_repos(self) -> List[Dict[str, str]]:
         """Get all registered repositories."""
         with self._get_conn() as conn:
-            rows = conn.execute("SELECT hash, repo_path, name, duckdb_path, kuzu_path FROM repositories").fetchall()
+            rows = conn.execute("SELECT hash, repo_path, name, duckdb_path, gorgonzola_path FROM repositories").fetchall()
             return [
                 {
                     "hash": r[0],
                     "repo_path": r[1],
                     "name": r[2],
                     "duckdb_path": r[3],
-                    "kuzu_path": r[4]
+                    "gorgonzola_path": r[4]
                 } for r in rows
             ]
 
@@ -68,14 +68,14 @@ class RegistryDB:
         resolved = Path(repo_path).resolve()
         hash_str = hashlib.md5(str(resolved).encode('utf-8')).hexdigest()
         with self._get_conn() as conn:
-            row = conn.execute("SELECT hash, repo_path, name, duckdb_path, kuzu_path FROM repositories WHERE hash = ?", (hash_str,)).fetchone()
+            row = conn.execute("SELECT hash, repo_path, name, duckdb_path, gorgonzola_path FROM repositories WHERE hash = ?", (hash_str,)).fetchone()
             if row:
                 return {
                     "hash": row[0],
                     "repo_path": row[1],
                     "name": row[2],
                     "duckdb_path": row[3],
-                    "kuzu_path": row[4]
+                    "gorgonzola_path": row[4]
                 }
             return None
 

@@ -349,7 +349,7 @@ class GorgonzolaGraph:
                         if col in _NUMERIC_COLUMNS:
                             row.append(int(val) if col != "mtime" else float(val))
                         elif isinstance(val, list):
-                            # Kuzu expects [a,b,c] for array in CSV
+                            # Gorgonzola expects [a,b,c] for array in CSV
                             row.append("[" + ",".join(str(v).replace('\n', ' ').replace('\r', '') for v in val) + "]")
                         else:
                             row.append(str(val).replace('\n', ' ').replace('\r', ''))
