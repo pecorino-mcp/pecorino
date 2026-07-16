@@ -104,7 +104,7 @@ async def do_detect_changes(
         for name in unique_names:
             try:
                 cypher = """
-                MATCH p = (source:CodeNode)-[:CALLS|DEPENDS_ON*1..2]->(target:CodeNode)
+                MATCH p = (source:CodeNode)-[:CALLS*1..2]->(target:CodeNode)
                 WHERE target.name = $name
                 RETURN source.name AS caller, source.filepath AS filepath
                 LIMIT 10
