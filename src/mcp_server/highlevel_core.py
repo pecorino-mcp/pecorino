@@ -221,3 +221,77 @@ async def metrics(
     )
     return format_output(res)
 
+
+@server.prompt()
+def browse(target: str = "", view: str = "tree") -> list[dict]:
+    """Browse codebase structure (tree, deps, classes, functions, pagerank, summary)."""
+    target_str = f" on target '{target}'" if target else ""
+    return [{"role": "user", "content": {"type": "text", "text": f"Please use the browse tool{target_str} with view '{view}'."}}]
+
+@server.prompt()
+def search(query: str = "", target: str = "", mode: str = "fts", intent: str = "", include_source: bool = False) -> list[dict]:
+    """Unified search and analysis. Supports FTS, callers/callees, impact, usages, intent presets, and DSL queries."""
+    target_str = f" on target '{target}'" if target else ""
+    if mode == "intent" and intent:
+        return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='intent' and intent='{intent}'."}}]
+    elif mode in ("callers", "callees", "usages"):
+        return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='{mode}' for symbol '{query}'."}}]
+    else:
+        return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='{mode}' for query '{query}'."}}]
+
+@server.prompt()
+def update_index(target: str = "") -> list[dict]:
+    """Update the AST index for the codebase and return a structural summary."""
+    target_str = f" on target '{target}'" if target else ""
+    return [{"role": "user", "content": {"type": "text", "text": f"Please use the update_index tool{target_str}."}}]
+
+
+@server.prompt()
+def metrics(target: str, what: str = "all") -> list[dict]:
+    """Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis."""
+    target_str = f" on target '{target}'" if target else ""
+    return [{"role": "user", "content": {"type": "text", "text": f"Please calculate {what} metrics{target_str}."}}]
+
+@server.resource(
+    uri="pecorino://index/{repo_hash}/summary",
+    name="Repository Summary",
+    description="Language breakdown and counts for the repo",
+    mime_type="application/json"
+)
+def read_repo_summary(repo_hash: str) -> str:
+    from src.mcp_server.index_db import get_indexes_dir
+    from src.mcp_server.middleware.caching import _get_cached_api
+    from pathlib import Path
+    import json
+    db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.duckdb"
+    if not db_path.exists():
+        raise ValueError(f"Index database not found for hash: {repo_hash}")
+    index_api = _get_cached_api(None, str(db_path), "index")
+    conn = index_api._conn
+    lang_counts = conn.execute("SELECT lang, count(*) as c FROM files GROUP BY lang").fetchall()
+    total_files = conn.execute("SELECT count(*) FROM files").fetchone()[0]
+    total_symbols = conn.execute("SELECT count(*) FROM code_nodes").fetchone()[0]
+    return json.dumps({
+        "total_files": total_files,
+        "total_symbols": total_symbols,
+        "languages": {row[0]: row[1] for row in lang_counts}
+    }, indent=2)
+
+@server.resource(
+    uri="pecorino://index/{repo_hash}/files",
+    name="Indexed Files",
+    description="List of all indexed files",
+    mime_type="application/json"
+)
+def read_repo_files(repo_hash: str) -> str:
+    from src.mcp_server.index_db import get_indexes_dir
+    from src.mcp_server.middleware.caching import _get_cached_api
+    from pathlib import Path
+    import json
+    db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.duckdb"
+    if not db_path.exists():
+        raise ValueError(f"Index database not found for hash: {repo_hash}")
+    index_api = _get_cached_api(None, str(db_path), "index")
+    conn = index_api._conn
+    files = conn.execute("SELECT filepath, lang, mtime FROM files ORDER BY filepath").fetchall()
+    return json.dumps([{"filepath": r[0], "language": r[1], "mtime": r[2]} for r in files], indent=2)
