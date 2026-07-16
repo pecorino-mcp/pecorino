@@ -102,7 +102,7 @@ class FederatedGraphAPI(GraphAPI):
                                 q = f"MATCH (a:CodeNode) RETURN {cols}"
                                 res = conn.execute(q)
                                 with open(merged_node_csv, 'a', newline='', encoding='utf-8') as outfile:
-                                    writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='"')
+                                    writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='\\')
                                     while res.has_next():
                                         row = res.get_next()
                                         if not row: continue
@@ -123,7 +123,7 @@ class FederatedGraphAPI(GraphAPI):
                                 q_ident = f"MATCH (a:Identifier) RETURN {cols_ident}"
                                 res = conn.execute(q_ident)
                                 with open(merged_identifier_csv, 'a', newline='', encoding='utf-8') as outfile:
-                                    writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='"')
+                                    writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='\\')
                                     while res.has_next():
                                         row = res.get_next()
                                         if not row: continue
@@ -145,7 +145,7 @@ class FederatedGraphAPI(GraphAPI):
                                         res = conn.execute(q)
                                         key = f"{table}_{from_table}_{to_table}"
                                         with open(merged_rel_csvs[table], 'a', newline='', encoding='utf-8') as outfile:
-                                            writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='"')
+                                            writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar='\\')
                                             while res.has_next():
                                                 row = res.get_next()
                                                 if not row: continue
