@@ -35,7 +35,8 @@ class Config:
             self.index_dir = Path("~/.pecorino/indexes").expanduser()
 
         self.enable_embeddings = os.getenv("PECORINO_ENABLE_EMBEDDINGS", "true").lower() in ("true", "1", "yes")
-        self.embedding_model = os.getenv("PECORINO_EMBEDDING_MODEL", "Xenova/all-MiniLM-L6-v2")
+        default_model = str(self.workspace_root / "models" / "Xenova" / "all-MiniLM-L12-v2")
+        self.embedding_model = os.getenv("PECORINO_EMBEDDING_MODEL", default_model)
         default_dim = "384"
         if "nomic" in self.embedding_model.lower():
             default_dim = "768"
