@@ -176,9 +176,8 @@ class FileWatcherService:
         if success:
             clear_index_cache()
             logger.debug("Index cache cleared after watcher sync")
-            # Notify clients that resources changed (if any are listening)
-            bus.publish("resources_changed", None)
-
+            from mcp.shared.subscriptions import ResourcesListChanged
+            await bus.publish(ResourcesListChanged())
 # Global watcher instance
 _file_watcher: FileWatcherService = None
 
