@@ -22,7 +22,22 @@ _RELATIONSHIP_SCHEMA = [
     "CREATE REL TABLE IMPORTS (FROM CodeNode TO CodeNode, is_external BOOLEAN, import_text STRING)",
     "CREATE REL TABLE INHERITS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE PARAMETER_OF (FROM CodeNode TO CodeNode, position INT64)",
-    "CREATE REL TABLE RETURNS (FROM CodeNode TO CodeNode)"
+    "CREATE REL TABLE RETURNS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE DEPENDS_ON (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE DEFINES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE EXTENDS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE IMPLEMENTS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE FILE_CHANGES_WITH (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE HTTP_CALLS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE READS (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE WRITES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE HAS_PARAMETER (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE USES (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE CONTAINS_LAMBDA (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE ACCESSES_STATE (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE RECURSES_TO (FROM CodeNode TO CodeNode)"
 ]
 
 def init_gorgonzola_schema(conn):

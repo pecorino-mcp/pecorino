@@ -244,6 +244,26 @@ def update_index(target: str = "") -> list[dict]:
     """Update the AST index for the codebase and return a structural summary."""
     target_str = f" on target '{target}'" if target else ""
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the update_index tool{target_str}."}}]
+@server.prompt()
+def detect_changes(base: str = "HEAD", target: str = "") -> list[dict]:
+    """Detect changed symbols and their impact using git diff and the AST index."""
+    target_str = f" on target '{target}'" if target else ""
+    return [{"role": "user", "content": {"type": "text", "text": f"Please use the detect_changes tool{target_str} against base '{base}'."}}]
+
+@server.prompt()
+def manage_adr(action: str, title: str = "", adr_id: str = "", context: str = "", decision: str = "", consequences: str = "") -> list[dict]:
+    """Manage Architecture Decision Records (ADRs)."""
+    return [{"role": "user", "content": {"type": "text", "text": f"Please use the manage_adr tool with action '{action}'."}}]
+
+@server.prompt()
+def manage_snapshot(action: str, file_path: str = "snapshot.zst") -> list[dict]:
+    """Export or import a .zst graph snapshot for the current repository."""
+    return [{"role": "user", "content": {"type": "text", "text": f"Please use the manage_snapshot tool to {action} using '{file_path}'."}}]
+
+@server.prompt()
+def query_graph(query: str) -> list[dict]:
+    """Execute an openCypher query directly against the Kùzu graph."""
+    return [{"role": "user", "content": {"type": "text", "text": f"Please execute this openCypher query against the graph:\n\n{query}"}}]
 
 
 @server.prompt()
