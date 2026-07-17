@@ -34,18 +34,22 @@ async def _get_roots(ctx: Context) -> ListRoots:
     return ListRoots()
 
 async def _resolve_target(target: Any, roots_result: ListRootsResult) -> str:
-    if target is None or (isinstance(target, str) and (not target.strip() or target.strip() == ".")):
+    if target is None or (isinstance(target, str) and not target.strip()):
         try:
+            logger.info("RESOLVE TARGET: roots_result=%s", getattr(roots_result, "roots", []))
             if roots_result.roots:
-                first_root = roots_result.roots[0]
-                uri = getattr(first_root, "uri", None)
-                if uri is None and isinstance(first_root, dict):
-                    uri = first_root.get("uri")
-                if uri and uri.startswith("file://"):
-                    from urllib.parse import unquote
-                    return unquote(uri[7:])
-        except Exception:
-            pass
+                for root in roots_result.roots:
+                    uri = getattr(root, "uri", None)
+                    if uri is None and isinstance(root, dict):
+                        uri = root.get("uri")
+                    logger.info("ROOT URI: %s", uri)
+                    if uri:
+                        uri_str = str(uri)
+                        if uri_str.startswith("file://"):
+                            from urllib.parse import unquote
+                            return unquote(uri_str[7:])
+        except Exception as e:
+            logger.exception("Error in _resolve_target: %s", e)
 
         cwd = os.getcwd()
         from src.mcp_server.index_db import find_repo_root
@@ -254,17 +258,17 @@ def detect_changes(base: str = "HEAD", target: str = "") -> list[dict]:
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the detect_changes tool{target_str} against base '{base}'."}}]
 
 @server.prompt()
-def manage_adr(action: str, title: str = "", adr_id: str = "", context: str = "", decision: str = "", consequences: str = "") -> list[dict]:
+def manage_adr(action: str = "", title: str = "", adr_id: str = "", context: str = "", decision: str = "", consequences: str = "") -> list[dict]:
     """Manage Architecture Decision Records (ADRs)."""
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the manage_adr tool with action '{action}'."}}]
 
 @server.prompt()
-def manage_snapshot(action: str, file_path: str = "snapshot.zst") -> list[dict]:
+def manage_snapshot(action: str = "", file_path: str = "snapshot.zst") -> list[dict]:
     """Export or import a .zst graph snapshot for the current repository."""
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the manage_snapshot tool to {action} using '{file_path}'."}}]
 
 @server.prompt()
-def query_graph(query: str) -> list[dict]:
+def query_graph(query: str = "") -> list[dict]:
     """Execute an openCypher query directly against the Kùzu graph."""
     return [{"role": "user", "content": {"type": "text", "text": f"Please execute this openCypher query against the graph:\n\n{query}"}}]
 
