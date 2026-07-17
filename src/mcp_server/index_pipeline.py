@@ -658,41 +658,48 @@ class CodebaseIndexer:
         try:
             # 1. SEMANTICALLY_RELATED (Vector Similarity)
             if self.enable_embeddings and self.search_index:
-                # Use DuckDB cross join for nodes in different files with cosine distance <= 0.20 (score >= 0.80)
-                semantic_query = """
-                SELECT a.id as from_id, b.id as to_id, 1.0 - array_cosine_distance(a.embedding, b.embedding) as score
-                FROM code_nodes a, code_nodes b
-                WHERE a.id < b.id
-                  AND a.kind IN ('Function', 'Method', 'Class')
-                  AND b.kind IN ('Function', 'Method', 'Class')
-                  AND a.filepath != b.filepath
-                  AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-                  AND array_cosine_distance(a.embedding, b.embedding) <= 0.20
-                """
-                df_semantic = self.search_index._conn.execute(semantic_query).df()
-                if not df_semantic.empty:
-                    semantic_edges = []
-                    for _, row in df_semantic.iterrows():
-                        semantic_edges.extend([
-                            (row['from_id'], row['to_id'], float(row['score'])),
-                            (row['to_id'], row['from_id'], float(row['score']))
-                        ])
-                    if semantic_edges:
-                        # Write to temporary CSV and load into Kùzu
-                        import tempfile
-                        import csv
-                        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
-                            writer = csv.writer(f)
-                            for edge in semantic_edges:
-                                writer.writerow(edge)
-                            tmp_path = f.name
-                        
-                        try:
-                            with self.graph:
-                                self.graph._conn.execute(f"COPY SEMANTICALLY_RELATED FROM '{tmp_path}' (HEADER=false);")
-                            logger.info(f"Loaded {len(semantic_edges)} SEMANTICALLY_RELATED edges.")
-                        finally:
-                            os.remove(tmp_path)
+                # Use DuckDB HNSW index with K-NN queries (O(N log N)) instead of O(N^2) cross join
+                query = "SELECT id, filepath, embedding FROM code_nodes WHERE kind IN ('Function', 'Method', 'Class') AND embedding IS NOT NULL"
+                try:
+                    nodes = self.search_index._conn.execute(query).fetchall()
+                    if nodes:
+                        semantic_edges = []
+                        for nid, fpath, emb in nodes:
+                            knn_query = """
+                            SELECT id, 1.0 - array_cosine_distance(embedding, ?) as score
+                            FROM code_nodes
+                            WHERE kind IN ('Function', 'Method', 'Class')
+                              AND id != ?
+                              AND filepath != ?
+                              AND embedding IS NOT NULL
+                            ORDER BY array_cosine_distance(embedding, ?)
+                            LIMIT 5
+                            """
+                            neighbors = self.search_index._conn.execute(knn_query, [emb, nid, fpath, emb]).fetchall()
+                            for neighbor_id, score in neighbors:
+                                if score >= 0.80:
+                                    semantic_edges.extend([
+                                        (nid, neighbor_id, float(score)),
+                                        (neighbor_id, nid, float(score))
+                                    ])
+                        if semantic_edges:
+                            # Write to temporary CSV and load into Kùzu
+                            import tempfile
+                            import csv
+                            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
+                                writer = csv.writer(f)
+                                for edge in semantic_edges:
+                                    writer.writerow(edge)
+                                tmp_path = f.name
+                            
+                            try:
+                                with self.graph:
+                                    self.graph._conn.execute(f"COPY SEMANTICALLY_RELATED FROM '{tmp_path}' (HEADER=false);")
+                                logger.info(f"Loaded {len(semantic_edges)} SEMANTICALLY_RELATED edges.")
+                            finally:
+                                os.remove(tmp_path)
+                except Exception as e:
+                    logger.warning(f"Failed to generate SEMANTICALLY_RELATED edges: {e}")
 
             # 2. SIMILAR_TO (MinHash/Jaccard via datasketch)
             try:
