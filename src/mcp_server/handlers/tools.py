@@ -435,12 +435,13 @@ async def handle_call_tool(
                     if type(e).__name__ == "NeedsInputError":
                         raise e
 
-                cwd = os.getcwd()
                 from src.mcp_server.index_db import find_repo_root
-                fallback = find_repo_root(cwd)
-                if not (Path(fallback) / ".git").is_dir() and (settings.workspace_root / ".git").is_dir():
-                    fallback = str(settings.workspace_root)
-                return fallback
+                
+                if (settings.workspace_root / ".git").is_dir():
+                    return str(settings.workspace_root)
+                    
+                cwd = os.getcwd()
+                return find_repo_root(cwd)
             return str(t) if not isinstance(t, str) else t
 
         if name == "browse":

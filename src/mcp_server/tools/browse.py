@@ -267,11 +267,27 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                         SELECT COUNT(*) FROM files WHERE filepath LIKE ?
                     ''', (f"{prefix}%",)).fetchone()
                     total_files = db_res[0] if db_res else 0
-                    result["structure"] = {"total_indexed_files": total_files, "note": "Summary overview."}
+                    
+                    lang_res = index._conn.execute('''
+                        SELECT lang, COUNT(*) FROM files WHERE filepath LIKE ? GROUP BY lang
+                    ''', (f"{prefix}%",)).fetchall()
+                    languages = {row[0]: row[1] for row in lang_res}
+                    
+                    sym_res = index._conn.execute('''
+                        SELECT COUNT(*) FROM code_nodes WHERE filepath LIKE ?
+                    ''', (f"{prefix}%",)).fetchone()
+                    total_symbols = sym_res[0] if sym_res else 0
+                    
+                    result["structure"] = {
+                        "total_indexed_files": total_files,
+                        "total_symbols": total_symbols,
+                        "languages": languages,
+                        "note": "Summary overview."
+                    }
                 except Exception:
-                    result["structure"] = {"total_indexed_files": 0}
+                    result["structure"] = {"total_indexed_files": 0, "total_symbols": 0, "languages": {}}
             else:
-                result["structure"] = {"total_indexed_files": 0, "note": "Unindexed directory."}
+                result["structure"] = {"total_indexed_files": 0, "total_symbols": 0, "languages": {}, "note": "Unindexed directory."}
 
     elif view == "code":
         if not is_file:
