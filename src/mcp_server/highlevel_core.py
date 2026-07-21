@@ -35,8 +35,10 @@ _cached_roots_paths: list[str] = []
 async def _get_roots(ctx: Context) -> ListRoots:
     return ListRoots()
 
-@server.notification("notifications/roots/list_changed")
-async def handle_roots_list_changed(ctx: Context, **kwargs: Any) -> None:
+from mcp_types import NotificationParams
+from mcp.server.context import ServerRequestContext
+
+async def handle_roots_list_changed(ctx: ServerRequestContext, params: NotificationParams) -> None:
     """Handle root list changes by refreshing the cached roots."""
     global _cached_roots_paths
     logger.info("Received notifications/roots/list_changed. Refreshing roots.")
@@ -57,6 +59,12 @@ async def handle_roots_list_changed(ctx: Context, **kwargs: Any) -> None:
                 logger.info(f"Updated cached roots: {_cached_roots_paths}")
     except Exception as e:
         logger.warning(f"Failed to refresh roots after list_changed: {e}")
+
+server._lowlevel_server.add_notification_handler(
+    "notifications/roots/list_changed",
+    NotificationParams,
+    handle_roots_list_changed
+)
 
 async def _resolve_target(target: Any, roots_result: ListRootsResult) -> str:
     global _cached_roots_paths
