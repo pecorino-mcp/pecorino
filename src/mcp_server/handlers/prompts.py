@@ -44,7 +44,14 @@ async def handle_list_prompts(
                 types.PromptArgument(name="target", description="Target path to update index for", required=False)
             ]
         ),
-
+        types.Prompt(
+            name="query_graph",
+            description="Execute an openCypher query directly against the Kùzu graph.",
+            arguments=[
+                types.PromptArgument(name="query", description="The openCypher query string to execute", required=True),
+                types.PromptArgument(name="target", description="Target path", required=False)
+            ]
+        ),
     ]
 
     if role == "admin":
@@ -88,14 +95,16 @@ async def handle_get_prompt(
                 messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} with mode='intent' and intent='{intent}'."))]
             )
         elif mode in ("callers", "callees", "usages"):
+            q_str = f" for symbol '{query}'" if query else ""
             return types.GetPromptResult(
                 description="Search the codebase.",
-                messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} with mode='{mode}' for symbol '{query}'."))]
+                messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} with mode='{mode}'{q_str}."))]
             )
         else:
+            q_str = f" for query '{query}'" if query else ""
             return types.GetPromptResult(
                 description="Search the codebase.",
-                messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} with mode='{mode}' for query '{query}'."))]
+                messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the search tool{target_str} with mode='{mode}'{q_str}."))]
             )
     elif name == "update_index":
         target = arguments.get("target", "")
@@ -103,6 +112,14 @@ async def handle_get_prompt(
         return types.GetPromptResult(
             description="Update codebase index.",
             messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the update_index tool{target_str}."))]
+        )
+    elif name == "query_graph":
+        target = arguments.get("target", "")
+        query = arguments.get("query", "")
+        target_str = f" on target '{target}'" if target else ""
+        return types.GetPromptResult(
+            description="Execute an openCypher query.",
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=f"Please use the query_graph tool{target_str} to execute this Cypher query:\n\n{query}"))]
         )
 
     elif name == "metrics":
