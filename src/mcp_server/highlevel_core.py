@@ -242,9 +242,11 @@ def search(query: str = "", target: str = "", mode: str = "fts", intent: str = "
     if mode == "intent" and intent:
         return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='intent' and intent='{intent}'."}}]
     elif mode in ("callers", "callees", "usages"):
-        return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='{mode}' for symbol '{query}'."}}]
+        q_str = f" for symbol '{query}'" if query else ""
+        return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='{mode}'{q_str}."}}]
     else:
-        return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='{mode}' for query '{query}'."}}]
+        q_str = f" for query '{query}'" if query else ""
+        return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='{mode}'{q_str}."}}]
 
 @server.prompt()
 def update_index(target: str = "") -> list[dict]:
@@ -268,7 +270,7 @@ def manage_snapshot(action: str = "", file_path: str = "snapshot.zst") -> list[d
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the manage_snapshot tool to {action} using '{file_path}'."}}]
 
 @server.prompt()
-def query_graph(query: str = "") -> list[dict]:
+def query_graph(query: str) -> list[dict]:
     """Execute an openCypher query directly against the Kùzu graph."""
     return [{"role": "user", "content": {"type": "text", "text": f"Please execute this openCypher query against the graph:\n\n{query}"}}]
 
