@@ -86,6 +86,7 @@ ALLOWED_EXTENSIONS: Set[str] = {
 
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
     '.py', '.pyi', '.java', '.scala', '.kt', '.js', '.jsx', '.ts', '.tsx',
+    '.mjs', '.cjs', '.rb',
     '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.hxx', '.go', '.rs', '.swift'
 })
 
