@@ -30,24 +30,56 @@ logger = logging.getLogger(__name__)
 
 server = MCPServer("OOP Metrics Analyzer Server 🚀")
 
+_cached_roots_paths: list[str] = []
+
 async def _get_roots(ctx: Context) -> ListRoots:
     return ListRoots()
 
+@server.notification("notifications/roots/list_changed")
+async def handle_roots_list_changed(ctx: Context, **kwargs: Any) -> None:
+    """Handle root list changes by refreshing the cached roots."""
+    global _cached_roots_paths
+    logger.info("Received notifications/roots/list_changed. Refreshing roots.")
+    try:
+        from mcp_types import ListRootsRequest, ListRootsResult
+        res = await ctx.session.send_request(ListRootsRequest(), ListRootsResult)
+        if res and res.roots:
+            new_roots = []
+            for root in res.roots:
+                uri = getattr(root, "uri", None)
+                if uri is None and isinstance(root, dict):
+                    uri = root.get("uri")
+                if uri and str(uri).startswith("file://"):
+                    from urllib.parse import unquote
+                    new_roots.append(unquote(str(uri)[7:]))
+            if new_roots:
+                _cached_roots_paths = new_roots
+                logger.info(f"Updated cached roots: {_cached_roots_paths}")
+    except Exception as e:
+        logger.warning(f"Failed to refresh roots after list_changed: {e}")
+
 async def _resolve_target(target: Any, roots_result: ListRootsResult) -> str:
+    global _cached_roots_paths
     if target is None or (isinstance(target, str) and not target.strip()):
         try:
-            logger.info("RESOLVE TARGET: roots_result=%s", getattr(roots_result, "roots", []))
-            if roots_result.roots:
+            # If cache is empty, populate it from the latest roots_result
+            if not _cached_roots_paths and roots_result and roots_result.roots:
+                new_roots = []
                 for root in roots_result.roots:
                     uri = getattr(root, "uri", None)
                     if uri is None and isinstance(root, dict):
                         uri = root.get("uri")
-                    logger.info("ROOT URI: %s", uri)
                     if uri:
                         uri_str = str(uri)
                         if uri_str.startswith("file://"):
                             from urllib.parse import unquote
-                            return unquote(uri_str[7:])
+                            new_roots.append(unquote(uri_str[7:]))
+                if new_roots:
+                    _cached_roots_paths = new_roots
+                    logger.info("Initialized cached roots: %s", _cached_roots_paths)
+
+            if _cached_roots_paths:
+                return _cached_roots_paths[0]
         except Exception as e:
             logger.exception("Error in _resolve_target: %s", e)
 
