@@ -6,7 +6,7 @@ import threading
 import logging
 import queue
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +135,16 @@ class LSPClient:
                     logger.debug(f"Error in LSP read loop: {e}")
                 return
                 
-    def send_request(self, method: str, params: dict, timeout: float = 5.0) -> Optional[dict]:
+    def send_request(self, method: str, params: dict, timeout: Optional[float] = None) -> Optional[dict]:
         if not self.running or not self.process or not self.process.stdin:
             return None
+
+        if timeout is None:
+            try:
+                from src.mcp_server.config import settings
+                timeout = settings.lsp_request_timeout
+            except Exception:
+                timeout = 0.8
             
         with self._id_lock:
             self._id += 1
@@ -205,7 +212,7 @@ class LSPClient:
             }
         })
         
-    def resolve_definition(self, filepath: str, line: int, character: int) -> Optional[dict]:
+    def resolve_definition(self, filepath: str, line: int, character: int, timeout: Optional[float] = None) -> Optional[dict]:
         """Query definition of symbol at 1-indexed line and 0-indexed character.
         
         Returns dict containing:
@@ -221,7 +228,7 @@ class LSPClient:
                 "line": line - 1, # LSP is 0-indexed for line
                 "character": character
             }
-        })
+        }, timeout=timeout)
         
         if not res:
             return None
@@ -241,7 +248,6 @@ class LSPClient:
         # Parse URI back to path
         if uri.startswith("file://"):
             import urllib.parse
-            # On windows, file:///C:/path -> C:\path, on unix, file:///path -> /path
             def_path = urllib.parse.unquote(uri[7:])
             if def_path.startswith("/") and os.name == "nt" and def_path[2] == ":":
                 def_path = def_path[1:]
@@ -256,3 +262,74 @@ class LSPClient:
             "start_line": start_pos.get("line", 0) + 1, # Convert back to 1-indexed
             "start_char": start_pos.get("character", 0)
         }
+
+    def resolve_definitions_batch(self, filepath: str, positions: List[Tuple[int, int]], timeout_per_query: float = 0.5, max_queries: int = 50) -> List[dict]:
+        resolutions = []
+        for line, char in positions[:max_queries]:
+            res = self.resolve_definition(filepath, line, char, timeout=timeout_per_query)
+            if res:
+                resolutions.append({
+                    "call_line": line,
+                    "def_filepath": res["filepath"],
+                    "def_line": res["start_line"]
+                })
+        return resolutions
+
+
+class LSPClientPool:
+    def __init__(self, workspace_root: str, pool_size: int = 2, lsp_binary: str = None):
+        self.workspace_root = workspace_root
+        self.pool_size = max(1, pool_size)
+        self.lsp_binary = lsp_binary
+        self.clients: List[LSPClient] = []
+        self._index = 0
+        self._lock = threading.Lock()
+
+    def start(self) -> bool:
+        successful_starts = 0
+        for _ in range(self.pool_size):
+            client = LSPClient(self.workspace_root, self.lsp_binary)
+            if client.start():
+                self.clients.append(client)
+                successful_starts += 1
+            else:
+                logger.warning("Failed to start a worker in LSPClientPool")
+        return successful_starts > 0
+
+    def stop(self):
+        with self._lock:
+            for client in self.clients:
+                try:
+                    client.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping LSP worker: {e}")
+            self.clients.clear()
+
+    def get_client(self) -> Optional[LSPClient]:
+        with self._lock:
+            if not self.clients:
+                return None
+            client = self.clients[self._index % len(self.clients)]
+            self._index += 1
+            return client
+
+    def open_document(self, filepath: str, content: str):
+        with self._lock:
+            clients = list(self.clients)
+        for client in clients:
+            try:
+                client.open_document(filepath, content)
+            except Exception:
+                pass
+
+    def resolve_definition(self, filepath: str, line: int, character: int, timeout: Optional[float] = None) -> Optional[dict]:
+        client = self.get_client()
+        if not client:
+            return None
+        return client.resolve_definition(filepath, line, character, timeout=timeout)
+
+    def resolve_definitions_batch(self, filepath: str, positions: List[Tuple[int, int]], timeout_per_query: float = 0.5, max_queries: int = 50) -> List[dict]:
+        client = self.get_client()
+        if not client:
+            return []
+        return client.resolve_definitions_batch(filepath, positions, timeout_per_query=timeout_per_query, max_queries=max_queries)
