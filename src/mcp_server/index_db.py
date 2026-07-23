@@ -3,7 +3,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import duckdb
 
@@ -79,6 +79,7 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes ADD COLUMN signature VARCHAR',
         'ALTER TABLE code_nodes ADD COLUMN in_degree INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN out_degree INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN hcgs_summary VARCHAR',
     ]
     for query in migrations:
         try:
@@ -254,7 +255,7 @@ class CodeSearchIndex:
         # Let the FTS extension manage the overwrite internally
         # which avoids the catalog dependency bookkeeping bugs
         try:
-            conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'kind', 'filepath', 'relationships', overwrite=1)")
+            conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'kind', 'filepath', 'relationships', 'hcgs_summary', overwrite=1)")
         except Exception as e:
             logger.warning("FTS rebuild failed: %s", e)
 
@@ -347,13 +348,14 @@ class CodeSearchIndex:
                 n.get('signature', None),
                 0,  # in_degree — computed post-indexing
                 0,  # out_degree — computed post-indexing
+                n.get('hcgs_summary', None),
             ))
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
                 # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
                 conn.execute('''
                     INSERT INTO code_nodes
                     SELECT * FROM temp_code_nodes
@@ -367,7 +369,8 @@ class CodeSearchIndex:
                         start_byte=excluded.start_byte,
                         end_byte=excluded.end_byte,
                         complexity=excluded.complexity,
-                        signature=excluded.signature
+                        signature=excluded.signature,
+                        hcgs_summary=excluded.hcgs_summary
                 ''')
                 conn.execute("DROP TABLE temp_code_nodes")
                 conn.execute("COMMIT")
@@ -399,12 +402,18 @@ class CodeSearchIndex:
         if not filepaths:
             return
         conn = self._conn
-        chunk_size = 500
-        for i in range(0, len(filepaths), chunk_size):
-            chunk = filepaths[i:i+chunk_size]
-            placeholders = ",".join(["?"] * len(chunk))
-            conn.execute(f'DELETE FROM code_nodes WHERE filepath IN ({placeholders})', chunk)
-            conn.execute(f'DELETE FROM files WHERE filepath IN ({placeholders})', chunk)
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            chunk_size = 500
+            for i in range(0, len(filepaths), chunk_size):
+                chunk = filepaths[i:i+chunk_size]
+                placeholders = ",".join(["?"] * len(chunk))
+                conn.execute(f'DELETE FROM code_nodes WHERE filepath IN ({placeholders})', chunk)
+                conn.execute(f'DELETE FROM files WHERE filepath IN ({placeholders})', chunk)
+            conn.execute("COMMIT")
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            raise e
 
         for i in range(0, len(filepaths), chunk_size):
             chunk = filepaths[i:i+chunk_size]
@@ -474,6 +483,34 @@ class CodeSearchIndex:
                         graph.query_batch(queries, params)
                 except Exception:
                     pass
+
+    def update_summaries_bulk(self, summaries: Dict[str, str]):
+        """Update static HCGS summaries for code_nodes in bulk."""
+        if not summaries:
+            return
+        conn = self._conn
+        data = [(text, node_id) for node_id, text in summaries.items()]
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.executemany("UPDATE code_nodes SET hcgs_summary = ? WHERE id = ?", data)
+            conn.execute("COMMIT")
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            raise e
+
+    def update_embeddings_bulk(self, pairs: List[Tuple[str, List[float]]]):
+        """Update vector embeddings for code_nodes in bulk."""
+        if not pairs:
+            return
+        conn = self._conn
+        data = [(emb, node_id) for node_id, emb in pairs]
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.executemany("UPDATE code_nodes SET embedding = ? WHERE id = ?", data)
+            conn.execute("COMMIT")
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            raise e
 
     def upsert_file_hash(self, filepath: str, content_hash: str, mtime: float, lang: str):
         """Upsert a file's hash and metadata for incremental indexing."""
