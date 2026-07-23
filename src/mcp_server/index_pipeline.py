@@ -23,6 +23,7 @@ if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
 from src.core.constants import SUPPORTED_EXTENSIONS, get_language_for_extension
+from src.mcp_server.config import settings
 from src.mcp_server.index_db import CodeSearchIndex, find_repo_root, get_db_path_for_repo
 from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
 from src.parsers.ast import ClassDef, InterfaceDef, walk
@@ -911,6 +912,78 @@ class CodebaseIndexer:
             logger.warning("Failed to post-process graph: %s", e)
             logger.debug(traceback.format_exc())
 
+    def _verify_index_integrity(self) -> dict:
+        """Post-indexing sanity check: verify DuckDB ↔ Gorgonzola consistency.
+
+        Returns a dict with integrity stats and any warnings found.
+        Non-blocking: logs warnings but never raises.
+        """
+        warnings = []
+        stats = {}
+        try:
+            # 1. Count DuckDB files vs Graph File nodes
+            duck_file_count = self.search_index._conn.execute(
+                "SELECT count(*) FROM files"
+            ).fetchone()[0]
+            stats["duckdb_files"] = duck_file_count
+
+            try:
+                with self.graph:
+                    graph_file_rows = self.graph.query(
+                        "MATCH (f:CodeNode {kind: 'File'}) RETURN count(f) AS cnt"
+                    )
+                    graph_file_count = graph_file_rows[0].get("cnt", 0) if graph_file_rows else 0
+                    stats["graph_file_nodes"] = graph_file_count
+
+                    if duck_file_count > 0 and graph_file_count == 0:
+                        warnings.append(
+                            f"Graph has 0 File nodes but DuckDB has {duck_file_count} files — "
+                            "graph may be empty or corrupted"
+                        )
+                    elif duck_file_count > 0 and abs(duck_file_count - graph_file_count) > duck_file_count * 0.5:
+                        warnings.append(
+                            f"File count mismatch: DuckDB={duck_file_count}, Graph={graph_file_count} — "
+                            "stores may be out of sync"
+                        )
+
+                    # 2. Count DuckDB code_nodes vs Graph Function/Method/Class nodes
+                    duck_symbol_count = self.search_index._conn.execute(
+                        "SELECT count(*) FROM code_nodes"
+                    ).fetchone()[0]
+                    stats["duckdb_symbols"] = duck_symbol_count
+
+                    graph_symbol_rows = self.graph.query(
+                        "MATCH (n:CodeNode) WHERE n.kind IN ['Function', 'Method', 'Class'] "
+                        "RETURN count(n) AS cnt"
+                    )
+                    graph_symbol_count = graph_symbol_rows[0].get("cnt", 0) if graph_symbol_rows else 0
+                    stats["graph_symbols"] = graph_symbol_count
+
+                    # 3. Check for orphan edges (edges referencing non-existent nodes)
+                    # Sample a small batch — full scan would be too expensive
+                    orphan_rows = self.graph.query(
+                        "MATCH (a)-[r:CALLS]->(b:CodeNode {kind: 'Symbol'}) "
+                        "WHERE NOT EXISTS { MATCH (t:CodeNode) WHERE t.name = b.name AND t.kind <> 'Symbol' } "
+                        "RETURN count(r) AS cnt"
+                    )
+                    unresolved_symbols = orphan_rows[0].get("cnt", 0) if orphan_rows else 0
+                    stats["unresolved_symbol_edges"] = unresolved_symbols
+
+            except Exception as e:
+                warnings.append(f"Graph integrity check failed: {e}")
+
+        except Exception as e:
+            warnings.append(f"DuckDB integrity check failed: {e}")
+
+        if warnings:
+            for w in warnings:
+                logger.warning("[integrity] %s", w)
+            stats["warnings"] = warnings
+        else:
+            logger.info("[integrity] Post-index verification passed: %s", stats)
+
+        return stats
+
     def index_directory(self, dirpath: str, progress_callback=None) -> dict:
         path = pathlib.Path(dirpath).resolve()
         self.lsp_client = None
@@ -1262,6 +1335,15 @@ class CodebaseIndexer:
                             ram_graph.insert_edges_bulk(edges_list, id_map)
 
                         # Compute and insert git temporal coupling edges
+                        # First, clear stale FILE_CHANGES_WITH edges from previous runs
+                        # to prevent ghost edges after git squashes/rebases
+                        try:
+                            ram_graph.query_batch([
+                                "MATCH ()-[r:FILE_CHANGES_WITH]->() DELETE r"
+                            ])
+                        except Exception as e:
+                            logger.debug("Failed to clear old FILE_CHANGES_WITH edges: %s", e)
+
                         git_coupling = self._compute_git_coupling(str(path))
                         if git_coupling:
                             if progress_callback:
@@ -1322,6 +1404,33 @@ class CodebaseIndexer:
         graph_api = GraphAPI(dirpath)
         graph_api.resolve_symbols()
 
+        # Static HCGS Pass (Zero-LLM context propagation & re-embedding)
+        if settings.enable_hcgs:
+            try:
+                if progress_callback:
+                    progress_callback(total_files, total_files, "Generating static HCGS summaries...")
+                from src.mcp_server.hcgs import build_levels, process_levels_static
+                levels = build_levels(self.graph)
+                if levels:
+                    summaries = process_levels_static(levels, self.graph, self.search_index._conn)
+                    if summaries:
+                        self.search_index.update_summaries_bulk(summaries)
+                        if self.enable_embeddings and self.embedder:
+                            if progress_callback:
+                                progress_callback(total_files, total_files, f"Embedding {len(summaries)} static HCGS summaries...")
+                            summary_texts = list(summaries.values())
+                            summary_ids = list(summaries.keys())
+                            embeddings = self.embedder.embed_texts(summary_texts)
+                            if embeddings:
+                                pairs = list(zip(summary_ids, embeddings))
+                                self.search_index.update_embeddings_bulk(pairs)
+            except Exception as e:
+                logger.warning("Failed to process static HCGS summaries: %s", e)
+                logger.debug(traceback.format_exc())
+
+        # Post-indexing integrity verification
+        integrity_stats = self._verify_index_integrity()
+
         self.search_index.close()
 
         res = {
@@ -1333,6 +1442,8 @@ class CodebaseIndexer:
         }
         if fts_error:
             res["fts_error"] = fts_error
+        if integrity_stats.get("warnings"):
+            res["integrity_warnings"] = integrity_stats["warnings"]
         return res
 
 def progress_callback(current: int, total: int, file_path: str):
