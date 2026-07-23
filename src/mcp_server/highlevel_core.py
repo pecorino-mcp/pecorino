@@ -70,8 +70,8 @@ async def _resolve_target(target: Any, roots_result: ListRootsResult) -> str:
     global _cached_roots_paths
     if target is None or (isinstance(target, str) and not target.strip()):
         try:
-            # If cache is empty, populate it from the latest roots_result
-            if not _cached_roots_paths and roots_result and roots_result.roots:
+            # Always refresh cache from roots_result when available
+            if roots_result and roots_result.roots:
                 new_roots = []
                 for root in roots_result.roots:
                     uri = getattr(root, "uri", None)
@@ -83,8 +83,9 @@ async def _resolve_target(target: Any, roots_result: ListRootsResult) -> str:
                             from urllib.parse import unquote
                             new_roots.append(unquote(uri_str[7:]))
                 if new_roots:
+                    if new_roots != _cached_roots_paths:
+                        logger.info("Updated cached roots: %s -> %s", _cached_roots_paths, new_roots)
                     _cached_roots_paths = new_roots
-                    logger.info("Initialized cached roots: %s", _cached_roots_paths)
 
             if _cached_roots_paths:
                 return _cached_roots_paths[0]
