@@ -1,13 +1,13 @@
 import logging
-from collections import defaultdict, deque
-from typing import Dict, List, Set, Any, Tuple, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
 def build_levels(graph) -> List[List[str]]:
     """
     Query CALLS edges from the Kùzu graph and organize Function/Method nodes into dependency levels.
-    
+
     Level 0 contains leaf functions (functions that make no outgoing calls to other indexed functions).
     Level 1 contains functions that only call Level 0 functions.
     Cycle breaking is performed if cyclic call dependencies exist.
@@ -17,10 +17,10 @@ def build_levels(graph) -> List[List[str]]:
     WHERE caller.kind IN ['Function', 'Method'] AND callee.kind IN ['Function', 'Method']
     RETURN caller.id AS caller_id, callee.id AS callee_id
     """
-    
+
     edges: List[Tuple[str, str]] = []
     nodes: Set[str] = set()
-    
+
     try:
         with graph:
             rows = graph.query(query)
@@ -95,7 +95,7 @@ def build_static_summary(
     # 1. Header & Signature
     clean_name = name.split(".")[-1] if "." in name else name
     parts.append(f"{kind} {clean_name}.")
-    
+
     if docstring:
         clean_doc = docstring.strip().replace("\n", " ")
         if len(clean_doc) > 200:
@@ -154,7 +154,7 @@ def process_levels_static(
     Returns a dict mapping node_id -> static_summary_text.
     """
     summaries: Dict[str, str] = {}
-    
+
     if not levels:
         return summaries
 
@@ -162,7 +162,7 @@ def process_levels_static(
     rows = db_conn.execute(
         "SELECT id, name, kind, signature, complexity, relationships FROM code_nodes"
     ).fetchall()
-    
+
     node_props: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         node_props[r[0]] = {
