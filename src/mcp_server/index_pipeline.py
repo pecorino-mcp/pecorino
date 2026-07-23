@@ -154,8 +154,14 @@ class CodebaseIndexer:
             if not hasattr(self, '_repo_files_cache'):
                 self._repo_files_cache = []
                 for r, d, fnames in os.walk(self.repo_path):
-                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules"}
-                    d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
+                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context"}
+                    d[:] = [
+                        dirname for dirname in d
+                        if dirname not in ignore_dirs
+                        and not dirname.startswith(".")
+                        and not dirname.endswith("-codeql-db")
+                        and not dirname.endswith(".egg-info")
+                    ]
                     for fname in fnames:
                         self._repo_files_cache.append(os.path.abspath(os.path.join(r, fname)))
 
@@ -627,7 +633,7 @@ class CodebaseIndexer:
         if not getattr(self, "lsp_client", None):
             return []
             
-        resolutions = []
+        positions = []
         
         def visit(n):
             if n.type in ('call_expression', 'method_invocation', 'call'):
@@ -637,20 +643,35 @@ class CodebaseIndexer:
                 if func_node:
                     line = func_node.start_point[0] + 1
                     char = func_node.start_point[1]
-                    try:
-                        res = self.lsp_client.resolve_definition(file_str, line, char)
-                        if res:
-                            resolutions.append({
-                                "call_line": line,
-                                "def_filepath": res["filepath"],
-                                "def_line": res["start_line"]
-                            })
-                    except Exception:
-                        pass
+                    positions.append((line, char))
             for child in n.children:
                 visit(child)
                 
         visit(tree.root_node)
+        if not positions:
+            return []
+
+        try:
+            from src.mcp_server.config import settings
+            timeout = getattr(settings, 'lsp_request_timeout', 0.8)
+        except Exception:
+            timeout = 0.8
+
+        if hasattr(self.lsp_client, 'resolve_definitions_batch'):
+            return self.lsp_client.resolve_definitions_batch(file_str, positions, timeout_per_query=timeout, max_queries=50)
+
+        resolutions = []
+        for line, char in positions[:50]:
+            try:
+                res = self.lsp_client.resolve_definition(file_str, line, char, timeout=timeout)
+                if res:
+                    resolutions.append({
+                        "call_line": line,
+                        "def_filepath": res["filepath"],
+                        "def_line": res["start_line"]
+                    })
+            except Exception:
+                pass
         return resolutions
     def _compute_similarity_edges(self):
         """Compute SIMILAR_TO (MinHash/Jaccard) and SEMANTICALLY_RELATED (Vector) edges."""
@@ -895,12 +916,13 @@ class CodebaseIndexer:
         self.lsp_client = None
         if self.enable_lsp:
             try:
-                from src.mcp_server.lsp.manager import LSPClient
-                self.lsp_client = LSPClient(workspace_root=str(path))
+                from src.mcp_server.lsp.manager import LSPClientPool
+                from src.mcp_server.config import settings
+                self.lsp_client = LSPClientPool(workspace_root=str(path), pool_size=settings.lsp_pool_size)
                 if not self.lsp_client.start():
                     self.lsp_client = None
             except Exception as e:
-                logger.warning("Failed to start LSP client: %s", e)
+                logger.warning("Failed to start LSP client pool: %s", e)
                 self.lsp_client = None
         try:
             return self._index_directory_impl(dirpath, progress_callback)
@@ -911,10 +933,16 @@ class CodebaseIndexer:
 
     def _index_directory_impl(self, dirpath: str, progress_callback=None) -> dict:
         path = pathlib.Path(dirpath).resolve()
-        ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}
+        ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context"}
         files = []
         for r, d, fnames in os.walk(str(path)):
-            d[:] = [dirname for dirname in d if dirname not in ignore_dirs]
+            d[:] = [
+                dirname for dirname in d
+                if dirname not in ignore_dirs
+                and not dirname.startswith(".")
+                and not dirname.endswith("-codeql-db")
+                and not dirname.endswith(".egg-info")
+            ]
             for fname in fnames:
                 fp = (pathlib.Path(r) / fname).resolve()
                 if fp.suffix in SUPPORTED_EXTENSIONS:

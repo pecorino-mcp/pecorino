@@ -38,12 +38,17 @@ class Embedder:
             self._model = SentenceTransformer(self.model_name)
             self._encode = lambda texts: self._model.encode(texts).tolist()
             logger.info(f"Loaded sentence-transformers model {self.model_name}")
-        except ImportError:
-            logger.warning("sentence-transformers not found. Falling back to fastembed.")
-            from fastembed import TextEmbedding
-            self._model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2", threads=max_threads)
-            self._encode = lambda texts: [list(v) for v in self._model.embed(texts)]
-            logger.info(f"Loaded fastembed model {self.model_name}")
+        except (ImportError, Exception) as e:
+            logger.warning(f"sentence-transformers/torch unavailable ({e}). Falling back to fastembed.")
+            try:
+                from fastembed import TextEmbedding
+                self._model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2", threads=max_threads)
+                self._encode = lambda texts: [list(v) for v in self._model.embed(texts)]
+                logger.info(f"Loaded fastembed model {self.model_name}")
+            except (ImportError, Exception) as e2:
+                logger.warning(f"Neither sentence-transformers nor fastembed is available ({e2}). Disabling vector embeddings.")
+                self._model = None
+                self._encode = None
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         if not texts:
@@ -64,6 +69,8 @@ class Embedder:
         missing_indices = [i for i, h in enumerate(hashes) if h not in cached]
         if missing_indices:
             self._load_model()
+            if self._encode is None:
+                return []
             missing_texts = [texts[i] for i in missing_indices]
             logger.info(f"Embedding {len(missing_texts)} missing texts...")
             new_embeddings = self._encode(missing_texts)

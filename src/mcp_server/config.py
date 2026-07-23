@@ -43,7 +43,9 @@ class Config:
         elif "bge-large" in self.embedding_model.lower():
             default_dim = "1024"
         self.embedding_dim = int(os.getenv("PECORINO_EMBEDDING_DIM", default_dim))
-        self.enable_lsp = os.getenv("PECORINO_ENABLE_LSP", "true").lower() in ("true", "1", "yes")
+        self.enable_lsp = os.getenv("PECORINO_ENABLE_LSP", "false").lower() in ("true", "1", "yes")
+        self.lsp_pool_size = int(os.getenv("PECORINO_LSP_POOL_SIZE", "2"))
+        self.lsp_request_timeout = float(os.getenv("PECORINO_LSP_TIMEOUT", "0.8"))
 
         # Allowed external roots (allowlist model for allow_external=True)
         # Set via colon-separated absolute paths, e.g.:
