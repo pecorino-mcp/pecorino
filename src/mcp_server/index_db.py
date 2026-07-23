@@ -118,7 +118,7 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         except duckdb.Error:
             conn.execute("INSTALL fts")
             conn.execute("LOAD fts")
-            
+
         try:
             conn.execute("LOAD vss")
         except duckdb.Error:
@@ -586,17 +586,17 @@ class CodeSearchIndex:
         """Bulk update the community_id for nodes."""
         if not partitions:
             return
-        
+
         conn = self._conn
         try:
             conn.execute("BEGIN TRANSACTION")
             conn.execute("CREATE TEMP TABLE temp_comm (id VARCHAR, community_id INTEGER)")
-            
+
             # Insert into temp table
             stmt = "INSERT INTO temp_comm VALUES (?, ?)"
             for p in partitions:
                 conn.execute(stmt, (p['node_id'], p['community_id']))
-                
+
             # Update the main table
             conn.execute('''
                 UPDATE code_nodes
@@ -679,7 +679,7 @@ class CodeSearchIndex:
         """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
         from src.core.errors import AnalysisError, IndexNotFoundError
         from src.mcp_server.config import settings
-        
+
         if mode == "hybrid" and not settings.enable_embeddings:
             logger.warning("Hybrid search requested but embeddings are disabled. Falling back to FTS mode.")
             mode = "fts"
@@ -695,12 +695,12 @@ class CodeSearchIndex:
                 else:
                     prefix = target_path if target_path.endswith('/') else f"{target_path}/"
                     path_filter = "AND c.filepath LIKE ?"
-            
+
             if mode == "hybrid":
                 # Compute query embedding
                 embedder = self._get_embedder()
                 q_emb = embedder.embed_batch([query])[0]
-                
+
                 # We need array representation for duckdb:
                 # But executemany/execute in python handles lists for array parameters natively in duckdb
                 boost_clause = ""
@@ -740,36 +740,36 @@ class CodeSearchIndex:
                     ORDER BY score DESC
                     LIMIT ? OFFSET ?
                 '''
-                
+
                 params = [query, query, query]
                 if target_path:
                     if path_filter == "AND c.filepath = ?":
                         params.append(target_path)
                     else:
                         params.append(f"{prefix}%")
-                        
+
                 params.append(q_emb)
-                
+
                 if target_path:
                     if path_filter == "AND c.filepath = ?":
                         params.append(target_path)
                     else:
                         params.append(f"{prefix}%")
-                        
+
                 params.append(q_emb)
-                
+
                 if boost_params:
                     params.extend(boost_params)
                     params.extend(boost_params)
-                    
+
                 params.extend([limit, offset])
-                
+
                 res = conn.execute(sql, params).fetchall()
             elif mode == "semantic":
                 # Compute query embedding
                 embedder = self._get_embedder()
                 q_emb = embedder.embed_batch([query])[0]
-                
+
                 sql = f'''
                     SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            (1.0 - array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}])) AS score
@@ -779,14 +779,14 @@ class CodeSearchIndex:
                     ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC
                     LIMIT ? OFFSET ?
                 '''
-                
+
                 params = [q_emb]
                 if target_path:
                     if path_filter == "AND c.filepath = ?":
                         params.append(target_path)
                     else:
                         params.append(f"{prefix}%")
-                        
+
                 params.extend([q_emb, limit, offset])
                 res = conn.execute(sql, params).fetchall()
             else:
@@ -835,7 +835,7 @@ class CodeSearchIndex:
                 graph = self._ensure_graph()
                 if graph and results:
                     import math
-                    
+
                     def to_gorgonzola_id(r):
                         filepath = r.get('filepath')
                         name = r.get('name')
@@ -855,7 +855,7 @@ class CodeSearchIndex:
                     cypher_query = "MATCH ()-[r]->(n:CodeNode) WHERE n.id IN $ids RETURN n.id as id, count(r) AS in_degree"
                     boost_res = graph.query(cypher_query, {"ids": gorgonzola_ids})
                     boost_map = {row['id']: row['in_degree'] for row in boost_res}
-                    
+
                     for k_id, r in gorgonzola_to_result.items():
                         in_deg = boost_map.get(k_id, 0)
                         if 'score' in r and in_deg > 0:
@@ -867,7 +867,7 @@ class CodeSearchIndex:
                     top_gorgonzola_to_res = {}
                     for r in top_results:
                         top_gorgonzola_to_res[to_gorgonzola_id(r)] = r
-                        
+
                     top_gorgonzola_ids = list(top_gorgonzola_to_res.keys())
                     if top_gorgonzola_ids:
                         usage_query = """

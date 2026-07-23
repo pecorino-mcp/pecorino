@@ -4,15 +4,14 @@ import logging
 import os
 import pathlib
 import shutil
-import tempfile
 import sys
-
-from src.mcp_server.naming_analyzer import analyze_name
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
 from pathlib import Path
+from typing import Any
+
+from src.mcp_server.naming_analyzer import analyze_name
 
 # Add modules/pecorino-utils to sys.path to resolve src.metrics
 workspace_root = Path(__file__).resolve().parent.parent.parent
@@ -26,8 +25,6 @@ from src.core.constants import SUPPORTED_EXTENSIONS, get_language_for_extension
 from src.mcp_server.config import settings
 from src.mcp_server.index_db import CodeSearchIndex, find_repo_root, get_db_path_for_repo
 from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
-from src.parsers.ast import ClassDef, InterfaceDef, walk
-from src.parsers.tree_sitter_parser import parse_with_tree_sitter
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +32,14 @@ class CodebaseIndexer:
     def __init__(self, repo_path: str = None):
         repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
 
-        from src.mcp_server.index_db import CodeSearchIndex
         from src.mcp_server.config import settings
+        from src.mcp_server.index_db import CodeSearchIndex
 
         self.repo_path = repo_path
         db_path = get_db_path_for_repo(repo_path)
         self.search_index = CodeSearchIndex(db_path=db_path)
         self.graph = self.search_index._ensure_graph()
-        
+
         self.enable_embeddings = getattr(settings, 'enable_embeddings', True)
         if self.enable_embeddings:
             from src.mcp_server.embedder import Embedder
@@ -107,7 +104,7 @@ class CodebaseIndexer:
                 graph_edges.append((parent_id, var_id, {}, "WRITES"))
             if flags[2]:
                 graph_edges.append((parent_id, var_id, {}, "WRITES")) # Taint is also writing/mutating or we can keep it as WRITES
-            
+
             # Also emit explicit DATA_FLOWS_TO edges for Taint Analysis
             if kind == "mutate":
                 graph_edges.append((parent_id, var_id, {}, "DATA_FLOWS_TO"))
@@ -354,27 +351,27 @@ class CodebaseIndexer:
                 "graph_edges": [],
                 "resolved_deps": []
             }
-            
+
         ENABLE_PYTHON_AST_METRICS = False
-        
+
         # 1. Tree-sitter extraction
-        from src.parsers.tree_sitter_parser import get_raw_tree_sitter_tree
         from src.mcp_server.ast.extractor import TreeSitterExtractor
-        
+        from src.parsers.tree_sitter_parser import get_raw_tree_sitter_tree
+
         tree = get_raw_tree_sitter_tree(content, file_extension)
         if not tree:
             return None
-            
+
         def resolve_import_cb(import_text, current_file, project_root):
             return self._resolve_dependency(import_text, current_file, file_extension)
-            
+
         extractor = TreeSitterExtractor(filepath, self.repo_path, resolve_import_cb)
         nodes_dict, edges_dict = extractor.extract(tree, content.encode('utf-8'))
-        
+
         # 2. Python AST Enrichment (Optional)
         if file_extension == '.py' and ENABLE_PYTHON_AST_METRICS:
+            from src.parsers.ast import ClassDef, FunctionDef, walk
             from src.parsers.tree_sitter_parser import parse_with_tree_sitter
-            from src.parsers.ast import walk, ClassDef, FunctionDef
             py_tree = parse_with_tree_sitter(content, file_extension)
             if py_tree:
                 for node in walk(py_tree):
@@ -384,7 +381,7 @@ class CodebaseIndexer:
                             if n_props["name"] == node.name and n_props["line"] == getattr(node, 'lineno', 0):
                                 n_props["complexity"] = getattr(node, 'cyclomatic_complexity', 1) if isinstance(node, FunctionDef) else getattr(node, 'wmc', 0)
                                 break
-                                
+
         # Map to expected output format
         graph_nodes = []
         for n_id, n_props in nodes_dict.items():
@@ -400,13 +397,13 @@ class CodebaseIndexer:
                 props["path"] = n_props.get("file")
                 props["lang"] = get_language_for_extension(file_extension)
             graph_nodes.append((n_id, props, n_props["kind"]))
-            
+
         graph_edges = []
         for rel_type, rel_list in edges_dict.items():
             for edge in rel_list:
                 src, dst, props = edge
                 graph_edges.append((src, dst, props, rel_type))
-                
+
         nodes_to_index = []
         for n_id, n_props in nodes_dict.items():
             if n_props["kind"] in ("Function", "Method", "Class"):
@@ -458,7 +455,7 @@ class CodebaseIndexer:
                 raw_name = props["name"]
                 if lbl == "File":
                     raw_name = Path(raw_name).stem
-                
+
                 ident_id = raw_name
                 if ident_id not in identifier_nodes_dict:
                     analysis = analyze_name(raw_name, filepath)
@@ -466,7 +463,7 @@ class CodebaseIndexer:
                         "raw": raw_name,
                         **analysis
                     }, "Identifier")
-                
+
                 graph_edges.append((nid, ident_id, {}, "HAS_IDENTIFIER"))
             final_graph_nodes.append((nid, props, lbl))
 
@@ -512,7 +509,7 @@ class CodebaseIndexer:
             records = self._extract_records(content, file_str, fp.suffix)
             if not records:
                 return None
-                
+
             content_bytes = content.encode('utf-8')
 
             lsp_resolutions = []
@@ -544,7 +541,7 @@ class CodebaseIndexer:
             return
         if not nodes_to_index:
             return
-            
+
         texts_to_embed = []
         for n in nodes_to_index:
             s_byte = n.get('start_byte', 0)
@@ -557,7 +554,7 @@ class CodebaseIndexer:
             else:
                 text = ""
             texts_to_embed.append(text)
-            
+
         embeddings = self.embedder.embed_texts(texts_to_embed)
         for i, n in enumerate(nodes_to_index):
             if i < len(embeddings):
@@ -570,7 +567,7 @@ class CodebaseIndexer:
         """
         import subprocess
         from collections import defaultdict
-        
+
         try:
             cmd = ["git", "log", "--pretty=format:commit:%H", "--name-only"]
             proc = subprocess.Popen(
@@ -586,12 +583,12 @@ class CodebaseIndexer:
         except Exception as e:
             logger.debug("Failed to run git log: %s", e)
             return []
-            
+
         commit_files = defaultdict(set)
         current_commit = None
-        
+
         file_commit_counts = defaultdict(int)
-        
+
         for line in stdout.splitlines():
             line = line.strip()
             if not line:
@@ -602,14 +599,14 @@ class CodebaseIndexer:
                 abs_path = os.path.abspath(os.path.join(dirpath, line))
                 if os.path.exists(abs_path):
                     commit_files[current_commit].add(abs_path)
-                    
+
         pair_counts = defaultdict(lambda: defaultdict(int))
         for commit, files in commit_files.items():
             if len(files) > 50 or len(files) < 2:
                 continue
             for f in files:
                 file_commit_counts[f] += 1
-                
+
             file_list = list(files)
             for i in range(len(file_list)):
                 for j in range(i + 1, len(file_list)):
@@ -618,7 +615,7 @@ class CodebaseIndexer:
                         pair_counts[f1][f2] += 1
                     else:
                         pair_counts[f2][f1] += 1
-                        
+
         coupling_edges = []
         for f1, targets in pair_counts.items():
             for f2, count in targets.items():
@@ -627,15 +624,15 @@ class CodebaseIndexer:
                     jaccard = count / denom
                     if jaccard >= 0.1 and count >= 2:
                         coupling_edges.append((f1, f2, float(jaccard)))
-                        
+
         return coupling_edges
 
     def _find_lsp_resolutions(self, tree, file_str) -> list:
         if not getattr(self, "lsp_client", None):
             return []
-            
+
         positions = []
-        
+
         def visit(n):
             if n.type in ('call_expression', 'method_invocation', 'call'):
                 func_node = n.child_by_field_name('function') or n.child_by_field_name('name')
@@ -647,7 +644,7 @@ class CodebaseIndexer:
                     positions.append((line, char))
             for child in n.children:
                 visit(child)
-                
+
         visit(tree.root_node)
         if not positions:
             return []
@@ -706,14 +703,14 @@ class CodebaseIndexer:
                                     ])
                         if semantic_edges:
                             # Write to temporary CSV and load into Kùzu
-                            import tempfile
                             import csv
+                            import tempfile
                             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
                                 writer = csv.writer(f)
                                 for edge in semantic_edges:
                                     writer.writerow(edge)
                                 tmp_path = f.name
-                            
+
                             try:
                                 with self.graph:
                                     self.graph._conn.execute(f"COPY SEMANTICALLY_RELATED FROM '{tmp_path}' (HEADER=false);")
@@ -729,11 +726,11 @@ class CodebaseIndexer:
                 # Fetch text content for code nodes
                 text_query = "SELECT id, content FROM code_nodes WHERE kind IN ('Function', 'Method', 'Class')"
                 df_texts = self.search_index._conn.execute(text_query).df()
-                
+
                 if not df_texts.empty:
                     lsh = MinHashLSH(threshold=0.70, num_perm=128)
                     minhashes = {}
-                    
+
                     for _, row in df_texts.iterrows():
                         nid = row['id']
                         content = str(row['content'])
@@ -744,7 +741,7 @@ class CodebaseIndexer:
                             m.update(d.encode('utf8'))
                         lsh.insert(nid, m)
                         minhashes[nid] = m
-                    
+
                     similar_edges = []
                     seen_pairs = set()
                     for nid, m in minhashes.items():
@@ -758,26 +755,26 @@ class CodebaseIndexer:
                                         (r_id, nid, float(jaccard))
                                     ])
                                     seen_pairs.add((nid, r_id))
-                                    
+
                     if similar_edges:
-                        import tempfile
                         import csv
+                        import tempfile
                         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
                             writer = csv.writer(f)
                             for edge in similar_edges:
                                 writer.writerow(edge)
                             tmp_path = f.name
-                            
+
                         try:
                             with self.graph:
                                 self.graph._conn.execute(f"COPY SIMILAR_TO FROM '{tmp_path}' (HEADER=false);")
                             logger.info(f"Loaded {len(similar_edges)} SIMILAR_TO edges.")
                         finally:
                             os.remove(tmp_path)
-                            
+
             except ImportError:
                 logger.warning("datasketch not installed. Skipping SIMILAR_TO edge generation.")
-                
+
         except Exception as e:
             logger.warning(f"Failed to compute similarity edges: {e}")
             logger.debug(traceback.format_exc())
@@ -786,7 +783,7 @@ class CodebaseIndexer:
     def _post_process_graph(self):
         """Find recursive self-calls and resolve Symbol nodes to Method/Function for dynamic languages."""
         self._compute_similarity_edges()
-        
+
         queries = [
             "MATCH (m:CodeNode {kind: 'Method'})-[r:RECURSES_TO]->(m) DELETE r",
             "MATCH (f:CodeNode {kind: 'Function'})-[r:RECURSES_TO]->(f) DELETE r",
@@ -873,7 +870,7 @@ class CodebaseIndexer:
             try:
                 from src.mcp_server import graph_algorithms
                 logger.info("Starting Leiden sweep for community detection...")
-                
+
                 # Project graph first
                 with self.graph:
                     try:
@@ -886,11 +883,11 @@ class CodebaseIndexer:
                             ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS']
                         );
                     """)
-                
+
                     sweep_results = graph_algorithms.sweep_gamma(self.graph, graph_name='CodeGraph')
                     stable_regions = graph_algorithms.find_stable_partition(sweep_results)
                     best_partition_info = graph_algorithms.get_best_partition(stable_regions)
-                    
+
                     if best_partition_info:
                         partition_dict = best_partition_info["partition"]
                         community_updates = [{"node_id": k, "community_id": v} for k, v in partition_dict.items()]
@@ -989,8 +986,8 @@ class CodebaseIndexer:
         self.lsp_client = None
         if self.enable_lsp:
             try:
-                from src.mcp_server.lsp.manager import LSPClientPool
                 from src.mcp_server.config import settings
+                from src.mcp_server.lsp.manager import LSPClientPool
                 self.lsp_client = LSPClientPool(workspace_root=str(path), pool_size=settings.lsp_pool_size)
                 if not self.lsp_client.start():
                     self.lsp_client = None
@@ -1132,7 +1129,7 @@ class CodebaseIndexer:
                     for i, n in enumerate(all_nodes_to_embed):
                         if i < len(embeddings):
                             n['embedding'] = embeddings[i]
-                except Exception as e:
+                except Exception:
                     logger.debug(traceback.format_exc())
 
             # Batch embed all graph nodes in one go
@@ -1297,7 +1294,7 @@ class CodebaseIndexer:
                                 call_line = resolution["call_line"]
                                 def_filepath = resolution["def_filepath"]
                                 def_line = resolution["def_line"]
-                                
+
                                 caller_id = None
                                 for node_id, (props, label) in all_graph_nodes.items():
                                     if node_id.startswith(file_str + "::"):
@@ -1305,7 +1302,7 @@ class CodebaseIndexer:
                                             if props.get("start_line", 0) <= call_line <= props.get("end_line", 0):
                                                 caller_id = node_id
                                                 break
-                                                
+
                                 callee_id = None
                                 for node_id, (props, label) in all_graph_nodes.items():
                                     if node_id.startswith(def_filepath + "::") or node_id == def_filepath:
@@ -1313,7 +1310,7 @@ class CodebaseIndexer:
                                             if props.get("start_line", 0) <= def_line <= props.get("end_line", 0):
                                                 callee_id = node_id
                                                 break
-                                                
+
                                 if not callee_id and self.search_index:
                                     try:
                                         row = self.search_index._conn.execute(
@@ -1324,7 +1321,7 @@ class CodebaseIndexer:
                                             callee_id = row[0]
                                     except Exception:
                                         pass
-                                        
+
                                 if caller_id and callee_id:
                                     all_graph_edges.add((caller_id, callee_id, frozenset(), "CALLS"))
 
