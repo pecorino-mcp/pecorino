@@ -1,5 +1,5 @@
-import pytest
-from src.mcp_server.hcgs import build_static_summary, build_levels
+from src.mcp_server.hcgs import build_levels, build_static_summary
+
 
 def test_build_static_summary_basic():
     summary = build_static_summary(
