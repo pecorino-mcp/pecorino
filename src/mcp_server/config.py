@@ -46,6 +46,7 @@ class Config:
         self.enable_lsp = os.getenv("PECORINO_ENABLE_LSP", "false").lower() in ("true", "1", "yes")
         self.lsp_pool_size = int(os.getenv("PECORINO_LSP_POOL_SIZE", "2"))
         self.lsp_request_timeout = float(os.getenv("PECORINO_LSP_TIMEOUT", "0.8"))
+        self.enable_hcgs = os.getenv("PECORINO_ENABLE_HCGS", "true").lower() in ("true", "1", "yes")
 
         # Allowed external roots (allowlist model for allow_external=True)
         # Set via colon-separated absolute paths, e.g.:
