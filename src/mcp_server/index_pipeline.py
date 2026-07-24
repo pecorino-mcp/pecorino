@@ -1471,7 +1471,7 @@ class CodebaseIndexer:
                                         if i < len(graph_embeddings):
                                             props["embedding"] = graph_embeddings[i]
                                 except Exception as e:
-                                    logger.warning("Failed vector embeddings for chunk graph nodes: %e", e)
+                                    logger.warning("Failed vector embeddings for chunk graph nodes: %s", e)
 
                         # 2. Clear existing indexes for modified files in this chunk
                         with profiler.profile("Bulk Database Ingestion"):

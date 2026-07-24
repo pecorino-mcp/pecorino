@@ -551,9 +551,9 @@ class CodeSearchIndex:
                 name = os.path.basename(filepath)
                 ext = os.path.splitext(filepath)[1]
                 q = f"""
-                    MERGE (f:CodeNode {{id: $id_{j}}})
-                    ON CREATE SET f.kind = 'File', f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
-                    ON MATCH SET f.kind = 'File', f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    MERGE (f:File {{id: $id_{j}}})
+                    ON CREATE SET f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    ON MATCH SET f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
                 """
                 queries.append(q)
                 params.update({
@@ -622,9 +622,9 @@ class CodeSearchIndex:
         name = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1]
         query = """
-            MERGE (f:CodeNode {id: $id})
-            ON CREATE SET f.kind = 'File', f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
-            ON MATCH SET f.kind = 'File', f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            MERGE (f:File {id: $id})
+            ON CREATE SET f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            ON MATCH SET f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
         """
         try:
             graph = self._ensure_graph()
