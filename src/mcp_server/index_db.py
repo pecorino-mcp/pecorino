@@ -1162,9 +1162,9 @@ class CodeSearchIndex:
 
                     for r in results:
                         if 'bm25_score' in r:
-                            r['bm25_score'] = round(float(r['bm25_score']), 2)
+                            r['bm25_score'] = round(float(r['bm25_score']), 3)
                         if 'pagerank' in r:
-                            r['pagerank'] = round(float(r['pagerank']), 2)
+                            r['pagerank'] = round(float(r['pagerank']), 3)
 
                     results.sort(key=lambda x: x.get('score', 0), reverse=True)
 
@@ -1208,7 +1208,7 @@ class CodeSearchIndex:
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0,
+                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0,
                 'complexity': row[8] or 0,
                 'signature': row[9],
                 'in_degree': row[10] or 0,
@@ -1236,7 +1236,7 @@ class CodeSearchIndex:
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0,
+                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0,
                 'complexity': row[8] or 0,
                 'signature': row[9],
                 'in_degree': row[10] or 0,
@@ -1264,7 +1264,7 @@ class CodeSearchIndex:
                 'metrics': {},
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0
+                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0
             })
         return results
 

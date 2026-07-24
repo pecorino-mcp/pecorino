@@ -6,18 +6,18 @@ Pecorino allows Large Language Models (LLMs) and dev tools (such as Claude Deskt
 
 ---
 
-## ✨ Features
+##  Features
 
-- 🔌 **Model Context Protocol (MCP)**: Exposes 5 unified tools (`browse`, `search`, `update_index`, `set_workspace`, `metrics`) to your AI assistant.
-- 📊 **Git History Analytics**: Commits, LOC growth, author contributions, activity patterns, and team performance tracking.
-- 📐 **Object-Oriented Design Metrics**: Afferent/efferent coupling (Ca/Ce), instability (I), abstractness (A), and Distance-from-Main-Sequence (D) analysis.
-- 🚨 **Risk Hotspot Detection**: Combines code churn (revision frequency) and complexity to pinpoint high-risk source files.
-- 🗄️ **Fast DuckDB & Tantivy Indexing**: Leverages DuckDB for metadata and vector search, and Tantivy for true BM25F per-field full-text search.
-- 💻 **Flexible CLI & HTTP SSE**: Run as a standard CLI tool, start a local stdio MCP server, or deploy as a network-accessible SSE server.
+-  **Model Context Protocol (MCP)**: Exposes 5 unified tools (`browse`, `search`, `update_index`, `set_workspace`, `metrics`) to your AI assistant.
+-  **Git History Analytics**: Commits, LOC growth, author contributions, activity patterns, and team performance tracking.
+-  **Object-Oriented Design Metrics**: Afferent/efferent coupling (Ca/Ce), instability (I), abstractness (A), and Distance-from-Main-Sequence (D) analysis.
+-  **Risk Hotspot Detection**: Combines code churn (revision frequency) and complexity to pinpoint high-risk source files.
+-  **Fast DuckDB & Tantivy Indexing**: Leverages DuckDB for metadata and vector search, and Tantivy for true BM25F per-field full-text search.
+-  **Flexible CLI & HTTP SSE**: Run as a standard CLI tool, start a local stdio MCP server, or deploy as a network-accessible SSE server.
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### 1. Installation
 Clone the repository recursively (to fetch the MCP SDK submodule) and set up the environment:
@@ -60,7 +60,7 @@ Add Pecorino to your `claude_desktop_config.json`:
 
 ---
 
-## 🛠️ Exposed MCP Tools
+##  Exposed MCP Tools
 
 Once connected, your AI assistant can use the following tools:
 
@@ -106,7 +106,7 @@ Take structural snapshots of the codebase graph and index for historical compari
 
 ---
 
-## 🏗️ Architecture
+##  Architecture
 
 Pecorino relies on a multi-stage **Dual Index & Graph Architecture** to extract, index, and analyze codebase structure:
 
@@ -121,7 +121,7 @@ Pecorino relies on a multi-stage **Dual Index & Graph Architecture** to extract,
 5. **Git Analytics Engine (`src/git/`, `src/core/`)**: Parses reflogs and commit histories to build temporal coupling graphs and track code churn.
 6. **MCP Transport Layer (`src/transports/`)**: Exposes index, vector, and graph databases over standard Model Context Protocol (stdio, SSE) to AI agents.
 
-## 🧩 Core Functions (Python API)
+##  Core Functions (Python API)
 
 Beyond the CLI and MCP Server, Pecorino can be used directly as a Python library. Key modules and functions exported via `src/__init__.py` include:
 
@@ -137,7 +137,7 @@ Beyond the CLI and MCP Server, Pecorino can be used directly as a Python library
 - **Export & Utilities**:
   - `MetricsExporter`, `export_to_json()`, `export_to_yaml()`
 
-## 📂 Repository Layout
+##  Repository Layout
 
 - `src/cli/` — Command-line interface and entry points.
 - `src/core/` — Core data collectors and configuration.
@@ -157,7 +157,7 @@ Beyond the CLI and MCP Server, Pecorino can be used directly as a Python library
 
 ---
 
-## 🖥️ Command Line Interface (CLI)
+##  Command Line Interface (CLI)
 
 You can also run Pecorino directly via the terminal:
 
@@ -176,6 +176,6 @@ For comprehensive CLI flags, transport details, and configuration options, see t
 
 ---
 
-## 📄 License & Contributing
+##  License & Contributing
 
 This project is licensed under the GNU Affero General Public License v3 (AGPL-3.0) - see the [LICENSE](LICENSE) file for details. Contributions, bug reports, and improvements are welcome! Open an issue or submit a pull request with small, focused changes.
