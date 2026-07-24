@@ -792,6 +792,56 @@ class CodeSearchIndex:
             conn.execute("ROLLBACK")
             logger.warning("Failed to bulk update git features: %s", e)
 
+    def update_ood_features_bulk(self, ood_data: List[Dict[str, Any]]):
+        """Bulk update Object-Oriented Design (OOD) features for code nodes matching id.
+
+        ood_data: list of dicts with keys:
+            'id', 'instability', 'coupling', 'depth', 'inheritance_depth', 'betweenness'
+        """
+        if not ood_data:
+            return
+        conn = self._conn
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            conn.execute("""
+                CREATE TEMP TABLE temp_ood (
+                    id VARCHAR,
+                    instability DOUBLE,
+                    coupling DOUBLE,
+                    depth INTEGER,
+                    inheritance_depth INTEGER,
+                    betweenness DOUBLE
+                )
+            """)
+            data = [
+                (
+                    item.get("id", ""),
+                    float(item.get("instability", 0.0)),
+                    float(item.get("coupling", 0.0)),
+                    int(item.get("depth", 0)),
+                    int(item.get("inheritance_depth", 0)),
+                    float(item.get("betweenness", 0.0)),
+                )
+                for item in ood_data
+            ]
+            conn.executemany("INSERT INTO temp_ood VALUES (?, ?, ?, ?, ?, ?)", data)
+            conn.execute("""
+                UPDATE code_nodes
+                SET instability = temp_ood.instability,
+                    coupling = temp_ood.coupling,
+                    depth = temp_ood.depth,
+                    inheritance_depth = temp_ood.inheritance_depth,
+                    betweenness = temp_ood.betweenness
+                FROM temp_ood
+                WHERE code_nodes.id = temp_ood.id
+            """)
+            conn.execute("DROP TABLE temp_ood")
+            conn.execute("COMMIT")
+            logger.info("Updated OOD features for %d nodes", len(ood_data))
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.warning("Failed to bulk update OOD features: %s", e)
+
     def get_file_hash(self, filepath: str) -> str:
         """Retrieve the stored hash for a given file, or None if not found."""
         conn = self._conn
@@ -878,6 +928,7 @@ class CodeSearchIndex:
                     ),
                     vector_scores AS (
                         SELECT c.id,
+                               array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) as cos_dist,
                                row_number() OVER (ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC) as rank_vec
                         FROM code_nodes c
                         WHERE c.embedding IS NOT NULL
@@ -887,7 +938,8 @@ class CodeSearchIndex:
                     )
                     SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            COALESCE(b.bm25_score, 0) as bm25_score,
-                           ((((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0))){boost_clause} AS score
+                           ((((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0))){boost_clause} AS score,
+                           (1.0 - COALESCE(v.cos_dist, 1.0)) AS vec_sim
                     FROM code_nodes c
                     LEFT JOIN bm25_scores b ON c.id = b.id
                     LEFT JOIN vector_scores v ON c.id = v.id
@@ -903,7 +955,7 @@ class CodeSearchIndex:
                     else:
                         params.append(f"{prefix}%")
 
-                params.append(q_emb)
+                params.extend([q_emb, q_emb])
 
                 if target_path:
                     if path_filter == "AND c.filepath = ?":
@@ -1028,16 +1080,73 @@ class CodeSearchIndex:
                     if mode == "hybrid" and len(row) > 9:
                         entry['bm25_score'] = round(float(row[8]), 2)
                         entry['score'] = round(float(row[9]), 2)
+                        # row[10] = vec_sim from hybrid SQL
+                        if len(row) > 10 and row[10] is not None:
+                            entry['vec_sim'] = round(float(row[10]), 4)
+                    elif mode == "semantic":
+                        # score IS the vector similarity (1 - cosine_distance)
+                        entry['score'] = round(float(row[8]), 4)
+                        entry['vec_sim'] = round(float(row[8]), 4)
                     else:
                         entry['score'] = round(float(row[8]), 2)
                 results.append(entry)
+
+            # Materialize full feature vectors & compute LTR scores for candidates
+            candidate_ids = [r['id'] for r in results if 'id' in r]
+            if candidate_ids:
+                try:
+                    placeholders = ",".join(["?"] * len(candidate_ids))
+                    feat_rows = conn.execute(f"""
+                        SELECT id, pagerank, in_degree, out_degree, complexity,
+                               instability, coupling, depth, inheritance_depth, betweenness,
+                               git_commit_count, git_days_since_change, git_churn, git_authors,
+                               git_bug_fix_ratio, git_survival_days, git_ownership_entropy
+                        FROM code_nodes
+                        WHERE id IN ({placeholders})
+                    """, candidate_ids).fetchall()
+                    feat_map = {row[0]: row for row in feat_rows}
+
+                    from src.mcp_server.ltr_ranker import extract_candidate_features, compute_ltr_score
+
+                    for r in results:
+                        nid = r.get('id')
+                        feat_row = feat_map.get(nid)
+                        if feat_row:
+                            r.update({
+                                'pagerank': feat_row[1] or 0.0,
+                                'in_degree': feat_row[2] or 0,
+                                'out_degree': feat_row[3] or 0,
+                                'complexity': feat_row[4] or 0,
+                                'instability': feat_row[5] or 0.0,
+                                'coupling': feat_row[6] or 0.0,
+                                'depth': feat_row[7] or 0,
+                                'inheritance_depth': feat_row[8] or 0,
+                                'betweenness': feat_row[9] or 0.0,
+                                'git_commit_count': feat_row[10] or 0,
+                                'git_days_since_change': feat_row[11] or 0,
+                                'git_churn': feat_row[12] or 0,
+                                'git_authors': feat_row[13] or 0,
+                                'git_bug_fix_ratio': feat_row[14] or 0.0,
+                                'git_survival_days': feat_row[15] or 0,
+                                'git_ownership_entropy': feat_row[16] or 0.0,
+                            })
+
+                            # Compute unified LTR score — only when features are available
+                            fts_val = float(r.get('bm25_score', r.get('score', 0.0)) or 0.0)
+                            vec_val = float(r.get('vec_sim', 0.0) or 0.0)
+                            feats = extract_candidate_features(
+                                r,
+                                fts_bm25_score=fts_val,
+                                query_vector_sim=vec_val,
+                            )
+                            r['score'] = round(float(compute_ltr_score(feats)), 4)
+                except Exception as e:
+                    logger.warning("Failed to compute LTR scores for search candidates: %s", e)
 
             # Cypher dynamic boost logic
             try:
                 graph = self._ensure_graph()
                 if graph and results:
-                    import math
-
                     def to_gorgonzola_id(r):
                         filepath = r.get('filepath')
                         name = r.get('name')
@@ -1049,23 +1158,7 @@ class CodeSearchIndex:
                             return f"{filepath}::{parts[0]}::{parts[1]}"
                         return f"{filepath}::{name}"
 
-                    gorgonzola_to_result = {}
                     for r in results:
-                        gorgonzola_to_result[to_gorgonzola_id(r)] = r
-
-                    gorgonzola_ids = list(gorgonzola_to_result.keys())
-                    cypher_query = "MATCH ()-[r]->(n:CodeNode) WHERE n.id IN $ids RETURN n.id as id, count(r) AS in_degree"
-                    boost_res = graph.query(cypher_query, {"ids": gorgonzola_ids})
-                    boost_map = {row['id']: row['in_degree'] for row in boost_res}
-
-                    for k_id, r in gorgonzola_to_result.items():
-                        in_deg = boost_map.get(k_id, 0)
-                        if 'score' in r and in_deg > 0:
-                            r['score'] *= (1.0 + math.log1p(in_deg))
-                    
-                    for r in results:
-                        if 'score' in r:
-                            r['score'] = round(float(r['score']), 2)
                         if 'bm25_score' in r:
                             r['bm25_score'] = round(float(r['bm25_score']), 2)
                         if 'pagerank' in r:

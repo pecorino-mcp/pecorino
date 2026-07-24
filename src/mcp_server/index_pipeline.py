@@ -1070,6 +1070,67 @@ class CodebaseIndexer:
             except Exception as e:
                 logger.warning("Failed to compute or update git features: %s", e)
 
+            # Calculate and bulk update Object-Oriented Design (OOD) Features
+            try:
+                ood_map: dict[str, dict[str, Any]] = {}
+
+                # 1. Instability and Coupling from in_degree / out_degree
+                node_rows = self.search_index._conn.execute(
+                    "SELECT id, in_degree, out_degree FROM code_nodes"
+                ).fetchall()
+                for nid, in_deg, out_deg in node_rows:
+                    in_d = float(in_deg or 0)
+                    out_d = float(out_deg or 0)
+                    coupling = in_d + out_d
+                    instability = out_d / coupling if coupling > 0 else 0.0
+                    ood_map[nid] = {
+                        "id": nid,
+                        "instability": round(instability, 4),
+                        "coupling": coupling,
+                        "depth": 0,
+                        "inheritance_depth": 0,
+                        "betweenness": 0.0,
+                    }
+
+                # 2. Inheritance Depth, Containment Depth, and Betweenness from Graph
+                try:
+                    with self.graph:
+                        inherit_rows = self.graph.query(
+                            "MATCH (c:CodeNode)-[:EXTENDS*]->(a:CodeNode) "
+                            "RETURN c.id AS id, count(a) AS depth"
+                        )
+                        for row in inherit_rows:
+                            nid = row.get("id")
+                            if nid in ood_map:
+                                ood_map[nid]["inheritance_depth"] = int(row.get("depth", 0))
+
+                        contain_rows = self.graph.query(
+                            "MATCH (parent:CodeNode)-[:CONTAINS*]->(child:CodeNode) "
+                            "RETURN child.id AS id, count(parent) AS depth"
+                        )
+                        for row in contain_rows:
+                            nid = row.get("id")
+                            if nid in ood_map:
+                                ood_map[nid]["depth"] = int(row.get("depth", 0))
+
+                        between_rows = self.graph.query(
+                            "MATCH (a:CodeNode)-[:CALLS]->(n:CodeNode)-[:CALLS]->(b:CodeNode) "
+                            "WHERE a.id <> b.id "
+                            "RETURN n.id AS id, count(*) AS bridges"
+                        )
+                        max_bridges = max([r.get("bridges", 0) for r in between_rows], default=1) or 1
+                        for row in between_rows:
+                            nid = row.get("id")
+                            if nid in ood_map:
+                                ood_map[nid]["betweenness"] = round(float(row.get("bridges", 0)) / max_bridges, 4)
+                except Exception as e:
+                    logger.debug("Failed graph query for OOD features: %s", e)
+
+                if ood_map:
+                    self.search_index.update_ood_features_bulk(list(ood_map.values()))
+            except Exception as e:
+                logger.warning("Failed to compute or update OOD features: %s", e)
+
         except Exception as e:
             logger.warning("Failed to post-process graph: %s", e)
             logger.debug(traceback.format_exc())
