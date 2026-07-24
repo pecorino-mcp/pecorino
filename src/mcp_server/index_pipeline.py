@@ -9,9 +9,33 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import time
+import contextlib
+from collections import defaultdict
 from typing import Any
 
 from src.mcp_server.naming_analyzer import analyze_name
+
+class IndexProfiler:
+    def __init__(self):
+        self.timings = defaultdict(float)
+
+    @contextlib.contextmanager
+    def profile(self, phase_name: str):
+        start = time.time()
+        try:
+            yield
+        finally:
+            self.timings[phase_name] += (time.time() - start)
+
+    def print_summary(self):
+        logger.info("=== Indexing Performance Profile ===")
+        total = sum(self.timings.values())
+        for phase, duration in sorted(self.timings.items(), key=lambda x: x[1], reverse=True):
+            pct = (duration / total * 100) if total > 0 else 0
+            logger.info(f"{phase:<30}: {duration:.2f}s ({pct:.1f}%)")
+        logger.info(f"{'Total':<30}: {total:.2f}s")
+        logger.info("====================================")
 
 # Add modules/pecorino-utils to sys.path to resolve src.metrics
 workspace_root = Path(__file__).resolve().parent.parent.parent
@@ -722,7 +746,7 @@ class CodebaseIndexer:
         from collections import defaultdict
 
         try:
-            cmd = ["git", "log", "--pretty=format:commit:%H", "--name-only"]
+            cmd = ["git", "log", "--pretty=format:commit:%H", "--name-only", "--max-count=10000", "--since=1.years"]
             proc = subprocess.Popen(
                 cmd,
                 cwd=dirpath,
@@ -1228,6 +1252,7 @@ class CodebaseIndexer:
                 self.lsp_client = None
 
     def _index_directory_impl(self, dirpath: str, progress_callback=None) -> dict:
+        profiler = IndexProfiler()
         path = pathlib.Path(dirpath).resolve()
         ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context"}
         files = []
@@ -1361,8 +1386,8 @@ class CodebaseIndexer:
             ram_graph = ram_search.graph
 
             with ram_graph:
-                max_workers = max(1, int((os.cpu_count() or 4) * 0.75))
-                CHUNK_SIZE = 250
+                max_workers = settings.index_max_workers
+                CHUNK_SIZE = settings.index_chunk_size
                 chunk_jobs = [parse_jobs[i:i + CHUNK_SIZE] for i in range(0, len(parse_jobs), CHUNK_SIZE)]
                 current_processed = skipped_count
 
@@ -1392,8 +1417,9 @@ class CodebaseIndexer:
                             continue
 
                         # 1. Embed search nodes and graph nodes for this chunk only
-                        if self.enable_embeddings and self.embedder:
-                            all_nodes_to_embed = []
+                        with profiler.profile("Vector Embeddings Generation"):
+                            if self.enable_embeddings and self.embedder:
+                                all_nodes_to_embed = []
                             texts_to_embed = []
                             for res in chunk_results:
                                 content_bytes = res.get("content_bytes", b"")
@@ -1445,14 +1471,15 @@ class CodebaseIndexer:
                                         if i < len(graph_embeddings):
                                             props["embedding"] = graph_embeddings[i]
                                 except Exception as e:
-                                    logger.warning("Failed vector embeddings for chunk graph nodes: %s", e)
+                                    logger.warning("Failed vector embeddings for chunk graph nodes: %e", e)
 
                         # 2. Clear existing indexes for modified files in this chunk
-                        files_to_clear = [res["file_str"] for res in chunk_results]
-                        if files_to_clear:
-                            ram_search.clear_files_bulk(files_to_clear)
+                        with profiler.profile("Bulk Database Ingestion"):
+                            files_to_clear = [res["file_str"] for res in chunk_results]
+                            if files_to_clear:
+                                ram_search.clear_files_bulk(files_to_clear)
 
-                        # 3. Save search nodes and graph nodes for this chunk
+                            # 3. Save search nodes and graph nodes for this chunk
                         chunk_search_nodes = []
                         chunk_graph_nodes = {}
                         chunk_graph_edges = set()
@@ -1514,9 +1541,10 @@ class CodebaseIndexer:
                         gc.collect()
 
                 # Phase 2: Execute LSP definition resolution across all collected instructions
-                if all_lsp_resolutions:
-                    if progress_callback:
-                        progress_callback(total_files, total_files, "Resolving cross-file LSP call edges...")
+                with profiler.profile("LSP Call Resolution"):
+                    if all_lsp_resolutions:
+                        if progress_callback:
+                            progress_callback(total_files, total_files, "Resolving cross-file LSP call edges...")
                     try:
                         # Build file-keyed index from database
                         db_nodes = ram_search._conn.execute(
@@ -1557,15 +1585,16 @@ class CodebaseIndexer:
                         logger.warning("Failed during Phase 2 LSP call resolution: %s", e)
 
                 # Insert Git temporal coupling edges
-                try:
-                    ram_graph.query_batch(["MATCH ()-[r:FILE_CHANGES_WITH]->() DELETE r"])
-                except Exception as e:
-                    logger.debug("Failed to clear old FILE_CHANGES_WITH edges: %s", e)
+                with profiler.profile("Git Temporal Coupling"):
+                    try:
+                        ram_graph.query_batch(["MATCH ()-[r:FILE_CHANGES_WITH]->() DELETE r"])
+                    except Exception as e:
+                        logger.debug("Failed to clear old FILE_CHANGES_WITH edges: %s", e)
 
-                git_coupling = self._compute_git_coupling(str(path))
-                if git_coupling:
-                    if progress_callback:
-                        progress_callback(total_files, total_files, f"Linking {len(git_coupling)} git temporal coupling edges...")
+                    git_coupling = self._compute_git_coupling(str(path))
+                    if git_coupling:
+                        if progress_callback:
+                            progress_callback(total_files, total_files, f"Linking {len(git_coupling)} git temporal coupling edges...")
                     git_edges = []
                     for f1, f2, weight in git_coupling:
                         lbl1 = ram_graph._get_node_label(f1, ram_graph._conn)
@@ -1590,17 +1619,22 @@ class CodebaseIndexer:
             with self.graph:
                 self.search_index.clear_files_bulk(stale_files)
 
-        self._post_process_graph()
+        with profiler.profile("Graph OOD Algorithms"):
+            if settings.enable_ood:
+                self._post_process_graph()
+            else:
+                logger.info("OOD features disabled (PECORINO_ENABLE_OOD=false), skipping graph sweep.")
 
-        fts_error = None
-        try:
-            if progress_callback:
-                progress_callback(total_files, total_files, "Rebuilding FTS index...")
-            self.search_index.rebuild_fts()
-        except Exception as e:
-            fts_error = str(e)
-            logger.warning("Failed to rebuild FTS index: %s", fts_error)
-            logger.debug(traceback.format_exc())
+        with profiler.profile("DuckDB FTS Rebuild"):
+            fts_error = None
+            try:
+                if progress_callback:
+                    progress_callback(total_files, total_files, "Rebuilding FTS index...")
+                self.search_index.rebuild_fts()
+            except Exception as e:
+                fts_error = str(e)
+                logger.warning("Failed to rebuild FTS index: %s", fts_error)
+                logger.debug(traceback.format_exc())
 
         # Build Tantivy BM25F index
         try:
@@ -1657,6 +1691,8 @@ class CodebaseIndexer:
             res["fts_error"] = fts_error
         if integrity_stats.get("warnings"):
             res["integrity_warnings"] = integrity_stats["warnings"]
+            
+        profiler.print_summary()
         return res
 
 def progress_callback(current: int, total: int, file_path: str):

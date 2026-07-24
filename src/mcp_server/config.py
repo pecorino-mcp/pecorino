@@ -48,6 +48,11 @@ class Config:
         self.lsp_request_timeout = float(os.getenv("PECORINO_LSP_TIMEOUT", "0.8"))
         self.enable_hcgs = os.getenv("PECORINO_ENABLE_HCGS", "true").lower() in ("true", "1", "yes")
 
+        # Indexing optimizations
+        self.index_chunk_size = int(os.getenv("PECORINO_INDEX_CHUNK_SIZE", "250"))
+        default_workers = max(1, int((os.cpu_count() or 4) * 0.75))
+        self.index_max_workers = int(os.getenv("PECORINO_INDEX_MAX_WORKERS", str(default_workers)))
+        self.enable_ood = os.getenv("PECORINO_ENABLE_OOD", "true").lower() in ("true", "1", "yes")
         # Allowed external roots (allowlist model for allow_external=True)
         # Set via colon-separated absolute paths, e.g.:
         #   PECORINO_ALLOWED_EXTERNAL_DIRS=/home/user/repos:/opt/projects
