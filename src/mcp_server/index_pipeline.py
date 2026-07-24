@@ -9,9 +9,33 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import time
+import contextlib
+from collections import defaultdict
 from typing import Any
 
 from src.mcp_server.naming_analyzer import analyze_name
+
+class IndexProfiler:
+    def __init__(self):
+        self.timings = defaultdict(float)
+
+    @contextlib.contextmanager
+    def profile(self, phase_name: str):
+        start = time.time()
+        try:
+            yield
+        finally:
+            self.timings[phase_name] += (time.time() - start)
+
+    def print_summary(self):
+        logger.info("=== Indexing Performance Profile ===")
+        total = sum(self.timings.values())
+        for phase, duration in sorted(self.timings.items(), key=lambda x: x[1], reverse=True):
+            pct = (duration / total * 100) if total > 0 else 0
+            logger.info(f"{phase:<30}: {duration:.2f}s ({pct:.1f}%)")
+        logger.info(f"{'Total':<30}: {total:.2f}s")
+        logger.info("====================================")
 
 # Add modules/pecorino-utils to sys.path to resolve src.metrics
 workspace_root = Path(__file__).resolve().parent.parent.parent
@@ -571,6 +595,148 @@ class CodebaseIndexer:
             if i < len(embeddings):
                 n['embedding'] = embeddings[i]
 
+    def _compute_git_features(self, dirpath: str) -> list:
+        """Parse git log to extract per-file temporal and stable features.
+
+        Features extracted per file:
+        - git_commit_count: total commits touching file
+        - git_days_since_change: days since last modification
+        - git_survival_days: days since first commit / creation
+        - git_churn: total lines added + deleted across commits
+        - git_authors: number of unique commit authors
+        - git_ownership_entropy: Shannon entropy of author commit distribution
+        - git_bug_fix_ratio: fraction of commits with bug-fix keywords
+        - git_rename_count: number of rename events involving file
+        """
+        import math
+        import subprocess
+        import time
+        from collections import defaultdict
+
+        try:
+            cmd = ["git", "log", "--pretty=format:COMMIT||%at||%an||%s", "--numstat"]
+            proc = subprocess.Popen(
+                cmd,
+                cwd=dirpath,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            stdout, _ = proc.communicate()
+            if proc.returncode != 0 or not stdout:
+                return []
+        except Exception as e:
+            logger.debug("Failed to run git log for git features: %s", e)
+            return []
+
+        now_ts = time.time()
+        bug_keywords = ("fix", "bug", "issue", "patch", "resolve", "close")
+
+        file_commit_counts: dict[str, int] = defaultdict(int)
+        file_bug_fix_commits: dict[str, int] = defaultdict(int)
+        file_author_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        file_churn: dict[str, int] = defaultdict(int)
+        file_latest_ts: dict[str, int] = {}
+        file_first_ts: dict[str, int] = {}
+
+        current_ts = None
+        current_author = None
+        current_is_bug = False
+
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("COMMIT||"):
+                parts = line.split("||", 3)
+                if len(parts) >= 4:
+                    try:
+                        current_ts = int(parts[1])
+                    except ValueError:
+                        current_ts = int(now_ts)
+                    current_author = parts[2].strip()
+                    subject = parts[3].lower()
+                    current_is_bug = any(k in subject for k in bug_keywords)
+            elif current_ts is not None and "\t" in line:
+                tokens = line.split("\t")
+                if len(tokens) == 3:
+                    added_str, deleted_str, rel_path = tokens
+                    abs_path = os.path.abspath(os.path.join(dirpath, rel_path))
+
+                    file_commit_counts[abs_path] += 1
+                    if current_is_bug:
+                        file_bug_fix_commits[abs_path] += 1
+                    if current_author:
+                        file_author_counts[abs_path][current_author] += 1
+
+                    added = int(added_str) if added_str.isdigit() else 0
+                    deleted = int(deleted_str) if deleted_str.isdigit() else 0
+                    file_churn[abs_path] += added + deleted
+
+                    if abs_path not in file_latest_ts or current_ts > file_latest_ts[abs_path]:
+                        file_latest_ts[abs_path] = current_ts
+                    if abs_path not in file_first_ts or current_ts < file_first_ts[abs_path]:
+                        file_first_ts[abs_path] = current_ts
+
+        file_renames: dict[str, int] = defaultdict(int)
+        try:
+            rename_cmd = ["git", "log", "--name-status", "--oneline"]
+            proc_rename = subprocess.Popen(
+                rename_cmd,
+                cwd=dirpath,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            rename_out, _ = proc_rename.communicate()
+            if proc_rename.returncode == 0 and rename_out:
+                for line in rename_out.splitlines():
+                    line = line.strip()
+                    if line.startswith("R") and "\t" in line:
+                        parts = line.split("\t")
+                        if len(parts) >= 3:
+                            old_p = os.path.abspath(os.path.join(dirpath, parts[1]))
+                            new_p = os.path.abspath(os.path.join(dirpath, parts[2]))
+                            file_renames[old_p] += 1
+                            file_renames[new_p] += 1
+        except Exception as e:
+            logger.debug("Failed to count renames: %s", e)
+
+        results = []
+        for filepath, commit_count in file_commit_counts.items():
+            latest_ts = file_latest_ts.get(filepath, int(now_ts))
+            first_ts = file_first_ts.get(filepath, int(now_ts))
+
+            days_since_change = max(0, int((now_ts - latest_ts) / 86400))
+            survival_days = max(0, int((now_ts - first_ts) / 86400))
+
+            author_map = file_author_counts.get(filepath, {})
+            num_authors = len(author_map)
+            total_author_commits = sum(author_map.values())
+            entropy = 0.0
+            if total_author_commits > 0:
+                for cnt in author_map.values():
+                    p = cnt / total_author_commits
+                    if p > 0:
+                        entropy -= p * math.log2(p)
+
+            bug_fix_count = file_bug_fix_commits.get(filepath, 0)
+            bug_fix_ratio = bug_fix_count / commit_count if commit_count > 0 else 0.0
+
+            results.append({
+                "filepath": filepath,
+                "git_survival_days": survival_days,
+                "git_rename_count": file_renames.get(filepath, 0),
+                "git_ownership_entropy": round(entropy, 4),
+                "git_commit_count": commit_count,
+                "git_days_since_change": days_since_change,
+                "git_churn": file_churn.get(filepath, 0),
+                "git_authors": num_authors,
+                "git_bug_fix_ratio": round(bug_fix_ratio, 4),
+            })
+
+        return results
+
     def _compute_git_coupling(self, dirpath: str) -> list:
         """Run git log to calculate file co-change coupling scores (Jaccard similarity).
         
@@ -580,7 +746,7 @@ class CodebaseIndexer:
         from collections import defaultdict
 
         try:
-            cmd = ["git", "log", "--pretty=format:commit:%H", "--name-only"]
+            cmd = ["git", "log", "--pretty=format:commit:%H", "--name-only", "--max-count=10000", "--since=1.years"]
             proc = subprocess.Popen(
                 cmd,
                 cwd=dirpath,
@@ -920,6 +1086,75 @@ class CodebaseIndexer:
                 logger.warning("Failed to run Leiden sweep: %s", e)
                 logger.debug(traceback.format_exc())
 
+            # Compute and bulk update Git temporal & stable features
+            try:
+                git_feats = self._compute_git_features(self.repo_path)
+                if git_feats:
+                    self.search_index.update_git_features_bulk(git_feats)
+            except Exception as e:
+                logger.warning("Failed to compute or update git features: %s", e)
+
+            # Calculate and bulk update Object-Oriented Design (OOD) Features
+            try:
+                ood_map: dict[str, dict[str, Any]] = {}
+
+                # 1. Instability and Coupling from in_degree / out_degree
+                node_rows = self.search_index._conn.execute(
+                    "SELECT id, in_degree, out_degree FROM code_nodes"
+                ).fetchall()
+                for nid, in_deg, out_deg in node_rows:
+                    in_d = float(in_deg or 0)
+                    out_d = float(out_deg or 0)
+                    coupling = in_d + out_d
+                    instability = out_d / coupling if coupling > 0 else 0.0
+                    ood_map[nid] = {
+                        "id": nid,
+                        "instability": round(instability, 4),
+                        "coupling": coupling,
+                        "depth": 0,
+                        "inheritance_depth": 0,
+                        "betweenness": 0.0,
+                    }
+
+                # 2. Inheritance Depth, Containment Depth, and Betweenness from Graph
+                try:
+                    with self.graph:
+                        inherit_rows = self.graph.query(
+                            "MATCH (c:CodeNode)-[:EXTENDS*]->(a:CodeNode) "
+                            "RETURN c.id AS id, count(a) AS depth"
+                        )
+                        for row in inherit_rows:
+                            nid = row.get("id")
+                            if nid in ood_map:
+                                ood_map[nid]["inheritance_depth"] = int(row.get("depth", 0))
+
+                        contain_rows = self.graph.query(
+                            "MATCH (parent:CodeNode)-[:CONTAINS*]->(child:CodeNode) "
+                            "RETURN child.id AS id, count(parent) AS depth"
+                        )
+                        for row in contain_rows:
+                            nid = row.get("id")
+                            if nid in ood_map:
+                                ood_map[nid]["depth"] = int(row.get("depth", 0))
+
+                        between_rows = self.graph.query(
+                            "MATCH (a:CodeNode)-[:CALLS]->(n:CodeNode)-[:CALLS]->(b:CodeNode) "
+                            "WHERE a.id <> b.id "
+                            "RETURN n.id AS id, count(*) AS bridges"
+                        )
+                        max_bridges = max([r.get("bridges", 0) for r in between_rows], default=1) or 1
+                        for row in between_rows:
+                            nid = row.get("id")
+                            if nid in ood_map:
+                                ood_map[nid]["betweenness"] = round(float(row.get("bridges", 0)) / max_bridges, 4)
+                except Exception as e:
+                    logger.debug("Failed graph query for OOD features: %s", e)
+
+                if ood_map:
+                    self.search_index.update_ood_features_bulk(list(ood_map.values()))
+            except Exception as e:
+                logger.warning("Failed to compute or update OOD features: %s", e)
+
         except Exception as e:
             logger.warning("Failed to post-process graph: %s", e)
             logger.debug(traceback.format_exc())
@@ -1017,6 +1252,7 @@ class CodebaseIndexer:
                 self.lsp_client = None
 
     def _index_directory_impl(self, dirpath: str, progress_callback=None) -> dict:
+        profiler = IndexProfiler()
         path = pathlib.Path(dirpath).resolve()
         ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context"}
         files = []
@@ -1098,6 +1334,16 @@ class CodebaseIndexer:
                     fts_error = str(e)
                     logger.warning("Failed to rebuild FTS index: %s", fts_error)
 
+            # Build Tantivy BM25F index
+            tantivy_error = None
+            try:
+                if settings.enable_tantivy:
+                    tantivy_count = self.search_index.build_tantivy_index()
+                    logger.info("Tantivy BM25F index built with %d documents", tantivy_count)
+            except Exception as e:
+                tantivy_error = str(e)
+                logger.warning("Failed to build Tantivy index: %s", tantivy_error)
+
             res = {
                 "status": "success" if not fts_error else "partial",
                 "indexed_files": 0,
@@ -1140,8 +1386,8 @@ class CodebaseIndexer:
             ram_graph = ram_search.graph
 
             with ram_graph:
-                max_workers = max(1, int((os.cpu_count() or 4) * 0.75))
-                CHUNK_SIZE = 250
+                max_workers = settings.index_max_workers
+                CHUNK_SIZE = settings.index_chunk_size
                 chunk_jobs = [parse_jobs[i:i + CHUNK_SIZE] for i in range(0, len(parse_jobs), CHUNK_SIZE)]
                 current_processed = skipped_count
 
@@ -1171,8 +1417,9 @@ class CodebaseIndexer:
                             continue
 
                         # 1. Embed search nodes and graph nodes for this chunk only
-                        if self.enable_embeddings and self.embedder:
-                            all_nodes_to_embed = []
+                        with profiler.profile("Vector Embeddings Generation"):
+                            if self.enable_embeddings and self.embedder:
+                                all_nodes_to_embed = []
                             texts_to_embed = []
                             for res in chunk_results:
                                 content_bytes = res.get("content_bytes", b"")
@@ -1224,14 +1471,15 @@ class CodebaseIndexer:
                                         if i < len(graph_embeddings):
                                             props["embedding"] = graph_embeddings[i]
                                 except Exception as e:
-                                    logger.warning("Failed vector embeddings for chunk graph nodes: %s", e)
+                                    logger.warning("Failed vector embeddings for chunk graph nodes: %e", e)
 
                         # 2. Clear existing indexes for modified files in this chunk
-                        files_to_clear = [res["file_str"] for res in chunk_results]
-                        if files_to_clear:
-                            ram_search.clear_files_bulk(files_to_clear)
+                        with profiler.profile("Bulk Database Ingestion"):
+                            files_to_clear = [res["file_str"] for res in chunk_results]
+                            if files_to_clear:
+                                ram_search.clear_files_bulk(files_to_clear)
 
-                        # 3. Save search nodes and graph nodes for this chunk
+                            # 3. Save search nodes and graph nodes for this chunk
                         chunk_search_nodes = []
                         chunk_graph_nodes = {}
                         chunk_graph_edges = set()
@@ -1293,9 +1541,10 @@ class CodebaseIndexer:
                         gc.collect()
 
                 # Phase 2: Execute LSP definition resolution across all collected instructions
-                if all_lsp_resolutions:
-                    if progress_callback:
-                        progress_callback(total_files, total_files, "Resolving cross-file LSP call edges...")
+                with profiler.profile("LSP Call Resolution"):
+                    if all_lsp_resolutions:
+                        if progress_callback:
+                            progress_callback(total_files, total_files, "Resolving cross-file LSP call edges...")
                     try:
                         # Build file-keyed index from database
                         db_nodes = ram_search._conn.execute(
@@ -1336,15 +1585,16 @@ class CodebaseIndexer:
                         logger.warning("Failed during Phase 2 LSP call resolution: %s", e)
 
                 # Insert Git temporal coupling edges
-                try:
-                    ram_graph.query_batch(["MATCH ()-[r:FILE_CHANGES_WITH]->() DELETE r"])
-                except Exception as e:
-                    logger.debug("Failed to clear old FILE_CHANGES_WITH edges: %s", e)
+                with profiler.profile("Git Temporal Coupling"):
+                    try:
+                        ram_graph.query_batch(["MATCH ()-[r:FILE_CHANGES_WITH]->() DELETE r"])
+                    except Exception as e:
+                        logger.debug("Failed to clear old FILE_CHANGES_WITH edges: %s", e)
 
-                git_coupling = self._compute_git_coupling(str(path))
-                if git_coupling:
-                    if progress_callback:
-                        progress_callback(total_files, total_files, f"Linking {len(git_coupling)} git temporal coupling edges...")
+                    git_coupling = self._compute_git_coupling(str(path))
+                    if git_coupling:
+                        if progress_callback:
+                            progress_callback(total_files, total_files, f"Linking {len(git_coupling)} git temporal coupling edges...")
                     git_edges = []
                     for f1, f2, weight in git_coupling:
                         lbl1 = ram_graph._get_node_label(f1, ram_graph._conn)
@@ -1369,17 +1619,30 @@ class CodebaseIndexer:
             with self.graph:
                 self.search_index.clear_files_bulk(stale_files)
 
-        self._post_process_graph()
+        with profiler.profile("Graph OOD Algorithms"):
+            if settings.enable_ood:
+                self._post_process_graph()
+            else:
+                logger.info("OOD features disabled (PECORINO_ENABLE_OOD=false), skipping graph sweep.")
 
-        fts_error = None
+        with profiler.profile("DuckDB FTS Rebuild"):
+            fts_error = None
+            try:
+                if progress_callback:
+                    progress_callback(total_files, total_files, "Rebuilding FTS index...")
+                self.search_index.rebuild_fts()
+            except Exception as e:
+                fts_error = str(e)
+                logger.warning("Failed to rebuild FTS index: %s", fts_error)
+                logger.debug(traceback.format_exc())
+
+        # Build Tantivy BM25F index
         try:
-            if progress_callback:
-                progress_callback(total_files, total_files, "Rebuilding FTS index...")
-            self.search_index.rebuild_fts()
+            if settings.enable_tantivy:
+                tantivy_count = self.search_index.build_tantivy_index()
+                logger.info("Tantivy BM25F index built with %d documents", tantivy_count)
         except Exception as e:
-            fts_error = str(e)
-            logger.warning("Failed to rebuild FTS index: %s", fts_error)
-            logger.debug(traceback.format_exc())
+            logger.warning("Failed to build Tantivy index: %s", e)
 
         if progress_callback:
             progress_callback(total_files, total_files, "Resolving symbols...")
@@ -1428,6 +1691,8 @@ class CodebaseIndexer:
             res["fts_error"] = fts_error
         if integrity_stats.get("warnings"):
             res["integrity_warnings"] = integrity_stats["warnings"]
+            
+        profiler.print_summary()
         return res
 
 def progress_callback(current: int, total: int, file_path: str):

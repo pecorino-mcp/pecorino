@@ -48,6 +48,11 @@ class Config:
         self.lsp_request_timeout = float(os.getenv("PECORINO_LSP_TIMEOUT", "0.8"))
         self.enable_hcgs = os.getenv("PECORINO_ENABLE_HCGS", "true").lower() in ("true", "1", "yes")
 
+        # Indexing optimizations
+        self.index_chunk_size = int(os.getenv("PECORINO_INDEX_CHUNK_SIZE", "250"))
+        default_workers = max(1, int((os.cpu_count() or 4) * 0.75))
+        self.index_max_workers = int(os.getenv("PECORINO_INDEX_MAX_WORKERS", str(default_workers)))
+        self.enable_ood = os.getenv("PECORINO_ENABLE_OOD", "true").lower() in ("true", "1", "yes")
         # Allowed external roots (allowlist model for allow_external=True)
         # Set via colon-separated absolute paths, e.g.:
         #   PECORINO_ALLOWED_EXTERNAL_DIRS=/home/user/repos:/opt/projects
@@ -56,6 +61,27 @@ class Config:
         for r in env_roots.split(":"):
             if r.strip():
                 self.allowed_external_roots.add(Path(r.strip()).expanduser().resolve())
+
+        # Tantivy BM25F search engine
+        self.enable_tantivy = os.getenv(
+            "PECORINO_ENABLE_TANTIVY", "true"
+        ).lower() in ("true", "1", "yes")
+
+        # Per-field boost weights for Tantivy BM25F (JSON dict, e.g. '{"name":5,"kind":4}')
+        import json
+        default_boosts = '{"name": 5.0, "kind": 4.0, "summary": 3.0, "filepath": 2.0, "body": 1.0}'
+        self.tantivy_field_boosts: dict[str, float] = json.loads(
+            os.getenv("PECORINO_TANTIVY_FIELD_BOOSTS", default_boosts)
+        )
+
+        # Cross-encoder reranker
+        self.enable_cross_encoder = os.getenv(
+            "PECORINO_ENABLE_CROSS_ENCODER", "true"
+        ).lower() in ("true", "1", "yes")
+        self.cross_encoder_model_repo = os.getenv(
+            "PECORINO_CROSS_ENCODER_MODEL_REPO", "cross-encoder/ms-marco-MiniLM-L-12-v2"
+        )
+        self.cross_encoder_top_n = int(os.getenv("PECORINO_CROSS_ENCODER_TOP_N", "30"))
 
 # Global singleton configuration
 settings = Config()

@@ -35,8 +35,12 @@ def find_repo_root(filepath: str, max_depth: int = 20) -> str:
 
 def get_indexes_dir() -> str:
     """Get the centralized indexes directory."""
-    from src.mcp_server.config import settings
-    indexes_dir = settings.index_dir
+    env_dir = os.getenv("PECORINO_INDEX_DIR")
+    if env_dir:
+        indexes_dir = Path(env_dir).expanduser().resolve()
+    else:
+        from src.mcp_server.config import settings
+        indexes_dir = settings.index_dir
     indexes_dir.mkdir(parents=True, exist_ok=True)
     return str(indexes_dir)
 
@@ -80,6 +84,22 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes ADD COLUMN in_degree INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN out_degree INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN hcgs_summary VARCHAR',
+        # Phase 0: Git features (stable)
+        'ALTER TABLE code_nodes ADD COLUMN git_survival_days INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_rename_count INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_ownership_entropy DOUBLE DEFAULT 0.0',
+        # Phase 0: Git features (time-dependent)
+        'ALTER TABLE code_nodes ADD COLUMN git_commit_count INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_days_since_change INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_churn INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_authors INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_bug_fix_ratio DOUBLE DEFAULT 0.0',
+        # Phase 0: OOD features
+        'ALTER TABLE code_nodes ADD COLUMN instability DOUBLE DEFAULT 0.0',
+        'ALTER TABLE code_nodes ADD COLUMN coupling DOUBLE DEFAULT 0.0',
+        'ALTER TABLE code_nodes ADD COLUMN depth INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN inheritance_depth INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN betweenness DOUBLE DEFAULT 0.0',
     ]
     for query in migrations:
         try:
@@ -153,6 +173,7 @@ class CodeSearchIndex:
         self._conn = None
         self.graph = None
         self._embedder = None
+        self._tantivy = None
         self._read_only = read_only
         if db_path is None:
             repo_path = find_repo_root(os.getcwd())
@@ -220,6 +241,61 @@ class CodeSearchIndex:
             from src.mcp_server.embedding import EmbeddingPipeline
             self._embedder = EmbeddingPipeline()
         return self._embedder
+
+    def _ensure_tantivy(self):
+        """Lazily open the Tantivy index for reading."""
+        if self._tantivy is not None:
+            return self._tantivy
+
+        from src.mcp_server.config import settings
+        if not settings.enable_tantivy:
+            return None
+
+        from src.mcp_server.tantivy_search import TantivyIndex, get_tantivy_path_for_repo
+        tantivy_path = get_tantivy_path_for_repo(self.db_path)
+        idx = TantivyIndex(index_path=tantivy_path)
+        if idx.open():
+            self._tantivy = idx
+            return idx
+        return None
+
+    def build_tantivy_index(self) -> int:
+        """Build the Tantivy BM25F index from all code_nodes in DuckDB.
+
+        Returns the number of documents indexed.
+        """
+        from src.mcp_server.tantivy_search import TantivyIndex, get_tantivy_path_for_repo
+
+        tantivy_path = get_tantivy_path_for_repo(self.db_path)
+        conn = self._conn
+
+        # Fetch all nodes for the Tantivy index
+        rows = conn.execute('''
+            SELECT id, name, kind, filepath, hcgs_summary,
+                   start_line, end_line, start_byte, end_byte
+            FROM code_nodes
+        ''').fetchall()
+
+        nodes = []
+        for row in rows:
+            body = self._lazy_load_body(
+                row[3], row[5], row[6],
+                start_byte=row[7] if row[7] is not None else 0,
+                end_byte=row[8] if row[8] is not None else 0,
+            )
+            nodes.append({
+                'id': row[0],
+                'name': row[1],
+                'kind': row[2],
+                'filepath': row[3],
+                'hcgs_summary': row[4] or '',
+                'body_text': body or '',
+            })
+
+        idx = TantivyIndex(index_path=tantivy_path)
+        count = idx.build(nodes, index_path=tantivy_path)
+        self._tantivy = idx
+        return count
 
     def close(self):
         """Close the underlying database connections."""
@@ -353,12 +429,20 @@ class CodeSearchIndex:
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
-                # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
+                # Create temp table with same schema as code_nodes, then INSERT
+                # only the core columns — new feature columns keep their defaults
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
-                conn.execute('''
-                    INSERT INTO code_nodes
-                    SELECT * FROM temp_code_nodes
+                insert_cols = (
+                    "id, name, kind, filepath, start_line, end_line, "
+                    "relationships, pagerank, start_byte, end_byte, "
+                    "community_id, embedding, complexity, signature, "
+                    "in_degree, out_degree, hcgs_summary"
+                )
+                placeholders = ", ".join(["?"] * 17)
+                conn.executemany(f"INSERT INTO temp_code_nodes ({insert_cols}) VALUES ({placeholders})", data)
+                conn.execute(f'''
+                    INSERT INTO code_nodes ({insert_cols})
+                    SELECT {insert_cols} FROM temp_code_nodes
                     ON CONFLICT(id) DO UPDATE SET
                         name=excluded.name,
                         kind=excluded.kind,
@@ -388,12 +472,14 @@ class CodeSearchIndex:
             graph = self._ensure_graph()
             with graph:
                 graph.query_batch([
+                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*0..10]->(child)-[r:HAS_IDENTIFIER]->(i:Identifier) DELETE r",
                     "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) DETACH DELETE v",
                     "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) DETACH DELETE l",
                     "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) DETACH DELETE v",
                     "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(child) DETACH DELETE child",
                     "MATCH (f:CodeNode {kind: 'File', id: $id}) DETACH DELETE f",
                 ], {"id": filepath})
+                graph.purge_orphaned_identifiers()
         except Exception:
             pass
 
@@ -419,13 +505,16 @@ class CodeSearchIndex:
             chunk = filepaths[i:i+chunk_size]
             try:
                 graph = self._ensure_graph()
-                graph.query_batch([
-                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
-                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) WHERE f.id IN $ids DETACH DELETE l",
-                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
-                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
-                    "MATCH (f:CodeNode {kind: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
-                ], {"ids": chunk})
+                with graph:
+                    graph.query_batch([
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*0..10]->(child)-[r:HAS_IDENTIFIER]->(i:Identifier) WHERE f.id IN $ids DELETE r",
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) WHERE f.id IN $ids DETACH DELETE l",
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
+                        "MATCH (f:CodeNode {kind: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
+                    ], {"ids": chunk})
+                    graph.purge_orphaned_identifiers()
             except Exception:
                 pass
 
@@ -462,9 +551,9 @@ class CodeSearchIndex:
                 name = os.path.basename(filepath)
                 ext = os.path.splitext(filepath)[1]
                 q = f"""
-                    MERGE (f:File {{id: $id_{j}}})
-                    ON CREATE SET f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
-                    ON MATCH SET f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    MERGE (f:CodeNode {{id: $id_{j}}})
+                    ON CREATE SET f.kind = 'File', f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    ON MATCH SET f.kind = 'File', f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
                 """
                 queries.append(q)
                 params.update({
@@ -533,9 +622,9 @@ class CodeSearchIndex:
         name = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1]
         query = """
-            MERGE (f:File {id: $id})
-            ON CREATE SET f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
-            ON MATCH SET f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            MERGE (f:CodeNode {id: $id})
+            ON CREATE SET f.kind = 'File', f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            ON MATCH SET f.kind = 'File', f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
         """
         try:
             graph = self._ensure_graph()
@@ -643,6 +732,116 @@ class CodeSearchIndex:
             conn.execute("ROLLBACK")
             logger.warning("Failed to bulk update degrees: %s", e)
 
+    def update_git_features_bulk(self, git_features: List[Dict[str, Any]]):
+        """Bulk update git temporal and stable metrics for code nodes matching filepath.
+
+        git_features: list of dicts with keys:
+            'filepath', 'git_survival_days', 'git_rename_count', 'git_ownership_entropy',
+            'git_commit_count', 'git_days_since_change', 'git_churn', 'git_authors', 'git_bug_fix_ratio'
+        """
+        if not git_features:
+            return
+        conn = self._conn
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            conn.execute("""
+                CREATE TEMP TABLE temp_git (
+                    filepath VARCHAR,
+                    git_survival_days INTEGER,
+                    git_rename_count INTEGER,
+                    git_ownership_entropy DOUBLE,
+                    git_commit_count INTEGER,
+                    git_days_since_change INTEGER,
+                    git_churn INTEGER,
+                    git_authors INTEGER,
+                    git_bug_fix_ratio DOUBLE
+                )
+            """)
+            data = [
+                (
+                    f.get("filepath", ""),
+                    int(f.get("git_survival_days", 0)),
+                    int(f.get("git_rename_count", 0)),
+                    float(f.get("git_ownership_entropy", 0.0)),
+                    int(f.get("git_commit_count", 0)),
+                    int(f.get("git_days_since_change", 0)),
+                    int(f.get("git_churn", 0)),
+                    int(f.get("git_authors", 0)),
+                    float(f.get("git_bug_fix_ratio", 0.0)),
+                )
+                for f in git_features
+            ]
+            conn.executemany("INSERT INTO temp_git VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+            conn.execute("""
+                UPDATE code_nodes
+                SET git_survival_days = temp_git.git_survival_days,
+                    git_rename_count = temp_git.git_rename_count,
+                    git_ownership_entropy = temp_git.git_ownership_entropy,
+                    git_commit_count = temp_git.git_commit_count,
+                    git_days_since_change = temp_git.git_days_since_change,
+                    git_churn = temp_git.git_churn,
+                    git_authors = temp_git.git_authors,
+                    git_bug_fix_ratio = temp_git.git_bug_fix_ratio
+                FROM temp_git
+                WHERE code_nodes.filepath = temp_git.filepath
+            """)
+            conn.execute("DROP TABLE temp_git")
+            conn.execute("COMMIT")
+            logger.info("Updated git features for %d files", len(git_features))
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.warning("Failed to bulk update git features: %s", e)
+
+    def update_ood_features_bulk(self, ood_data: List[Dict[str, Any]]):
+        """Bulk update Object-Oriented Design (OOD) features for code nodes matching id.
+
+        ood_data: list of dicts with keys:
+            'id', 'instability', 'coupling', 'depth', 'inheritance_depth', 'betweenness'
+        """
+        if not ood_data:
+            return
+        conn = self._conn
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            conn.execute("""
+                CREATE TEMP TABLE temp_ood (
+                    id VARCHAR,
+                    instability DOUBLE,
+                    coupling DOUBLE,
+                    depth INTEGER,
+                    inheritance_depth INTEGER,
+                    betweenness DOUBLE
+                )
+            """)
+            data = [
+                (
+                    item.get("id", ""),
+                    float(item.get("instability", 0.0)),
+                    float(item.get("coupling", 0.0)),
+                    int(item.get("depth", 0)),
+                    int(item.get("inheritance_depth", 0)),
+                    float(item.get("betweenness", 0.0)),
+                )
+                for item in ood_data
+            ]
+            conn.executemany("INSERT INTO temp_ood VALUES (?, ?, ?, ?, ?, ?)", data)
+            conn.execute("""
+                UPDATE code_nodes
+                SET instability = temp_ood.instability,
+                    coupling = temp_ood.coupling,
+                    depth = temp_ood.depth,
+                    inheritance_depth = temp_ood.inheritance_depth,
+                    betweenness = temp_ood.betweenness
+                FROM temp_ood
+                WHERE code_nodes.id = temp_ood.id
+            """)
+            conn.execute("DROP TABLE temp_ood")
+            conn.execute("COMMIT")
+            logger.info("Updated OOD features for %d nodes", len(ood_data))
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.warning("Failed to bulk update OOD features: %s", e)
+
     def get_file_hash(self, filepath: str) -> str:
         """Retrieve the stored hash for a given file, or None if not found."""
         conn = self._conn
@@ -681,7 +880,7 @@ class CodeSearchIndex:
                 pass  # File deleted or inaccessible — stale removal handled elsewhere
         return stale
 
-    def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts", boost_ids: list[str] = None) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts", boost_ids: list[str] = None, explain: bool = False) -> List[Dict[str, Any]]:
         """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
         from src.core.errors import AnalysisError, IndexNotFoundError
         from src.mcp_server.config import settings
@@ -729,6 +928,7 @@ class CodeSearchIndex:
                     ),
                     vector_scores AS (
                         SELECT c.id,
+                               array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) as cos_dist,
                                row_number() OVER (ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC) as rank_vec
                         FROM code_nodes c
                         WHERE c.embedding IS NOT NULL
@@ -738,7 +938,8 @@ class CodeSearchIndex:
                     )
                     SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
                            COALESCE(b.bm25_score, 0) as bm25_score,
-                           ((((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0))){boost_clause} AS score
+                           ((((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0))){boost_clause} AS score,
+                           (1.0 - COALESCE(v.cos_dist, 1.0)) AS vec_sim
                     FROM code_nodes c
                     LEFT JOIN bm25_scores b ON c.id = b.id
                     LEFT JOIN vector_scores v ON c.id = v.id
@@ -754,7 +955,7 @@ class CodeSearchIndex:
                     else:
                         params.append(f"{prefix}%")
 
-                params.append(q_emb)
+                params.extend([q_emb, q_emb])
 
                 if target_path:
                     if path_filter == "AND c.filepath = ?":
@@ -796,25 +997,72 @@ class CodeSearchIndex:
                 params.extend([q_emb, limit, offset])
                 res = conn.execute(sql, params).fetchall()
             else:
-                params = [query, query]
-                if target_path:
-                    if path_filter == "AND c.filepath = ?":
-                        params.append(target_path)
-                    else:
-                        params.append(f"{prefix}%")
-                params.extend([limit, offset])
+                # FTS mode: try Tantivy BM25F first, fall back to DuckDB FTS
+                tantivy = self._ensure_tantivy()
+                if tantivy is not None and tantivy.is_ready:
+                    # Tantivy BM25F candidate retrieval
+                    tantivy_hits = tantivy.search(query, limit=max(limit + offset, 100))
 
-                # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
-                # WHERE clause for filtering and in the SELECT clause to retrieve the score.
-                res = conn.execute(f'''
-                    SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
-                           (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
-                    FROM code_nodes c
-                    WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
-                    {path_filter}
-                    ORDER BY score DESC
-                    LIMIT ? OFFSET ?
-                ''', params).fetchall()
+                    if tantivy_hits:
+                        # Build score map from Tantivy results
+                        score_map = {nid: score for nid, score in tantivy_hits}
+                        hit_ids = list(score_map.keys())
+
+                        # Fetch full node data from DuckDB for matched IDs
+                        placeholders = ",".join(["?"] * len(hit_ids))
+                        filter_clause = ""
+                        filter_params = []
+                        if target_path:
+                            if path_filter == "AND c.filepath = ?":
+                                filter_clause = "AND c.filepath = ?"
+                                filter_params = [target_path]
+                            else:
+                                filter_clause = "AND c.filepath LIKE ?"
+                                filter_params = [f"{prefix}%"]
+
+                        rows = conn.execute(f'''
+                            SELECT c.id, c.name, c.kind, c.filepath,
+                                   c.start_line, c.end_line, c.start_byte, c.end_byte,
+                                   c.pagerank
+                            FROM code_nodes c
+                            WHERE c.id IN ({placeholders})
+                            {filter_clause}
+                        ''', hit_ids + filter_params).fetchall()
+
+                        # Combine Tantivy BM25F score with PageRank
+                        res = []
+                        for row in rows:
+                            tantivy_score = score_map.get(row[0], 0.0)
+                            pr = float(row[8]) if row[8] is not None else 0.0
+                            combined = tantivy_score * (1.0 + pr)
+                            res.append(row[:8] + (combined,))
+
+                        # Sort by combined score and apply limit/offset
+                        res.sort(key=lambda r: r[8], reverse=True)
+                        res = res[offset:offset + limit]
+                    else:
+                        res = []
+                else:
+                    # Fallback: DuckDB FTS
+                    params = [query, query]
+                    if target_path:
+                        if path_filter == "AND c.filepath = ?":
+                            params.append(target_path)
+                        else:
+                            params.append(f"{prefix}%")
+                    params.extend([limit, offset])
+
+                    # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
+                    # WHERE clause for filtering and in the SELECT clause to retrieve the score.
+                    res = conn.execute(f'''
+                        SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                               (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
+                        FROM code_nodes c
+                        WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
+                        {path_filter}
+                        ORDER BY score DESC
+                        LIMIT ? OFFSET ?
+                    ''', params).fetchall()
 
             results = []
             for row in res:
@@ -832,16 +1080,75 @@ class CodeSearchIndex:
                     if mode == "hybrid" and len(row) > 9:
                         entry['bm25_score'] = round(float(row[8]), 2)
                         entry['score'] = round(float(row[9]), 2)
+                        # row[10] = vec_sim from hybrid SQL
+                        if len(row) > 10 and row[10] is not None:
+                            entry['vec_sim'] = round(float(row[10]), 4)
+                    elif mode == "semantic":
+                        # score IS the vector similarity (1 - cosine_distance)
+                        entry['score'] = round(float(row[8]), 4)
+                        entry['vec_sim'] = round(float(row[8]), 4)
                     else:
                         entry['score'] = round(float(row[8]), 2)
                 results.append(entry)
+
+            # Materialize full feature vectors & compute LTR scores for candidates
+            candidate_ids = [r['id'] for r in results if 'id' in r]
+            if candidate_ids:
+                try:
+                    placeholders = ",".join(["?"] * len(candidate_ids))
+                    feat_rows = conn.execute(f"""
+                        SELECT id, pagerank, in_degree, out_degree, complexity,
+                               instability, coupling, depth, inheritance_depth, betweenness,
+                               git_commit_count, git_days_since_change, git_churn, git_authors,
+                               git_bug_fix_ratio, git_survival_days, git_ownership_entropy
+                        FROM code_nodes
+                        WHERE id IN ({placeholders})
+                    """, candidate_ids).fetchall()
+                    feat_map = {row[0]: row for row in feat_rows}
+
+                    from src.mcp_server.ltr_ranker import extract_candidate_features, compute_ltr_score
+
+                    for r in results:
+                        nid = r.get('id')
+                        feat_row = feat_map.get(nid)
+                        if feat_row:
+                            r.update({
+                                'pagerank': feat_row[1] or 0.0,
+                                'in_degree': feat_row[2] or 0,
+                                'out_degree': feat_row[3] or 0,
+                                'complexity': feat_row[4] or 0,
+                                'instability': feat_row[5] or 0.0,
+                                'coupling': feat_row[6] or 0.0,
+                                'depth': feat_row[7] or 0,
+                                'inheritance_depth': feat_row[8] or 0,
+                                'betweenness': feat_row[9] or 0.0,
+                                'git_commit_count': feat_row[10] or 0,
+                                'git_days_since_change': feat_row[11] or 0,
+                                'git_churn': feat_row[12] or 0,
+                                'git_authors': feat_row[13] or 0,
+                                'git_bug_fix_ratio': feat_row[14] or 0.0,
+                                'git_survival_days': feat_row[15] or 0,
+                                'git_ownership_entropy': feat_row[16] or 0.0,
+                            })
+
+                            # Compute unified LTR score — only when features are available
+                            fts_val = float(r.get('bm25_score', r.get('score', 0.0)) or 0.0)
+                            vec_val = float(r.get('vec_sim', 0.0) or 0.0)
+                            feats = extract_candidate_features(
+                                r,
+                                fts_bm25_score=fts_val,
+                                query_vector_sim=vec_val,
+                            )
+                            r['score'] = round(float(compute_ltr_score(feats)), 4)
+                            if explain:
+                                r['ranking_explanation'] = feats
+                except Exception as e:
+                    logger.warning("Failed to compute LTR scores for search candidates: %s", e)
 
             # Cypher dynamic boost logic
             try:
                 graph = self._ensure_graph()
                 if graph and results:
-                    import math
-
                     def to_gorgonzola_id(r):
                         filepath = r.get('filepath')
                         name = r.get('name')
@@ -853,23 +1160,7 @@ class CodeSearchIndex:
                             return f"{filepath}::{parts[0]}::{parts[1]}"
                         return f"{filepath}::{name}"
 
-                    gorgonzola_to_result = {}
                     for r in results:
-                        gorgonzola_to_result[to_gorgonzola_id(r)] = r
-
-                    gorgonzola_ids = list(gorgonzola_to_result.keys())
-                    cypher_query = "MATCH ()-[r]->(n:CodeNode) WHERE n.id IN $ids RETURN n.id as id, count(r) AS in_degree"
-                    boost_res = graph.query(cypher_query, {"ids": gorgonzola_ids})
-                    boost_map = {row['id']: row['in_degree'] for row in boost_res}
-
-                    for k_id, r in gorgonzola_to_result.items():
-                        in_deg = boost_map.get(k_id, 0)
-                        if 'score' in r and in_deg > 0:
-                            r['score'] *= (1.0 + math.log1p(in_deg))
-                    
-                    for r in results:
-                        if 'score' in r:
-                            r['score'] = round(float(r['score']), 2)
                         if 'bm25_score' in r:
                             r['bm25_score'] = round(float(r['bm25_score']), 2)
                         if 'pagerank' in r:
@@ -877,33 +1168,9 @@ class CodeSearchIndex:
 
                     results.sort(key=lambda x: x.get('score', 0), reverse=True)
 
-                    # Fetch immediate usages (callers) for top results
-                    top_results = results[:5]
-                    top_gorgonzola_to_res = {}
-                    for r in top_results:
-                        top_gorgonzola_to_res[to_gorgonzola_id(r)] = r
-
-                    top_gorgonzola_ids = list(top_gorgonzola_to_res.keys())
-                    if top_gorgonzola_ids:
-                        usage_query = """
-                            MATCH (caller:CodeNode)-[r:CALLS]->(target:CodeNode) 
-                            WHERE target.id IN $top_ids 
-                            RETURN target.id as target_id, caller.id as caller_id, 
-                                   caller.name as caller_name, caller.filepath as filepath, 
-                                   caller.start_line as start_line 
-                            LIMIT 50
-                        """
-                        usage_res = graph.query(usage_query, {"top_ids": top_gorgonzola_ids})
-                        for row in usage_res:
-                            target_id = row['target_id']
-                            r = top_gorgonzola_to_res.get(target_id)
-                            if r:
-                                r.setdefault('usages', []).append({
-                                    "caller_id": row['caller_id'],
-                                    "name": row['caller_name'],
-                                    "filepath": row['filepath'],
-                                    "start_line": row['start_line']
-                                })
+                    if settings.enable_cross_encoder and mode in ("hybrid", "fts") and len(results) > 3:
+                        from src.mcp_server.cross_encoder import rerank
+                        results = rerank(query, results, top_k=limit)
 
                     for r in results:
                         r.pop('id', None)  # Remove internal ID to avoid cluttering response

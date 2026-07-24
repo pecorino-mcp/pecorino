@@ -9,6 +9,8 @@ from src.mcp_server.middleware.caching import _get_cached_api, clear_index_cache
 from src.mcp_server.middleware.security import check_suspicious, safe_path
 from src.mcp_server.middleware.sync import _auto_sync_stale
 from src.mcp_server.prometheus_metrics import FTS_SCAN_DURATION
+from src.mcp_server.intent_router import IntentRouter
+from src.mcp_server.telemetry import log_search_event
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ ALLOWED_MODES = frozenset({
     "trace",             # Multi-hop call graph traversal (like CBM trace_path)
     "snippet",          # Fetch full source code body of a specific symbol
     "explain",          # Explain a node by showing its graph relationships
+    "auto",             # Automatically route natural language queries to the right mode
 })
 
 # ── Intent-based presets (from query_codebase) ────────────────
@@ -145,13 +148,15 @@ async def do_search(
     limit: int = 10,
     offset: int = 0,
     include_source: bool = False,
+    include_context: bool = False,
     auto_expand_source: bool = True,
     max_depth: int = 3,
     intent: Optional[str] = None,
     query_json: Optional[str | Dict[str, Any]] = None,
     allow_external: bool = False,
     output_file: Optional[str] = None,
-    ctx: Optional[ServerRequestContext] = None
+    ctx: Optional[ServerRequestContext] = None,
+    explain: bool = False
 ) -> dict:
     """Unified search and analysis tool.
 
@@ -198,11 +203,22 @@ async def do_search(
     except Exception:
         pass
 
+    # ── Auto Intent Routing ───────────────────────────────────────
+    original_query = query
+    original_mode = mode
+    start_time = time.time()
+    
+    if mode == "auto" and query:
+        router = IntentRouter()
+        mode, query, intent_override = router.route(query)
+        if intent_override:
+            intent = intent_override
+
     # ── Route to mode-specific handlers ───────────────────────
     result: dict
-    if mode in ("fts", "hybrid", "semantic"):
+    if mode in ("fts", "hybrid", "semantic", "auto"):
         result = await _do_fts(target, query, mode, limit, offset, include_source,
-                               auto_expand_source, output_file, allow_external, ctx)
+                               include_context, auto_expand_source, output_file, allow_external, ctx, explain)
     elif mode in ("callers", "callees"):
         result = await _do_callers_callees(target, mode, query, limit, offset,
                                            allow_external, ctx)
@@ -231,7 +247,27 @@ async def do_search(
         return {"error": "Unknown mode"}
 
     # ── Post-processing: group results by directory ───────────
-    return _group_results_by_directory(result, _repo_root)
+    final_res = _group_results_by_directory(result, _repo_root)
+    
+    # ── Telemetry Logging ─────────────────────────────────────
+    try:
+        latency_ms = (time.time() - start_time) * 1000
+        result_count = sum(len(g.get("files", [])) for g in final_res.get("groups", []))
+        
+        # We fire the async telemetry event without awaiting to avoid blocking search response.
+        # However, asyncio.create_task is safer to fire-and-forget
+        asyncio.create_task(log_search_event(
+            original_query=original_query or "",
+            final_mode=mode,
+            latency_ms=latency_ms,
+            result_count=result_count,
+            intent=intent,
+            repo_root=_repo_root
+        ))
+    except Exception as e:
+        logger.warning(f"Failed to log telemetry: {e}")
+        
+    return final_res
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -245,10 +281,12 @@ async def _do_fts(
     limit: int,
     offset: int,
     include_source: bool,
+    include_context: bool,
     auto_expand_source: bool,
     output_file: Optional[str],
     allow_external: bool,
-    ctx: Optional[ServerRequestContext]
+    ctx: Optional[ServerRequestContext],
+    explain: bool = False
 ) -> dict:
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
@@ -301,6 +339,13 @@ async def _do_fts(
                             end_idx = min(len(lines), i + 2)
                             n["matched_snippet"] = "\n".join(lines[start_idx:end_idx]).strip()
                             break
+                            
+        # Apply context assembly if requested
+        if include_context or (auto_expanded and len(nodes) <= 3):
+            from src.mcp_server.context_assembler import assemble_context
+            graph_api = _get_cached_api(repo_root, db_path, "graph")
+            nodes = [assemble_context(n, graph_api.graph, repo_root) for n in nodes]
+            
         result = {"query": query, "results": nodes, "search_status": "ok"}
         if auto_expanded:
             result["auto_expanded"] = True
@@ -364,7 +409,7 @@ async def _do_fts(
         except Exception as e:
             logger.warning(f"Failed to fetch canonical boost IDs: {e}")
 
-    results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset, mode=mode, boost_ids=boost_ids)
+    results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset, mode=mode, boost_ids=boost_ids, explain=explain)
     FTS_SCAN_DURATION.observe(time.time() - _fts_start)
 
     # Auto-expand: include source when few results
@@ -391,6 +436,20 @@ async def _do_fts(
                         snippet_lines = lines[start_idx:end_idx]
                         r["matched_snippet"] = "\n".join(snippet_lines).strip()
                         break
+
+    # Apply context assembly if requested for the top 3 results
+    if include_context or (auto_expanded and len(results) <= 3):
+        from src.mcp_server.context_assembler import assemble_context
+        graph_api = _get_cached_api(repo_root, db_path, "graph")
+        top_k = 3 if not include_context else len(results)
+        
+        enriched_results = []
+        for i, r in enumerate(results):
+            if i < top_k:
+                enriched_results.append(assemble_context(r, graph_api.graph, repo_root))
+            else:
+                enriched_results.append(r)
+        results = enriched_results
 
     result = {"query": query, "results": results, "search_status": "ok"}
     if auto_expanded:
