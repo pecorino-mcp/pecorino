@@ -7,10 +7,9 @@ logger = logging.getLogger(__name__)
 # Default weights derived from feature importance / heuristic model
 DEFAULT_FEATURE_WEIGHTS = {
     "vector_sim": 0.40,
-    "fts_score": 0.25,
+    "fts_score": 0.30,
     "ppr_score": 0.15,
     "prone_sim": 0.10,
-    "pagerank": 0.05,
     "in_degree": 0.05,
 }
 

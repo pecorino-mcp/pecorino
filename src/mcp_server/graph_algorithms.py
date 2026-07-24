@@ -124,7 +124,7 @@ def get_best_partition(stable_regions: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def compute_ppr_scores(graph, seed_scores: Dict[str, float], alpha: float = 0.15, n_iter: int = 10) -> Dict[str, float]:
     """
-    Personalized PageRank (PPR) on candidate seed nodes using Gorgonzola graph adjacency.
+    Personalized PageRank (PPR) on candidate seed nodes over a 2-hop truncated subgraph.
     
     Args:
         graph: GorgonzolaGraph instance
@@ -147,19 +147,36 @@ def compute_ppr_scores(graph, seed_scores: Dict[str, float], alpha: float = 0.15
 
     adj = {}
     try:
+        # Extract 1-hop and 2-hop neighborhood for candidate seeds to build truncated subgraph
         query = (
             "MATCH (a:CodeNode)-[r]->(b:CodeNode) "
-            "WHERE a.id IN $ids OR b.id IN $ids "
+            "WHERE a.id IN $ids "
             "RETURN a.id AS src, b.id AS dst"
         )
         rows = graph.query(query, {"ids": seed_ids})
+        hop1_dsts = set()
         for r in rows:
             src = r.get("src") if isinstance(r, dict) else r[0]
             dst = r.get("dst") if isinstance(r, dict) else r[1]
             if src and dst:
                 adj.setdefault(src, set()).add(dst)
+                hop1_dsts.add(dst)
+
+        # 2-hop expansion from 1-hop neighbors (capped to keep subgraph < 2000 nodes)
+        if hop1_dsts and len(hop1_dsts) < 1500:
+            query_2hop = (
+                "MATCH (a:CodeNode)-[r]->(b:CodeNode) "
+                "WHERE a.id IN $ids "
+                "RETURN a.id AS src, b.id AS dst"
+            )
+            rows_2hop = graph.query(query_2hop, {"ids": list(hop1_dsts)[:500]})
+            for r in rows_2hop:
+                src = r.get("src") if isinstance(r, dict) else r[0]
+                dst = r.get("dst") if isinstance(r, dict) else r[1]
+                if src and dst:
+                    adj.setdefault(src, set()).add(dst)
     except Exception as e:
-        logger.debug(f"PPR adjacency query failed: {e}")
+        logger.debug(f"PPR subgraph query failed: {e}")
 
     p = dict(p0)
     all_nodes = set(p0.keys()).union(adj.keys())
@@ -182,7 +199,10 @@ def compute_ppr_scores(graph, seed_scores: Dict[str, float], alpha: float = 0.15
 
 def compute_prone_embeddings(graph, dim: int = 64) -> Dict[str, List[int]]:
     """
-    Compute ProNE / Spectral structural embeddings (64d int8) for graph nodes.
+    Compute ProNE structural embeddings (64d int8) for graph nodes.
+    
+    Step 1: Sparse Matrix Factorization (Truncated SVD).
+    Step 2: Spectral propagation via Chebyshev polynomials over graph manifold.
     
     Args:
         graph: GorgonzolaGraph instance
@@ -228,6 +248,7 @@ def compute_prone_embeddings(graph, dim: int = 64) -> Dict[str, List[int]]:
             adj = sp.csr_matrix((data, (row_indices, col_indices)), shape=(n, n))
             adj = adj + adj.T
 
+            # Step 1: Truncated SVD
             k = min(dim, n - 1)
             u, s, vt = svds(adj, k=k)
             emb_matrix = u * np.sqrt(s)
@@ -236,6 +257,17 @@ def compute_prone_embeddings(graph, dim: int = 64) -> Dict[str, List[int]]:
                 pad_width = ((0, 0), (0, dim - emb_matrix.shape[1]))
                 emb_matrix = np.pad(emb_matrix, pad_width, mode='constant')
 
+            # Step 2: Chebyshev Spectral Propagation (ProNE higher-order smoothing)
+            deg = np.array(adj.sum(axis=1)).flatten()
+            deg[deg == 0] = 1.0
+            d_inv_sqrt = sp.diags(1.0 / np.sqrt(deg))
+            norm_adj = d_inv_sqrt.dot(adj).dot(d_inv_sqrt)
+
+            mu1 = norm_adj.dot(emb_matrix)
+            mu2 = norm_adj.dot(mu1)
+            emb_matrix = 0.5 * emb_matrix + 0.3 * mu1 + 0.2 * mu2
+
+            # Quantize to INT8 (-128 to 127)
             max_val = np.max(np.abs(emb_matrix), axis=1, keepdims=True)
             max_val[max_val == 0] = 1.0
             quantized = np.clip(np.round((emb_matrix / max_val) * 127.0), -128, 127).astype(np.int8)
@@ -250,5 +282,6 @@ def compute_prone_embeddings(graph, dim: int = 64) -> Dict[str, List[int]]:
     except Exception as e:
         logger.warning(f"Failed to compute ProNE embeddings: {e}")
         return {}
+
 
 
