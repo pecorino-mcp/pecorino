@@ -134,9 +134,9 @@ async def handle_list_tools(
                     },
                     "mode": {
                         "type": "string",
-                        "default": "hybrid",
-                        "enum": ["fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis", "cypher", "hybrid", "community", "trace"],
-                        "description": "Search mode. 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL, 'cypher' = native read-only graph queries, 'trace' = multi-hop call graph traversal, 'hybrid' = vector+BM25 fusion, 'community' = semantic neighborhood."
+                        "default": "auto",
+                        "enum": ["auto", "fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis", "cypher", "hybrid", "community", "trace"],
+                        "description": "Search mode. 'auto' = intelligent routing (default), 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL, 'cypher' = native read-only graph queries, 'trace' = multi-hop call graph traversal, 'hybrid' = vector+BM25 fusion, 'community' = semantic neighborhood."
                     },
                     "intent": {
                         "type": "string",
