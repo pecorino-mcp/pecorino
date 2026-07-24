@@ -395,8 +395,27 @@ class GorgonzolaGraph:
                     self._ensure_schema(conn)
                     self._insert_edges_bulk_conn(edges, conn, label_map)
 
+    def purge_orphaned_identifiers(self, conn=None):
+        """Purge Identifier nodes that have no incoming HAS_IDENTIFIER relationships."""
+        query = "MATCH (i:Identifier) WHERE NOT (i)<-[:HAS_IDENTIFIER]-(:CodeNode) DETACH DELETE i"
+        try:
+            if conn:
+                r = conn.execute(query)
+                r.close()
+            elif self._in_context:
+                r = self._conn.execute(query)
+                r.close()
+            else:
+                with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
+                    with self.gorgonzola.Connection(db) as conn_ctx:
+                        r = conn_ctx.execute(query)
+                        r.close()
+        except Exception as e:
+            logger.debug("Failed to purge orphaned identifiers: %s", e)
+
     def _insert_edges_bulk_conn(self, edges, conn, label_map):
         groups = {}
+        seen_edges = set()
         for src_id, dst_id, props, rel_type in edges:
             src_label = "CodeNode"
             dst_label = "CodeNode"
@@ -405,6 +424,12 @@ class GorgonzolaGraph:
 
             if not src_label or not dst_label:
                 continue
+
+            props_key = tuple(sorted((k, str(v)) for k, v in props.items())) if isinstance(props, dict) else ()
+            edge_key = (src_id, dst_id, rel_type, props_key)
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
 
             key = (rel_type, src_label, dst_label)
             groups.setdefault(key, []).append((src_id, dst_id, props))

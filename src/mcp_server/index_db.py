@@ -35,8 +35,12 @@ def find_repo_root(filepath: str, max_depth: int = 20) -> str:
 
 def get_indexes_dir() -> str:
     """Get the centralized indexes directory."""
-    from src.mcp_server.config import settings
-    indexes_dir = settings.index_dir
+    env_dir = os.getenv("PECORINO_INDEX_DIR")
+    if env_dir:
+        indexes_dir = Path(env_dir).expanduser().resolve()
+    else:
+        from src.mcp_server.config import settings
+        indexes_dir = settings.index_dir
     indexes_dir.mkdir(parents=True, exist_ok=True)
     return str(indexes_dir)
 
@@ -468,12 +472,14 @@ class CodeSearchIndex:
             graph = self._ensure_graph()
             with graph:
                 graph.query_batch([
+                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*0..10]->(child)-[r:HAS_IDENTIFIER]->(i:Identifier) DELETE r",
                     "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) DETACH DELETE v",
                     "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) DETACH DELETE l",
                     "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) DETACH DELETE v",
                     "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(child) DETACH DELETE child",
                     "MATCH (f:CodeNode {kind: 'File', id: $id}) DETACH DELETE f",
                 ], {"id": filepath})
+                graph.purge_orphaned_identifiers()
         except Exception:
             pass
 
@@ -499,13 +505,16 @@ class CodeSearchIndex:
             chunk = filepaths[i:i+chunk_size]
             try:
                 graph = self._ensure_graph()
-                graph.query_batch([
-                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
-                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) WHERE f.id IN $ids DETACH DELETE l",
-                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
-                    "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
-                    "MATCH (f:CodeNode {kind: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
-                ], {"ids": chunk})
+                with graph:
+                    graph.query_batch([
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*0..10]->(child)-[r:HAS_IDENTIFIER]->(i:Identifier) WHERE f.id IN $ids DELETE r",
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) WHERE f.id IN $ids DETACH DELETE l",
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
+                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
+                        "MATCH (f:CodeNode {kind: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
+                    ], {"ids": chunk})
+                    graph.purge_orphaned_identifiers()
             except Exception:
                 pass
 
