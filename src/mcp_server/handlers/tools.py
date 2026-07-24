@@ -157,6 +157,11 @@ async def handle_list_tools(
                         "default": False,
                         "description": "If true, enriches top results with parent scope, callers, callees, recent commits, and related issues."
                     },
+                    "explain": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, includes a detailed breakdown of the features and scores that contributed to the node's ranking."
+                    },
                     "max_depth": {
                         "type": "integer",
                         "default": 3,

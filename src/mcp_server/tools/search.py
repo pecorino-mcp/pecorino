@@ -152,7 +152,8 @@ async def do_search(
     query_json: Optional[str | Dict[str, Any]] = None,
     allow_external: bool = False,
     output_file: Optional[str] = None,
-    ctx: Optional[ServerRequestContext] = None
+    ctx: Optional[ServerRequestContext] = None,
+    explain: bool = False
 ) -> dict:
     """Unified search and analysis tool.
 
@@ -203,7 +204,7 @@ async def do_search(
     result: dict
     if mode in ("fts", "hybrid", "semantic"):
         result = await _do_fts(target, query, mode, limit, offset, include_source,
-                               include_context, auto_expand_source, output_file, allow_external, ctx)
+                               include_context, auto_expand_source, output_file, allow_external, ctx, explain)
     elif mode in ("callers", "callees"):
         result = await _do_callers_callees(target, mode, query, limit, offset,
                                            allow_external, ctx)
@@ -250,7 +251,8 @@ async def _do_fts(
     auto_expand_source: bool,
     output_file: Optional[str],
     allow_external: bool,
-    ctx: Optional[ServerRequestContext]
+    ctx: Optional[ServerRequestContext],
+    explain: bool = False
 ) -> dict:
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
@@ -373,7 +375,7 @@ async def _do_fts(
         except Exception as e:
             logger.warning(f"Failed to fetch canonical boost IDs: {e}")
 
-    results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset, mode=mode, boost_ids=boost_ids)
+    results = await asyncio.to_thread(index.search, query, limit, path.as_posix(), offset, mode=mode, boost_ids=boost_ids, explain=explain)
     FTS_SCAN_DURATION.observe(time.time() - _fts_start)
 
     # Auto-expand: include source when few results
