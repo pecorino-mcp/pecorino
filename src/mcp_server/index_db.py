@@ -503,10 +503,16 @@ class CodeSearchIndex:
         if not pairs:
             return
         conn = self._conn
-        data = [(emb, node_id) for node_id, emb in pairs]
+        import pandas as pd
+        df = pd.DataFrame([(node_id, emb) for node_id, emb in pairs], columns=["id", "embedding"])
         conn.execute("BEGIN TRANSACTION")
         try:
-            conn.executemany("UPDATE code_nodes SET embedding = ? WHERE id = ?", data)
+            conn.execute("""
+                UPDATE code_nodes 
+                SET embedding = df.embedding 
+                FROM df 
+                WHERE code_nodes.id = df.id
+            """)
             conn.execute("COMMIT")
         except Exception as e:
             conn.execute("ROLLBACK")
