@@ -140,20 +140,26 @@ class GorgonzolaGraph:
         """Return directory for temporary CSV files (same parent as DB)."""
         return os.path.dirname(self.gorgonzola_db_path) or "."
 
-    def _get_node_label(self, node_id: str, conn) -> str:
+    def _get_node_label(self, node_id: str, conn=None) -> str:
         with self._label_cache_lock:
             if node_id in self._label_cache:
                 return self._label_cache[node_id]
-        res = conn.execute("MATCH (n:CodeNode {id: $id}) RETURN n.kind", {"id": node_id})
-        lbl = None
-        if res.has_next():
-            lbl = res.get_next()[0]
-        res.close()
-        if lbl:
-            with self._label_cache_lock:
-                self._label_cache[node_id] = lbl
-            return lbl
-        return None
+        conn = conn or self._conn
+        if not conn:
+            return "File" if os.path.exists(node_id) else None
+        try:
+            res = conn.execute("MATCH (n:CodeNode {id: $id}) RETURN n.kind", {"id": node_id})
+            lbl = None
+            if res.has_next():
+                lbl = res.get_next()[0]
+            res.close()
+            if lbl:
+                with self._label_cache_lock:
+                    self._label_cache[node_id] = lbl
+                return lbl
+        except Exception:
+            pass
+        return "File" if os.path.exists(node_id) else None
 
     def _write_and_copy_csv(self, conn, csv_path, rows, copy_query):
         try:

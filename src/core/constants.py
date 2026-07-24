@@ -85,8 +85,8 @@ ALLOWED_EXTENSIONS: Set[str] = {
 # used by core.py, index_db.py, and index_pipeline.py.
 
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
-    '.py', '.pyi', '.java', '.scala', '.kt', '.js', '.jsx', '.ts', '.tsx',
-    '.mjs', '.cjs', '.rb',
+    '.py', '.pyi', '.java', '.scala', '.kt', '.kts', '.js', '.jsx', '.ts', '.tsx',
+    '.mjs', '.cjs', '.rb', '.cs',
     '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.hxx', '.go', '.rs', '.swift'
 })
 
@@ -254,6 +254,46 @@ LANGUAGE_KEYWORDS: Dict[str, Set[str]] = {
         # Other
         'where', 'as', 'is', 'in', 'inout',
     },
+
+    'c-sharp': {
+        # Control flow
+        'if', 'else', 'switch', 'case', 'default',
+        'for', 'foreach', 'while', 'do',
+        'break', 'continue', 'goto', 'return', 'yield',
+        'try', 'catch', 'finally', 'throw',
+        # Definitions
+        'class', 'struct', 'interface', 'enum', 'delegate', 'record',
+        'namespace', 'using',
+        'new', 'base', 'this',
+        # Access/Modifiers
+        'public', 'private', 'protected', 'internal',
+        'static', 'virtual', 'override', 'abstract', 'sealed',
+        'readonly', 'const', 'volatile',
+        'async', 'await',
+        # Values
+        'null', 'true', 'false', 'value',
+    },
+
+    'kotlin': {
+        # Control flow
+        'if', 'else', 'when',
+        'for', 'while', 'do',
+        'break', 'continue', 'return',
+        'try', 'catch', 'finally', 'throw',
+        # Definitions
+        'class', 'interface', 'object', 'enum', 'fun', 'val', 'var',
+        'typealias', 'constructor', 'init',
+        'package', 'import',
+        # Modifiers
+        'public', 'private', 'protected', 'internal',
+        'abstract', 'final', 'open', 'override', 'sealed',
+        'data', 'inline', 'noinline', 'crossinline', 'reified',
+        'companion', 'suspend',
+        # References
+        'this', 'super',
+        # Values
+        'null', 'true', 'false',
+    },
 }
 
 
@@ -276,7 +316,10 @@ EXTENSION_TO_LANGUAGE: Dict[str, str] = {
     '.java': 'java',
 
     # Kotlin
-    '.kt': 'java', '.kts': 'java',  # Similar keywords
+    '.kt': 'kotlin', '.kts': 'kotlin',
+
+    # C#
+    '.cs': 'c-sharp',
 
     # Scala
     '.scala': 'java',  # Similar keywords
