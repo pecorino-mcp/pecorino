@@ -1,10 +1,9 @@
+import json
 import logging
 import os
 import shutil
 import tempfile
 import threading
-import json
-import csv
 
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 from src.mcp_server.graph_api import GraphAPI
@@ -76,7 +75,7 @@ class FederatedGraphAPI(GraphAPI):
                 merged_node_csv = os.path.join(temp_dir, "CodeNode_merged.csv")
                 merged_identifier_csv = os.path.join(temp_dir, "Identifier_merged.csv")
                 merged_rel_csvs = {t: os.path.join(temp_dir, f"{t}_merged.csv") for t in rel_tables}
-                
+
                 import csv
 
                 seen_node_ids = set()
@@ -164,7 +163,7 @@ class FederatedGraphAPI(GraphAPI):
                 # Import into in-memory DB
                 with in_memory_graph:
                     conn = in_memory_graph._conn
-                    
+
                     if os.path.exists(merged_node_csv) and os.path.getsize(merged_node_csv) > 0:
                         try:
                             conn.execute(f"COPY CodeNode FROM '{merged_node_csv}' (HEADER=false, ESCAPE='\"', QUOTE='\"', DELIM=',')")

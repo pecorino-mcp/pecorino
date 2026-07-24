@@ -89,7 +89,6 @@ def main():
         fast_mcp_server.run(transport=settings.transport, **kwargs)
         return
 
-    from src.mcp_server.core import server as mcp_server
     if settings.transport == "stdio":
         from src.transports.stdio_adapter import run_stdio
         asyncio.run(run_stdio(mcp_server))

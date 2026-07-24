@@ -1,5 +1,6 @@
-import os
 import logging
+import os
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,8 @@ class EmbeddingPipeline:
 
     def _initialize(self):
         try:
-            from huggingface_hub import hf_hub_download
             import onnxruntime as ort
+            from huggingface_hub import hf_hub_download
             from tokenizers import Tokenizer
         except ImportError as e:
             logger.error(f"Missing required dependencies for embeddings: {e}")
@@ -32,10 +33,10 @@ class EmbeddingPipeline:
             filename = "onnx/model.onnx"
             if "nomic" in self.model_id.lower():
                 filename = "onnx/model_quantized.onnx"
-            
+
             # Use HF token from environment if configured
             hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
-            
+
             try:
                 if os.path.isdir(self.model_id):
                     model_path = os.path.join(self.model_id, filename)
@@ -54,11 +55,11 @@ class EmbeddingPipeline:
                 else:
                     logger.error(f"Failed to download model files from HF Hub: {download_err}")
                 return
-            
+
             self.tokenizer = Tokenizer.from_file(tokenizer_path)
             # Enable truncation to avoid massive memory spikes
             self.tokenizer.enable_truncation(max_length=512)
-            
+
             sess_options = ort.SessionOptions()
             sess_options.intra_op_num_threads = 2
             sess_options.inter_op_num_threads = 1
@@ -72,19 +73,19 @@ class EmbeddingPipeline:
             return [[0.0] * self.embedding_dim for _ in queries]
         if not queries:
             return []
-        
+
         if "nomic" in self.model_id.lower():
             prefixed = [f"search_query: {q}" for q in queries]
         else:
             prefixed = queries
-            
+
         return self.embed_batch(prefixed)
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not self.session or not self.tokenizer:
             logger.warning("Embedding session not initialized, returning zero vectors.")
             return [[0.0] * self.embedding_dim for _ in texts]
-        
+
         if not texts:
             return []
 
@@ -93,34 +94,34 @@ class EmbeddingPipeline:
             prefixed_texts = [f"search_document: {t}" for t in texts]
         else:
             prefixed_texts = texts
-        
+
         all_embeddings = []
         batch_size = 16
-        
+
         for i in range(0, len(prefixed_texts), batch_size):
             chunk = prefixed_texts[i:i+batch_size]
-            
+
             # Tokenize
             encoded = self.tokenizer.encode_batch(chunk)
             input_ids = [e.ids for e in encoded]
             attention_mask = [e.attention_mask for e in encoded]
-            
+
             # Padding
             max_len = max(len(ids) for ids in input_ids)
             pad_id = self.tokenizer.token_to_id("[PAD]")
             if pad_id is None:
                 pad_id = 0
-                
+
             for j in range(len(input_ids)):
                 pad_len = max_len - len(input_ids[j])
                 if pad_len > 0:
                     input_ids[j].extend([pad_id] * pad_len)
                     attention_mask[j].extend([0] * pad_len)
-                
+
             input_ids_arr = np.array(input_ids, dtype=np.int64)
             attention_mask_arr = np.array(attention_mask, dtype=np.int64)
             token_type_ids_arr = np.zeros_like(input_ids_arr, dtype=np.int64)
-            
+
             # Run ONNX inference under lock to prevent multi-thread RAM blowup
             with _onnx_lock:
                 outputs = self.session.run(None, {
@@ -128,20 +129,20 @@ class EmbeddingPipeline:
                     "attention_mask": attention_mask_arr,
                     "token_type_ids": token_type_ids_arr
                 })
-            
+
             embeddings = outputs[0]
-            
+
             # Mean pooling
             mask_expanded = np.expand_dims(attention_mask_arr, -1)
             sum_embeddings = np.sum(embeddings * mask_expanded, axis=1)
             sum_mask = np.clip(np.sum(mask_expanded, axis=1), a_min=1e-9, a_max=None)
             pooled = sum_embeddings / sum_mask
-            
+
             # Normalize to L2 norm = 1.0
             norm = np.linalg.norm(pooled, axis=1, keepdims=True)
             norm = np.clip(norm, a_min=1e-9, a_max=None)
             pooled = pooled / norm
-            
+
             all_embeddings.extend(pooled.tolist())
-            
+
         return all_embeddings

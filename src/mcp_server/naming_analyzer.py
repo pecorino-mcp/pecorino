@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 PREFIX_DENYLIST = {"m_", "_", "__", "g_", "s_", "k_"}
 TYPE_PREFIXES = {"I", "C", "T", "E", "k"}
@@ -85,13 +85,13 @@ def tokenize_identifier(core: str) -> List[str]:
 def analyze_grammar(tokens: List[str]) -> Dict[str, Any]:
     if not tokens:
         return {"verb": None, "entity": None, "qualifier": None}
-    
+
     verb = tokens[0] if tokens[0] in VERB_SET else None
     start = 1 if verb else 0
 
     while start < len(tokens) and tokens[start] in STOP_WORDS:
         start += 1
-    
+
     entity = tokens[start] if start < len(tokens) else None
 
     qual_tokens = tokens[start+1:] if entity else tokens[start:]
@@ -115,7 +115,7 @@ def analyze_name(raw: str, file_path: str = "") -> Dict[str, Any]:
             "domain": "unknown",
             "intent": "unknown"
         }
-        
+
     core, prefix, suffix, is_magic = strip_affixes(raw)
     case_style = detect_case_style(core)
     tokens = tokenize_identifier(core)
@@ -176,13 +176,13 @@ def canonicalize_entity(tokens: List[str]) -> str:
     # Filter out verbs, stop words, and common noisy trailing tokens
     noisy = {"id", "type", "status", "state", "list", "array"}
     filtered = [t for t in tokens if t not in VERB_SYNONYMS and t not in STOP_WORDS and t not in noisy]
-    
+
     if not filtered:
         # Fallback to just non-verbs if filtering removed everything
         filtered = [t for t in tokens if t not in VERB_SYNONYMS]
-    
+
     if not filtered: return "unknown"
-    
+
     # take first meaningful token (which is usually the entity in get_user_by_id)
     # wait, if it's UserRepository.insert -> user, repository -> repository
     # Actually let's use the first non-verb token as entity

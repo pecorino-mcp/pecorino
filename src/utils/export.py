@@ -8,12 +8,11 @@ import datetime
 import json
 import logging
 import os
-
-logger = logging.getLogger(__name__)
-
 from typing import Any, Dict, Optional
 
 from src.core.config import conf
+
+logger = logging.getLogger(__name__)
 
 
 class DateTimeEncoder(json.JSONEncoder):

@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Optional
 
 # Force import directly from python-sdk submodule
 workspace_root = Path(__file__).resolve().parent.parent.parent
@@ -19,8 +19,8 @@ if str(utils_src) not in sys.path:
     sys.path.insert(0, str(utils_src))
 
 from mcp.server import MCPServer
-from mcp.server.mcpserver.resolve import Resolve, ListRoots
 from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.resolve import ListRoots, Resolve
 from mcp_types import ListRootsResult
 
 from src.mcp_server.config import settings
@@ -35,8 +35,9 @@ _cached_roots_paths: list[str] = []
 async def _get_roots(ctx: Context) -> ListRoots:
     return ListRoots()
 
-from mcp_types import NotificationParams
 from mcp.server.context import ServerRequestContext
+from mcp_types import NotificationParams
+
 
 async def handle_roots_list_changed(ctx: ServerRequestContext, params: NotificationParams) -> None:
     """Handle root list changes by refreshing the cached roots."""
@@ -329,10 +330,11 @@ def metrics(target: str = "", what: str = "all") -> list[dict]:
     mime_type="application/json"
 )
 def read_repo_summary(repo_hash: str) -> str:
+    import json
+    from pathlib import Path
+
     from src.mcp_server.index_db import get_indexes_dir
     from src.mcp_server.middleware.caching import _get_cached_api
-    from pathlib import Path
-    import json
     db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.duckdb"
     if not db_path.exists():
         raise ValueError(f"Index database not found for hash: {repo_hash}")
@@ -354,10 +356,11 @@ def read_repo_summary(repo_hash: str) -> str:
     mime_type="application/json"
 )
 def read_repo_files(repo_hash: str) -> str:
+    import json
+    from pathlib import Path
+
     from src.mcp_server.index_db import get_indexes_dir
     from src.mcp_server.middleware.caching import _get_cached_api
-    from pathlib import Path
-    import json
     db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.duckdb"
     if not db_path.exists():
         raise ValueError(f"Index database not found for hash: {repo_hash}")

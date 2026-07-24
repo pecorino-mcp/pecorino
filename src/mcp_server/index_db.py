@@ -1,3 +1,4 @@
+print("Running patched clear_files_bulk!")
 import functools
 import hashlib
 import logging
@@ -471,15 +472,7 @@ class CodeSearchIndex:
         try:
             graph = self._ensure_graph()
             with graph:
-                graph.query_batch([
-                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*0..10]->(child)-[r:HAS_IDENTIFIER]->(i:Identifier) DELETE r",
-                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) DETACH DELETE v",
-                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) DETACH DELETE l",
-                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) DETACH DELETE v",
-                    "MATCH (f:CodeNode {kind: 'File', id: $id})-[:CONTAINS*1..10]->(child) DETACH DELETE child",
-                    "MATCH (f:CodeNode {kind: 'File', id: $id}) DETACH DELETE f",
-                ], {"id": filepath})
-                graph.purge_orphaned_identifiers()
+                self._clear_graph_nodes(graph, [filepath])
         except Exception:
             pass
 
@@ -501,22 +494,87 @@ class CodeSearchIndex:
             conn.execute("ROLLBACK")
             raise e
 
+        # Graph cleanup — chunked, using only single-hop queries to avoid
+        # the SIGSEGV in Gorgonzola's RecursiveExtend/PathPropertyProbe
+        # that triggers on variable-length patterns (*0..10, *1..10).
+        chunk_size = 200
         for i in range(0, len(filepaths), chunk_size):
             chunk = filepaths[i:i+chunk_size]
             try:
                 graph = self._ensure_graph()
                 with graph:
-                    graph.query_batch([
-                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*0..10]->(child)-[r:HAS_IDENTIFIER]->(i:Identifier) WHERE f.id IN $ids DELETE r",
-                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'})-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
-                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:CONTAINS_LAMBDA*1..3]->(l:CodeNode {kind: 'Lambda'}) WHERE f.id IN $ids DETACH DELETE l",
-                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(src)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) WHERE f.id IN $ids DETACH DELETE v",
-                        "MATCH (f:CodeNode {kind: 'File'})-[:CONTAINS*1..10]->(child) WHERE f.id IN $ids DETACH DELETE child",
-                        "MATCH (f:CodeNode {kind: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
-                    ], {"ids": chunk})
-                    graph.purge_orphaned_identifiers()
+                    self._clear_graph_nodes(graph, chunk)
             except Exception:
                 pass
+
+    def _clear_graph_nodes(self, graph, file_ids: List[str]):
+        """Remove graph nodes for the given file IDs using iterative single-hop
+        traversal. Avoids variable-length path patterns (*0..N) which trigger
+        a SIGSEGV in the current Gorgonzola engine."""
+        # 1. Collect all descendant node IDs via iterative single-hop CONTAINS.
+        #    Max depth 8 is generous for AST-like structures (real depth is 3-6).
+        to_delete = set()
+        current_ids = set(file_ids)
+        max_depth = 8
+
+        for _ in range(max_depth):
+            if not current_ids:
+                break
+            rows = graph.query(
+                "MATCH (n:CodeNode)-[:CONTAINS]->(c:CodeNode) "
+                "WHERE n.id IN $ids RETURN c.id",
+                {"ids": list(current_ids)})
+            next_level = {r[0] for r in rows} - to_delete
+            to_delete.update(next_level)
+            current_ids = next_level
+
+        # Include the file nodes themselves in the set for side-branch collection
+        all_ids = to_delete | set(file_ids)
+
+        # 2. Collect side-branch nodes: lambdas (up to 3 hops deep)
+        lambdas = set()
+        lambda_sources = all_ids
+        for _ in range(3):
+            if not lambda_sources:
+                break
+            rows = graph.query(
+                "MATCH (src:CodeNode)-[:CONTAINS_LAMBDA]->(l:CodeNode {kind: 'Lambda'}) "
+                "WHERE src.id IN $ids RETURN l.id",
+                {"ids": list(lambda_sources)})
+            new_lambdas = {r[0] for r in rows} - lambdas
+            lambdas.update(new_lambdas)
+            lambda_sources = new_lambdas
+        to_delete.update(lambdas)
+
+        # 3. Collect variables accessed from any of the collected nodes
+        access_sources = all_ids | lambdas
+        if access_sources:
+            rows = graph.query(
+                "MATCH (src:CodeNode)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) "
+                "WHERE src.id IN $ids RETURN v.id",
+                {"ids": list(access_sources)})
+            to_delete.update(r[0] for r in rows)
+
+        # 4. Delete HAS_IDENTIFIER edges from all collected nodes
+        all_to_clean = to_delete | set(file_ids)
+        if all_to_clean:
+            graph.query(
+                "MATCH (c:CodeNode)-[r:HAS_IDENTIFIER]->(i:Identifier) "
+                "WHERE c.id IN $ids DELETE r",
+                {"ids": list(all_to_clean)})
+
+        # 5. DETACH DELETE all collected descendant nodes
+        if to_delete:
+            graph.query(
+                "MATCH (n:CodeNode) WHERE n.id IN $ids DETACH DELETE n",
+                {"ids": list(to_delete)})
+
+        # 6. DETACH DELETE the File nodes themselves
+        graph.query(
+            "MATCH (f:CodeNode {kind: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
+            {"ids": file_ids})
+
+        graph.purge_orphaned_identifiers()
 
     def upsert_file_hashes_bulk(self, files_data: List[tuple]):
         """Upsert a list of file hashes and metadata in bulk."""
@@ -551,9 +609,9 @@ class CodeSearchIndex:
                 name = os.path.basename(filepath)
                 ext = os.path.splitext(filepath)[1]
                 q = f"""
-                    MERGE (f:CodeNode {{id: $id_{j}}})
-                    ON CREATE SET f.kind = 'File', f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
-                    ON MATCH SET f.kind = 'File', f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    MERGE (f:File {{id: $id_{j}}})
+                    ON CREATE SET f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    ON MATCH SET f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
                 """
                 queries.append(q)
                 params.update({
@@ -622,9 +680,9 @@ class CodeSearchIndex:
         name = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1]
         query = """
-            MERGE (f:CodeNode {id: $id})
-            ON CREATE SET f.kind = 'File', f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
-            ON MATCH SET f.kind = 'File', f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            MERGE (f:File {id: $id})
+            ON CREATE SET f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            ON MATCH SET f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
         """
         try:
             graph = self._ensure_graph()
@@ -1106,7 +1164,10 @@ class CodeSearchIndex:
                     """, candidate_ids).fetchall()
                     feat_map = {row[0]: row for row in feat_rows}
 
-                    from src.mcp_server.ltr_ranker import extract_candidate_features, compute_ltr_score
+                    from src.mcp_server.ltr_ranker import (
+                        compute_ltr_score,
+                        extract_candidate_features,
+                    )
 
                     for r in results:
                         nid = r.get('id')
@@ -1162,9 +1223,9 @@ class CodeSearchIndex:
 
                     for r in results:
                         if 'bm25_score' in r:
-                            r['bm25_score'] = round(float(r['bm25_score']), 2)
+                            r['bm25_score'] = round(float(r['bm25_score']), 3)
                         if 'pagerank' in r:
-                            r['pagerank'] = round(float(r['pagerank']), 2)
+                            r['pagerank'] = round(float(r['pagerank']), 3)
 
                     results.sort(key=lambda x: x.get('score', 0), reverse=True)
 
@@ -1208,7 +1269,7 @@ class CodeSearchIndex:
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0,
+                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0,
                 'complexity': row[8] or 0,
                 'signature': row[9],
                 'in_degree': row[10] or 0,
@@ -1236,7 +1297,7 @@ class CodeSearchIndex:
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0,
+                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0,
                 'complexity': row[8] or 0,
                 'signature': row[9],
                 'in_degree': row[10] or 0,
@@ -1264,6 +1325,38 @@ class CodeSearchIndex:
                 'metrics': {},
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0
+                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0
             })
         return results
+
+
+def estimate_index_size_mb(
+    total_files: int,
+    total_symbols: int,
+    total_edges: int = 0,
+    enable_embeddings: bool = True,
+    embedding_dim: int = 384
+) -> dict:
+    """Accurately estimate index disk footprint in MB based on codebase structural metrics."""
+    s_fixed = 15.0  # Kùzu buffer pool & schema pages base overhead
+    s_graph = (total_symbols * 0.0008) + (total_edges * 0.00015)
+    s_duckdb = (total_files * 0.0005) + (total_symbols * 0.0004)
+    s_tantivy = (total_files * 0.003) + (total_symbols * 0.0001)
+
+    if enable_embeddings:
+        s_embeddings = (total_symbols * embedding_dim * 4) / 1_048_576.0
+    else:
+        s_embeddings = 0.0
+
+    s_total = s_fixed + s_graph + s_duckdb + s_tantivy + s_embeddings
+    return {
+        "projected_db_size_mb": round(s_total, 2),
+        "breakdown_mb": {
+            "fixed_overhead": round(s_fixed, 2),
+            "graph_db": round(s_graph, 2),
+            "duckdb_fts": round(s_duckdb, 2),
+            "tantivy_bm25": round(s_tantivy, 2),
+            "vector_embeddings": round(s_embeddings, 2)
+        }
+    }
+
