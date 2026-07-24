@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import tree_sitter
 

@@ -267,19 +267,19 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                         SELECT COUNT(*) FROM files WHERE filepath LIKE ?
                     ''', (f"{prefix}%",)).fetchone()
                     total_files = db_res[0] if db_res else 0
-                    
+
                     lang_res = index._conn.execute('''
                         SELECT lang, COUNT(*) FROM files WHERE filepath LIKE ? GROUP BY lang
                     ''', (f"{prefix}%",)).fetchall()
                     languages = {row[0]: row[1] for row in lang_res}
-                    
+
                     sym_res = index._conn.execute('''
                         SELECT COUNT(*) FROM code_nodes WHERE filepath LIKE ?
                     ''', (f"{prefix}%",)).fetchone()
                     total_symbols = sym_res[0] if sym_res else 0
-                    
-                    from src.mcp_server.index_db import estimate_index_size_mb
+
                     from src.mcp_server.config import settings
+                    from src.mcp_server.index_db import estimate_index_size_mb
                     size_estimation = estimate_index_size_mb(
                         total_files=total_files,
                         total_symbols=total_symbols,

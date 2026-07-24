@@ -15,8 +15,8 @@ pip install -v -r requirements.txt
 echo "3. Compiling gorgonzola Python package using cmake (forced lite configuration)..."
 rm -rf modules/gorgonzola/build/release
 cmake -B modules/gorgonzola/build/release -G Ninja -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_PCH=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON -DGORGONZOLA_LITE_ENABLE_GDS=ON -DGORGONZOLA_LITE_ENABLE_EXTENSIONS=ON modules/gorgonzola
-cmake --build modules/gorgonzola/build/release --config Release --target _gorgonzola
-COMPILED_SO=$(find modules/gorgonzola/modules/gorgonzola-api-langs/python_api/build -name "_gorgonzola*.so" -print -quit)
+cmake --build modules/gorgonzola/build/release --config Release
+COMPILED_SO=$(find modules/gorgonzola/build/release -name "_gorgonzola*.so" -print -quit)
 
 echo "4. Copying gorgonzola Python module to site-packages..."
 # Get the active python version to determine the site-packages path

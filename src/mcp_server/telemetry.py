@@ -1,8 +1,8 @@
 import json
+import logging
 import os
 import time
 import uuid
-import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ def get_telemetry_log_path() -> str:
     global _LOG_FILE_PATH
     if _LOG_FILE_PATH is not None:
         return _LOG_FILE_PATH
-        
+
     try:
         from src.mcp_server.config import get_data_dir
         data_dir = get_data_dir()
@@ -42,7 +42,7 @@ async def log_search_event(
     """
     try:
         log_path = get_telemetry_log_path()
-        
+
         event = {
             "event_id": str(uuid.uuid4()),
             "timestamp": time.time(),
@@ -53,11 +53,11 @@ async def log_search_event(
             "result_count": result_count,
             "repo_root": repo_root
         }
-        
+
         # Write to .log file as a JSONL entry
         import aiofiles
         async with aiofiles.open(log_path, mode='a') as f:
             await f.write(json.dumps(event) + "\n")
-            
+
     except Exception as e:
         logger.warning(f"Failed to log search telemetry: {e}")

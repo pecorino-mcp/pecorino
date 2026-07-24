@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import json
 import logging
@@ -6,15 +7,15 @@ import pathlib
 import shutil
 import sys
 import threading
+import time
 import traceback
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import time
-import contextlib
-from collections import defaultdict
 from typing import Any
 
 from src.mcp_server.naming_analyzer import analyze_name
+
 
 class IndexProfiler:
     def __init__(self):
@@ -48,7 +49,7 @@ if str(workspace_root) not in sys.path:
 from src.core.constants import SUPPORTED_EXTENSIONS, get_language_for_extension
 from src.mcp_server.config import settings
 from src.mcp_server.index_db import CodeSearchIndex, find_repo_root, get_db_path_for_repo
-from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
+from src.mcp_server.ramdisk import RamdiskIndex
 
 logger = logging.getLogger(__name__)
 
@@ -1691,7 +1692,7 @@ class CodebaseIndexer:
             res["fts_error"] = fts_error
         if integrity_stats.get("warnings"):
             res["integrity_warnings"] = integrity_stats["warnings"]
-            
+
         profiler.print_summary()
         return res
 
