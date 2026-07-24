@@ -1,7 +1,4 @@
 """Tests for the Tantivy BM25F search index."""
-import os
-import tempfile
-
 import pytest
 
 from src.mcp_server.tantivy_search import TantivyIndex, get_tantivy_path_for_repo

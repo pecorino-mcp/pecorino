@@ -179,9 +179,10 @@ class TantivyIndex:
         -------
         List of (node_id, score) tuples, sorted by descending score.
         """
-        if not self.is_ready:
+        if not self.is_ready or self._index is None:
             return []
 
+        index = self._index
         from src.mcp_server.config import settings
 
         boosts = field_boosts or settings.tantivy_field_boosts
@@ -189,7 +190,7 @@ class TantivyIndex:
         try:
             import tantivy
 
-            searcher = self._index.searcher()
+            searcher = index.searcher()
 
             # Build a boosted boolean query: one sub-query per field,
             # each boosted by its weight. This is true BM25F — each field
@@ -200,7 +201,7 @@ class TantivyIndex:
                 if boost <= 0:
                     continue
                 try:
-                    field_query = self._index.parse_query(query, [field_name])
+                    field_query = index.parse_query(query, [field_name])
                     boosted = tantivy.Query.boost_query(field_query, float(boost))
                     sub_queries.append((tantivy.Occur.Should, boosted))
                 except Exception:

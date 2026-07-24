@@ -723,6 +723,66 @@ class CodeSearchIndex:
             conn.execute("ROLLBACK")
             logger.warning("Failed to bulk update degrees: %s", e)
 
+    def update_git_features_bulk(self, git_features: List[Dict[str, Any]]):
+        """Bulk update git temporal and stable metrics for code nodes matching filepath.
+
+        git_features: list of dicts with keys:
+            'filepath', 'git_survival_days', 'git_rename_count', 'git_ownership_entropy',
+            'git_commit_count', 'git_days_since_change', 'git_churn', 'git_authors', 'git_bug_fix_ratio'
+        """
+        if not git_features:
+            return
+        conn = self._conn
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            conn.execute("""
+                CREATE TEMP TABLE temp_git (
+                    filepath VARCHAR,
+                    git_survival_days INTEGER,
+                    git_rename_count INTEGER,
+                    git_ownership_entropy DOUBLE,
+                    git_commit_count INTEGER,
+                    git_days_since_change INTEGER,
+                    git_churn INTEGER,
+                    git_authors INTEGER,
+                    git_bug_fix_ratio DOUBLE
+                )
+            """)
+            data = [
+                (
+                    f.get("filepath", ""),
+                    int(f.get("git_survival_days", 0)),
+                    int(f.get("git_rename_count", 0)),
+                    float(f.get("git_ownership_entropy", 0.0)),
+                    int(f.get("git_commit_count", 0)),
+                    int(f.get("git_days_since_change", 0)),
+                    int(f.get("git_churn", 0)),
+                    int(f.get("git_authors", 0)),
+                    float(f.get("git_bug_fix_ratio", 0.0)),
+                )
+                for f in git_features
+            ]
+            conn.executemany("INSERT INTO temp_git VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+            conn.execute("""
+                UPDATE code_nodes
+                SET git_survival_days = temp_git.git_survival_days,
+                    git_rename_count = temp_git.git_rename_count,
+                    git_ownership_entropy = temp_git.git_ownership_entropy,
+                    git_commit_count = temp_git.git_commit_count,
+                    git_days_since_change = temp_git.git_days_since_change,
+                    git_churn = temp_git.git_churn,
+                    git_authors = temp_git.git_authors,
+                    git_bug_fix_ratio = temp_git.git_bug_fix_ratio
+                FROM temp_git
+                WHERE code_nodes.filepath = temp_git.filepath
+            """)
+            conn.execute("DROP TABLE temp_git")
+            conn.execute("COMMIT")
+            logger.info("Updated git features for %d files", len(git_features))
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.warning("Failed to bulk update git features: %s", e)
+
     def get_file_hash(self, filepath: str) -> str:
         """Retrieve the stored hash for a given file, or None if not found."""
         conn = self._conn
