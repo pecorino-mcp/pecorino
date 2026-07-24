@@ -9,6 +9,8 @@ from src.mcp_server.middleware.caching import _get_cached_api, clear_index_cache
 from src.mcp_server.middleware.security import check_suspicious, safe_path
 from src.mcp_server.middleware.sync import _auto_sync_stale
 from src.mcp_server.prometheus_metrics import FTS_SCAN_DURATION
+from src.mcp_server.intent_router import IntentRouter
+from src.mcp_server.telemetry import log_search_event
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ ALLOWED_MODES = frozenset({
     "trace",             # Multi-hop call graph traversal (like CBM trace_path)
     "snippet",          # Fetch full source code body of a specific symbol
     "explain",          # Explain a node by showing its graph relationships
+    "auto",             # Automatically route natural language queries to the right mode
 })
 
 # ── Intent-based presets (from query_codebase) ────────────────
@@ -200,9 +203,20 @@ async def do_search(
     except Exception:
         pass
 
+    # ── Auto Intent Routing ───────────────────────────────────────
+    original_query = query
+    original_mode = mode
+    start_time = time.time()
+    
+    if mode == "auto" and query:
+        router = IntentRouter()
+        mode, query, intent_override = router.route(query)
+        if intent_override:
+            intent = intent_override
+
     # ── Route to mode-specific handlers ───────────────────────
     result: dict
-    if mode in ("fts", "hybrid", "semantic"):
+    if mode in ("fts", "hybrid", "semantic", "auto"):
         result = await _do_fts(target, query, mode, limit, offset, include_source,
                                include_context, auto_expand_source, output_file, allow_external, ctx, explain)
     elif mode in ("callers", "callees"):
@@ -233,7 +247,27 @@ async def do_search(
         return {"error": "Unknown mode"}
 
     # ── Post-processing: group results by directory ───────────
-    return _group_results_by_directory(result, _repo_root)
+    final_res = _group_results_by_directory(result, _repo_root)
+    
+    # ── Telemetry Logging ─────────────────────────────────────
+    try:
+        latency_ms = (time.time() - start_time) * 1000
+        result_count = sum(len(g.get("files", [])) for g in final_res.get("groups", []))
+        
+        # We fire the async telemetry event without awaiting to avoid blocking search response.
+        # However, asyncio.create_task is safer to fire-and-forget
+        asyncio.create_task(log_search_event(
+            original_query=original_query or "",
+            final_mode=mode,
+            latency_ms=latency_ms,
+            result_count=result_count,
+            intent=intent,
+            repo_root=_repo_root
+        ))
+    except Exception as e:
+        logger.warning(f"Failed to log telemetry: {e}")
+        
+    return final_res
 
 
 # ═══════════════════════════════════════════════════════════════
