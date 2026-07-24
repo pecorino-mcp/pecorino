@@ -1166,33 +1166,9 @@ class CodeSearchIndex:
 
                     results.sort(key=lambda x: x.get('score', 0), reverse=True)
 
-                    # Fetch immediate usages (callers) for top results
-                    top_results = results[:5]
-                    top_gorgonzola_to_res = {}
-                    for r in top_results:
-                        top_gorgonzola_to_res[to_gorgonzola_id(r)] = r
-
-                    top_gorgonzola_ids = list(top_gorgonzola_to_res.keys())
-                    if top_gorgonzola_ids:
-                        usage_query = """
-                            MATCH (caller:CodeNode)-[r:CALLS]->(target:CodeNode) 
-                            WHERE target.id IN $top_ids 
-                            RETURN target.id as target_id, caller.id as caller_id, 
-                                   caller.name as caller_name, caller.filepath as filepath, 
-                                   caller.start_line as start_line 
-                            LIMIT 50
-                        """
-                        usage_res = graph.query(usage_query, {"top_ids": top_gorgonzola_ids})
-                        for row in usage_res:
-                            target_id = row['target_id']
-                            r = top_gorgonzola_to_res.get(target_id)
-                            if r:
-                                r.setdefault('usages', []).append({
-                                    "caller_id": row['caller_id'],
-                                    "name": row['caller_name'],
-                                    "filepath": row['filepath'],
-                                    "start_line": row['start_line']
-                                })
+                    if settings.enable_cross_encoder and mode in ("hybrid", "fts") and len(results) > 3:
+                        from src.mcp_server.cross_encoder import rerank
+                        results = rerank(query, results, top_k=limit)
 
                     for r in results:
                         r.pop('id', None)  # Remove internal ID to avoid cluttering response

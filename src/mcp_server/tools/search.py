@@ -145,6 +145,7 @@ async def do_search(
     limit: int = 10,
     offset: int = 0,
     include_source: bool = False,
+    include_context: bool = False,
     auto_expand_source: bool = True,
     max_depth: int = 3,
     intent: Optional[str] = None,
@@ -202,7 +203,7 @@ async def do_search(
     result: dict
     if mode in ("fts", "hybrid", "semantic"):
         result = await _do_fts(target, query, mode, limit, offset, include_source,
-                               auto_expand_source, output_file, allow_external, ctx)
+                               include_context, auto_expand_source, output_file, allow_external, ctx)
     elif mode in ("callers", "callees"):
         result = await _do_callers_callees(target, mode, query, limit, offset,
                                            allow_external, ctx)
@@ -245,6 +246,7 @@ async def _do_fts(
     limit: int,
     offset: int,
     include_source: bool,
+    include_context: bool,
     auto_expand_source: bool,
     output_file: Optional[str],
     allow_external: bool,
@@ -301,6 +303,13 @@ async def _do_fts(
                             end_idx = min(len(lines), i + 2)
                             n["matched_snippet"] = "\n".join(lines[start_idx:end_idx]).strip()
                             break
+                            
+        # Apply context assembly if requested
+        if include_context or (auto_expanded and len(nodes) <= 3):
+            from src.mcp_server.context_assembler import assemble_context
+            graph_api = _get_cached_api(repo_root, db_path, "graph")
+            nodes = [assemble_context(n, graph_api.graph, repo_root) for n in nodes]
+            
         result = {"query": query, "results": nodes, "search_status": "ok"}
         if auto_expanded:
             result["auto_expanded"] = True
@@ -391,6 +400,20 @@ async def _do_fts(
                         snippet_lines = lines[start_idx:end_idx]
                         r["matched_snippet"] = "\n".join(snippet_lines).strip()
                         break
+
+    # Apply context assembly if requested for the top 3 results
+    if include_context or (auto_expanded and len(results) <= 3):
+        from src.mcp_server.context_assembler import assemble_context
+        graph_api = _get_cached_api(repo_root, db_path, "graph")
+        top_k = 3 if not include_context else len(results)
+        
+        enriched_results = []
+        for i, r in enumerate(results):
+            if i < top_k:
+                enriched_results.append(assemble_context(r, graph_api.graph, repo_root))
+            else:
+                enriched_results.append(r)
+        results = enriched_results
 
     result = {"query": query, "results": results, "search_status": "ok"}
     if auto_expanded:
