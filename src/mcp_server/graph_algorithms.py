@@ -120,3 +120,135 @@ def get_best_partition(stable_regions: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Heuristic: choose the one with the highest ARI stability, breaking ties by wider gamma range if we tracked it,
     # or just picking the middle complexity one. For now, we take the one with highest ARI.
     return sorted(stable_regions, key=lambda x: x["ari"], reverse=True)[0]
+
+
+def compute_ppr_scores(graph, seed_scores: Dict[str, float], alpha: float = 0.15, n_iter: int = 10) -> Dict[str, float]:
+    """
+    Personalized PageRank (PPR) on candidate seed nodes using Gorgonzola graph adjacency.
+    
+    Args:
+        graph: GorgonzolaGraph instance
+        seed_scores: Dict mapping node_id -> initial score
+        alpha: Teleport probability (default 0.15)
+        n_iter: Number of power iterations (default 10)
+        
+    Returns:
+        Dict mapping node_id -> normalized PPR score
+    """
+    if not seed_scores or not graph:
+        return {}
+
+    seed_ids = list(seed_scores.keys())
+    if not seed_ids:
+        return {}
+
+    total_seed_score = sum(seed_scores.values()) or 1.0
+    p0 = {nid: score / total_seed_score for nid, score in seed_scores.items()}
+
+    adj = {}
+    try:
+        query = (
+            "MATCH (a:CodeNode)-[r]->(b:CodeNode) "
+            "WHERE a.id IN $ids OR b.id IN $ids "
+            "RETURN a.id AS src, b.id AS dst"
+        )
+        rows = graph.query(query, {"ids": seed_ids})
+        for r in rows:
+            src = r.get("src") if isinstance(r, dict) else r[0]
+            dst = r.get("dst") if isinstance(r, dict) else r[1]
+            if src and dst:
+                adj.setdefault(src, set()).add(dst)
+    except Exception as e:
+        logger.debug(f"PPR adjacency query failed: {e}")
+
+    p = dict(p0)
+    all_nodes = set(p0.keys()).union(adj.keys())
+
+    for _ in range(n_iter):
+        p_next = {nid: (alpha * p0.get(nid, 0.0)) for nid in all_nodes}
+        for u, neighbors in adj.items():
+            if not neighbors:
+                continue
+            prob = (1.0 - alpha) * p.get(u, 0.0) / len(neighbors)
+            for v in neighbors:
+                p_next[v] = p_next.get(v, 0.0) + prob
+        p = p_next
+
+    max_p = max(p.values()) if p else 1.0
+    if max_p > 0:
+        return {nid: score / max_p for nid, score in p.items() if score > 0}
+    return p
+
+
+def compute_prone_embeddings(graph, dim: int = 64) -> Dict[str, List[int]]:
+    """
+    Compute ProNE / Spectral structural embeddings (64d int8) for graph nodes.
+    
+    Args:
+        graph: GorgonzolaGraph instance
+        dim: Embedding dimension (default 64)
+        
+    Returns:
+        Dict mapping node_id -> list of 64 int8 values
+    """
+    if not graph:
+        return {}
+
+    try:
+        query = "MATCH (a:CodeNode)-[r]->(b:CodeNode) RETURN a.id AS src, b.id AS dst"
+        rows = graph.query(query)
+        if not rows:
+            return {}
+
+        import numpy as np
+        nodes_set = set()
+        edges = []
+        for r in rows:
+            src = r.get("src") if isinstance(r, dict) else r[0]
+            dst = r.get("dst") if isinstance(r, dict) else r[1]
+            if src and dst:
+                nodes_set.add(src)
+                nodes_set.add(dst)
+                edges.append((src, dst))
+
+        node_list = sorted(list(nodes_set))
+        node_to_idx = {nid: i for i, nid in enumerate(node_list)}
+        n = len(node_list)
+        if n < 2:
+            return {}
+
+        try:
+            import scipy.sparse as sp
+            from scipy.sparse.linalg import svds
+
+            row_indices = [node_to_idx[src] for src, dst in edges]
+            col_indices = [node_to_idx[dst] for src, dst in edges]
+            data = np.ones(len(edges), dtype=np.float32)
+
+            adj = sp.csr_matrix((data, (row_indices, col_indices)), shape=(n, n))
+            adj = adj + adj.T
+
+            k = min(dim, n - 1)
+            u, s, vt = svds(adj, k=k)
+            emb_matrix = u * np.sqrt(s)
+
+            if emb_matrix.shape[1] < dim:
+                pad_width = ((0, 0), (0, dim - emb_matrix.shape[1]))
+                emb_matrix = np.pad(emb_matrix, pad_width, mode='constant')
+
+            max_val = np.max(np.abs(emb_matrix), axis=1, keepdims=True)
+            max_val[max_val == 0] = 1.0
+            quantized = np.clip(np.round((emb_matrix / max_val) * 127.0), -128, 127).astype(np.int8)
+
+            result = {}
+            for i, nid in enumerate(node_list):
+                result[nid] = quantized[i].tolist()
+            return result
+        except Exception as e:
+            logger.warning(f"Spectral/ProNE computation failed: {e}")
+            return {}
+    except Exception as e:
+        logger.warning(f"Failed to compute ProNE embeddings: {e}")
+        return {}
+
+
