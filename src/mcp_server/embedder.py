@@ -102,7 +102,7 @@ class Embedder:
                 # Fast insert via pandas DataFrame to avoid DuckDB executemany slowness with arrays
                 import pandas as pd
                 df = pd.DataFrame(insert_data, columns=["text_hash", "text", "embedding", "model"])
-                self.db_conn.execute("INSERT OR REPLACE INTO embeddings_cache SELECT * FROM df")
+                self.db_conn.execute("INSERT OR REPLACE INTO embeddings_cache (text_hash, text, embedding, model) SELECT * FROM df")
 
         # Return in original order
         return [cached[h] for h in hashes]

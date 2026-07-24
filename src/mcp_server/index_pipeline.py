@@ -736,7 +736,7 @@ class CodebaseIndexer:
             try:
                 from datasketch import MinHash, MinHashLSH
                 # Fetch as tuples (faster than iterrows/df)
-                text_query = "SELECT id, content FROM code_nodes WHERE kind IN ('Function', 'Method', 'Class')"
+                text_query = "SELECT id, name FROM code_nodes WHERE kind IN ('Function', 'Method', 'Class')"
                 rows = self.search_index._conn.execute(text_query).fetchall()
 
                 if rows:

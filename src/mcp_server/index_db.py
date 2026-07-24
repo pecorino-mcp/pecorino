@@ -330,7 +330,7 @@ class CodeSearchIndex:
         conn = self._conn
         data = []
         for n in nodes:
-            node_id = f"{n['filepath']}::{n['name']}::{n['start_line']}"
+            node_id = n.get('id', f"{n['filepath']}::{n['name']}::{n['start_line']}")
             data.append((
                 node_id,
                 n['name'],
