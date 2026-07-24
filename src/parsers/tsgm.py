@@ -15,6 +15,8 @@ KNOWN_GRAMMARS = {
     "rust": "tree_sitter_rust",
     "ruby": "tree_sitter_ruby",
     "swift": "tree_sitter_swift",
+    "c-sharp": "tree_sitter_c_sharp",
+    "kotlin": "tree_sitter_kotlin",
 }
 
 class TreeSitterGrammarManager:
