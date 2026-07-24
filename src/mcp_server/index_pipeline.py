@@ -662,9 +662,9 @@ class CodebaseIndexer:
 
         try:
             from src.mcp_server.config import settings
-            timeout = getattr(settings, 'lsp_request_timeout', 0.8)
+            timeout = getattr(settings, 'lsp_request_timeout', 3.0)
         except Exception:
-            timeout = 0.8
+            timeout = 3.0
 
         if hasattr(self.lsp_client, 'resolve_definitions_batch'):
             return self.lsp_client.resolve_definitions_batch(file_str, positions, timeout_per_query=timeout, max_queries=50)
@@ -1073,123 +1073,11 @@ class CodebaseIndexer:
             except Exception as e:
                 logger.warning("Failed to stat %s: %s", file_str, e)
 
-        results = []
-        if parse_jobs:
-            max_workers = max(1, int((os.cpu_count() or 4) * 0.75))
-            current_processed = skipped_count
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                job_iterator = iter(parse_jobs)
-                futures = {}
-
-                # Pre-populate pool (backpressure queue size = 2 * max_workers)
-                for _ in range(2 * max_workers):
-                    try:
-                        job = next(job_iterator)
-                        fut = executor.submit(self._parse_file_task, job[0], job[1], job[2])
-                        futures[fut] = job[1]
-                    except StopIteration:
-                        break
-
-                while futures:
-                    done = next(as_completed(futures))
-                    file_str = futures.pop(done)
-                    try:
-                        res = done.result()
-                        if res:
-                            # Verify hash in main thread before keeping
-                            existing_hash = tracked_metadata.get(file_str, (None, None))[0]
-                            if existing_hash == res["content_hash"]:
-                                skipped_count += 1
-                            else:
-                                results.append(res)
-                    except Exception as e:
-                        logger.warning("Task failed for %s: %s", file_str, e)
-
-                    current_processed += 1
-                    if progress_callback:
-                        progress_callback(current_processed, total_files, f"Parsed {file_str}")
-
-                    try:
-                        job = next(job_iterator)
-                        fut = executor.submit(self._parse_file_task, job[0], job[1], job[2])
-                        futures[fut] = job[1]
-                    except StopIteration:
-                        pass
-
-        # Batch embed all nodes across all parsed files in one go
-        if results and self.enable_embeddings and self.embedder:
-            all_nodes_to_embed = []
-            texts_to_embed = []
-            for res in results:
-                content_bytes = res.get("content_bytes", b"")
-                for n in res.get("nodes_to_index", []):
-                    s_byte = n.get('start_byte', 0)
-                    e_byte = n.get('end_byte', 0)
-                    if e_byte > s_byte:
-                        try:
-                            text = content_bytes[s_byte:e_byte].decode('utf-8', errors='ignore')
-                        except Exception:
-                            text = ""
-                    else:
-                        text = ""
-                    if text.strip():  # Skip empty texts — wastes CPU
-                        texts_to_embed.append(text)
-                        all_nodes_to_embed.append(n)
-
-            if texts_to_embed:
-                if progress_callback:
-                    progress_callback(total_files, total_files, f"Generating vector embeddings for {len(texts_to_embed)} code symbols...")
-                try:
-                    embeddings = self.embedder.embed_texts(texts_to_embed)
-                    for i, n in enumerate(all_nodes_to_embed):
-                        if i < len(embeddings):
-                            n['embedding'] = embeddings[i]
-                except Exception:
-                    logger.debug(traceback.format_exc())
-
-            # Batch embed all graph nodes in one go
-            all_graph_nodes_to_embed = []
-            graph_texts_to_embed = []
-            for res in results:
-                for nid, props, lbl in res.get("graph_nodes", []):
-                    # Only embed meaningful graph nodes, skip External/File/Parameter
-                    if lbl in ("External", "ExternalType", "File", "Parameter"):
-                        continue
-                    if lbl == "Identifier":
-                        text = f"{props.get('raw', '')} {props.get('canonical_verb', '')} {props.get('canonical_entity', '')}"
-                    else:
-                        name = props.get("name", "")
-                        doc = props.get("docstring", "")
-                        fp = nid.split("::")[0] if "::" in nid else ""
-                        cv = props.get("canonical_verb", "")
-                        text = f"{name} {doc} {fp} {cv}"
-                    if text.strip():
-                        graph_texts_to_embed.append(text)
-                        all_graph_nodes_to_embed.append(props)
-
-            if graph_texts_to_embed:
-                if progress_callback:
-                    progress_callback(total_files, total_files, f"Generating vector embeddings for {len(graph_texts_to_embed)} graph nodes...")
-                try:
-                    graph_embeddings = self.embedder.embed_texts(graph_texts_to_embed)
-                    for i, props in enumerate(all_graph_nodes_to_embed):
-                        if i < len(graph_embeddings):
-                            props["embedding"] = graph_embeddings[i]
-                except Exception as e:
-                    logger.warning("Failed to generate vector embeddings for graph nodes during bulk run: %s", e)
-                    logger.debug(traceback.format_exc())
-
-        # Clear content_bytes to save memory
-        if results:
-            for res in results:
-                res.pop("content_bytes", None)
-
         # Close existing connections before mass update/ramdisk to prevent connection errors
         ssd_db_path = self.search_index.db_path
         self.close()
 
-        if not results:
+        if not parse_jobs:
             self.search_index = CodeSearchIndex(ssd_db_path)
             self.graph = self.search_index.graph
 
@@ -1244,161 +1132,229 @@ class CodebaseIndexer:
 
         ramdisk = RamdiskIndex(ssd_db_path, max_bytes=required_ramdisk_bytes) if use_ramdisk else DummyContext(ssd_db_path)
 
+        indexed_count = 0
+        all_lsp_resolutions = []  # Phase 1 collection: (file_str, lsp_resolutions)
+
         with ramdisk:
             ram_search = CodeSearchIndex(ramdisk.db_path)
             ram_graph = ram_search.graph
 
             with ram_graph:
-                files_to_clear = [res["file_str"] for res in results]
-                if files_to_clear:
+                max_workers = max(1, int((os.cpu_count() or 4) * 0.75))
+                CHUNK_SIZE = 250
+                chunk_jobs = [parse_jobs[i:i + CHUNK_SIZE] for i in range(0, len(parse_jobs), CHUNK_SIZE)]
+                current_processed = skipped_count
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    for chunk_idx, chunk in enumerate(chunk_jobs):
+                        chunk_results = []
+                        futures = {executor.submit(self._parse_file_task, job[0], job[1], job[2]): job[1] for job in chunk}
+
+                        for fut in as_completed(futures):
+                            file_str = futures[fut]
+                            try:
+                                res = fut.result()
+                                if res:
+                                    existing_hash = tracked_metadata.get(file_str, (None, None))[0]
+                                    if existing_hash == res["content_hash"]:
+                                        skipped_count += 1
+                                    else:
+                                        chunk_results.append(res)
+                            except Exception as e:
+                                logger.warning("Task failed for %s: %s", file_str, e)
+
+                            current_processed += 1
+                            if progress_callback:
+                                progress_callback(current_processed, total_files, f"Parsed {file_str}")
+
+                        if not chunk_results:
+                            continue
+
+                        # 1. Embed search nodes and graph nodes for this chunk only
+                        if self.enable_embeddings and self.embedder:
+                            all_nodes_to_embed = []
+                            texts_to_embed = []
+                            for res in chunk_results:
+                                content_bytes = res.get("content_bytes", b"")
+                                for n in res.get("nodes_to_index", []):
+                                    s_byte = n.get('start_byte', 0)
+                                    e_byte = n.get('end_byte', 0)
+                                    if e_byte > s_byte:
+                                        try:
+                                            text = content_bytes[s_byte:e_byte].decode('utf-8', errors='ignore')
+                                        except Exception:
+                                            text = ""
+                                    else:
+                                        text = ""
+                                    if text.strip():
+                                        texts_to_embed.append(text)
+                                        all_nodes_to_embed.append(n)
+
+                            if texts_to_embed:
+                                try:
+                                    embeddings = self.embedder.embed_texts(texts_to_embed)
+                                    for i, n in enumerate(all_nodes_to_embed):
+                                        if i < len(embeddings):
+                                            n['embedding'] = embeddings[i]
+                                except Exception:
+                                    logger.debug(traceback.format_exc())
+
+                            all_graph_nodes_to_embed = []
+                            graph_texts_to_embed = []
+                            for res in chunk_results:
+                                for nid, props, lbl in res.get("graph_nodes", []):
+                                    if lbl in ("External", "ExternalType", "File", "Parameter"):
+                                        continue
+                                    if lbl == "Identifier":
+                                        text = f"{props.get('raw', '')} {props.get('canonical_verb', '')} {props.get('canonical_entity', '')}"
+                                    else:
+                                        name = props.get("name", "")
+                                        doc = props.get("docstring", "")
+                                        fp = nid.split("::")[0] if "::" in nid else ""
+                                        cv = props.get("canonical_verb", "")
+                                        text = f"{name} {doc} {fp} {cv}"
+                                    if text.strip():
+                                        graph_texts_to_embed.append(text)
+                                        all_graph_nodes_to_embed.append(props)
+
+                            if graph_texts_to_embed:
+                                try:
+                                    graph_embeddings = self.embedder.embed_texts(graph_texts_to_embed)
+                                    for i, props in enumerate(all_graph_nodes_to_embed):
+                                        if i < len(graph_embeddings):
+                                            props["embedding"] = graph_embeddings[i]
+                                except Exception as e:
+                                    logger.warning("Failed vector embeddings for chunk graph nodes: %s", e)
+
+                        # 2. Clear existing indexes for modified files in this chunk
+                        files_to_clear = [res["file_str"] for res in chunk_results]
+                        if files_to_clear:
+                            ram_search.clear_files_bulk(files_to_clear)
+
+                        # 3. Save search nodes and graph nodes for this chunk
+                        chunk_search_nodes = []
+                        chunk_graph_nodes = {}
+                        chunk_graph_edges = set()
+                        chunk_metadata = []
+
+                        for res in chunk_results:
+                            file_str = res["file_str"]
+                            if res["nodes_to_index"]:
+                                chunk_search_nodes.extend(res["nodes_to_index"])
+                            if res["graph_nodes"]:
+                                for node_id, props, lbl in res["graph_nodes"]:
+                                    chunk_graph_nodes[node_id] = (props, lbl)
+                            if res["graph_edges"]:
+                                for src, dst, props, rel in res["graph_edges"]:
+                                    chunk_graph_edges.add((src, dst, frozenset(props.items()), rel))
+                            for dep, resolved_dep in res["resolved_deps"]:
+                                if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
+                                    dep_name = os.path.basename(resolved_dep)
+                                    dep_ext = os.path.splitext(resolved_dep)[1]
+                                    if resolved_dep not in chunk_graph_nodes:
+                                        chunk_graph_nodes[resolved_dep] = ({"name": dep_name, "path": resolved_dep, "extension": dep_ext}, "File")
+                                    chunk_graph_edges.add((file_str, resolved_dep, frozenset(), "IMPORTS"))
+                                else:
+                                    if resolved_dep not in chunk_graph_nodes:
+                                        chunk_graph_nodes[resolved_dep] = ({"name": resolved_dep}, "Module")
+                                    chunk_graph_edges.add((file_str, resolved_dep, frozenset(), "IMPORTS"))
+
+                            if res.get("lsp_resolutions"):
+                                all_lsp_resolutions.append((file_str, res["lsp_resolutions"]))
+
+                            lang_name = get_language_for_extension(res["lang"])
+                            chunk_metadata.append((file_str, res["content_hash"], res["mtime"], lang_name))
+
+                        if chunk_search_nodes:
+                            ram_search.index_nodes(chunk_search_nodes)
+
+                        if chunk_graph_nodes:
+                            nodes_list = []
+                            for nid, (props, lbl) in chunk_graph_nodes.items():
+                                if "name" in props:
+                                    fp = nid.split("::")[0] if "::" in nid else ""
+                                    analysis = analyze_name(props["name"], fp)
+                                    props.update(analysis)
+                                nodes_list.append((nid, props, lbl))
+                            id_map = ram_graph.insert_nodes_bulk(nodes_list)
+
+                            if chunk_graph_edges:
+                                edges_list = [(src, dst, dict(props), rel) for src, dst, props, rel in chunk_graph_edges]
+                                ram_graph.insert_edges_bulk(edges_list, id_map)
+
+                        if chunk_metadata:
+                            ram_search.upsert_file_hashes_bulk(chunk_metadata)
+
+                        indexed_count += len(chunk_results)
+
+                        # Clear chunk memory and run garbage collection
+                        del chunk_results, chunk_search_nodes, chunk_graph_nodes, chunk_graph_edges
+                        import gc
+                        gc.collect()
+
+                # Phase 2: Execute LSP definition resolution across all collected instructions
+                if all_lsp_resolutions:
                     if progress_callback:
-                        progress_callback(total_files, total_files, "Clearing existing indexes for modified files...")
-                    ram_search.clear_files_bulk(files_to_clear)
-
-                all_search_nodes = []
-                all_graph_nodes = {}
-                all_graph_edges = set()
-                files_metadata = []
-
-                for res in results:
-                    file_str = res["file_str"]
-                    if res["nodes_to_index"]:
-                        all_search_nodes.extend(res["nodes_to_index"])
-
-                    if res["graph_nodes"]:
-                        for node_id, props, lbl in res["graph_nodes"]:
-                            all_graph_nodes[node_id] = (props, lbl)
-
-                    if res["graph_edges"]:
-                        for src, dst, props, rel in res["graph_edges"]:
-                            all_graph_edges.add((src, dst, frozenset(props.items()), rel))
-
-                    for dep, resolved_dep in res["resolved_deps"]:
-                        if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
-                            dep_name = os.path.basename(resolved_dep)
-                            dep_ext = os.path.splitext(resolved_dep)[1]
-                            if resolved_dep not in all_graph_nodes:
-                                all_graph_nodes[resolved_dep] = ({"name": dep_name, "path": resolved_dep, "extension": dep_ext}, "File")
-                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "IMPORTS"))
-                        else:
-                            if resolved_dep not in all_graph_nodes:
-                                all_graph_nodes[resolved_dep] = ({"name": resolved_dep}, "Module")
-                            all_graph_edges.add((file_str, resolved_dep, frozenset(), "IMPORTS"))
-
-                    lang_name = get_language_for_extension(res["lang"])
-                    files_metadata.append((file_str, res["content_hash"], res["mtime"], lang_name))
-
-                try:
-                    if all_search_nodes:
-                        if progress_callback:
-                            progress_callback(total_files, total_files, "Saving search nodes to RAM DuckDB...")
-                        ram_search.index_nodes(all_search_nodes)
-
-                    if all_graph_nodes:
-                        if progress_callback:
-                            progress_callback(total_files, total_files, "Inserting graph nodes into RAM Gorgonzola...")
-                        nodes_list = []
-                        for nid, (props, lbl) in all_graph_nodes.items():
-                            if "name" in props:
-                                fp = nid.split("::")[0] if "::" in nid else ""
-                                analysis = analyze_name(props["name"], fp)
-                                props.update(analysis)
-                            nodes_list.append((nid, props, lbl))
-
-                        id_map = ram_graph.insert_nodes_bulk(nodes_list)
-
-                        # Resolve LSP definitions into concrete CALLS edges
-                        # Build file-keyed index for O(1) lookup instead of O(N) scan per resolution
+                        progress_callback(total_files, total_files, "Resolving cross-file LSP call edges...")
+                    try:
+                        # Build file-keyed index from database
+                        db_nodes = ram_search._conn.execute(
+                            "SELECT id, filepath, start_line, end_line, kind FROM code_nodes WHERE kind IN ('method', 'function', 'class')"
+                        ).fetchall()
                         from collections import defaultdict as _defaultdict
-                        _file_node_index = _defaultdict(list)  # filepath → [(start_line, end_line, node_id, label)]
-                        for node_id, (props, label) in all_graph_nodes.items():
-                            if label in ("Method", "Function", "Class"):
-                                fp_prefix = node_id.split("::")[0] if "::" in node_id else node_id
-                                _file_node_index[fp_prefix].append((
-                                    props.get("start_line", 0) or props.get("line", 0),
-                                    props.get("end_line", 0),
-                                    node_id,
-                                    label
-                                ))
-                        # Sort each file's nodes by start_line for fast lookup
-                        for fp in _file_node_index:
-                            _file_node_index[fp].sort()
+                        db_file_index = _defaultdict(list)
+                        for nid, fp, s_line, e_line, kind in db_nodes:
+                            lbl = kind.capitalize()
+                            db_file_index[fp].append((s_line or 0, e_line or 0, nid, lbl))
 
-                        def _find_containing_node(filepath, line, kinds):
-                            """Find the node in filepath that contains the given line. O(M) where M = nodes in file."""
-                            for start, end, nid, lbl in _file_node_index.get(filepath, []):
+                        for fp in db_file_index:
+                            db_file_index[fp].sort()
+
+                        def _find_containing_in_db(filepath, line, kinds):
+                            for start, end, nid, lbl in db_file_index.get(filepath, []):
                                 if lbl in kinds and start <= line <= end:
                                     return nid
                             return None
 
-                        for res in results:
-                            file_str = res["file_str"]
-                            for resolution in res.get("lsp_resolutions", []):
+                        lsp_calls_to_insert = set()
+                        for file_str, resolutions in all_lsp_resolutions:
+                            for resolution in resolutions:
                                 call_line = resolution["call_line"]
                                 def_filepath = resolution["def_filepath"]
                                 def_line = resolution["def_line"]
 
-                                caller_id = _find_containing_node(file_str, call_line, ("Method", "Function"))
-
-                                callee_id = _find_containing_node(def_filepath, def_line, ("Method", "Function", "Class"))
-
-                                if not callee_id and self.search_index:
-                                    try:
-                                        row = self.search_index._conn.execute(
-                                            "SELECT id FROM code_nodes WHERE filepath = ? AND start_line <= ? AND end_line >= ? AND kind IN ('method', 'function', 'class')",
-                                            (def_filepath, def_line, def_line)
-                                        ).fetchone()
-                                        if row:
-                                            callee_id = row[0]
-                                    except Exception:
-                                        pass
+                                caller_id = _find_containing_in_db(file_str, call_line, ("Method", "Function"))
+                                callee_id = _find_containing_in_db(def_filepath, def_line, ("Method", "Function", "Class"))
 
                                 if caller_id and callee_id:
-                                    all_graph_edges.add((caller_id, callee_id, frozenset(), "CALLS"))
+                                    lsp_calls_to_insert.add((caller_id, callee_id, frozenset(), "CALLS"))
 
-                        if all_graph_edges:
-                            if progress_callback:
-                                progress_callback(total_files, total_files, "Linking graph edges in RAM...")
-                            edges_list = [(src, dst, dict(props), rel) for src, dst, props, rel in all_graph_edges]
-                            ram_graph.insert_edges_bulk(edges_list, id_map)
+                        if lsp_calls_to_insert:
+                            lsp_edges_list = [(src, dst, dict(props), rel) for src, dst, props, rel in lsp_calls_to_insert]
+                            ram_graph.insert_edges_bulk(lsp_edges_list)
+                    except Exception as e:
+                        logger.warning("Failed during Phase 2 LSP call resolution: %s", e)
 
-                        # Compute and insert git temporal coupling edges
-                        # First, clear stale FILE_CHANGES_WITH edges from previous runs
-                        # to prevent ghost edges after git squashes/rebases
-                        try:
-                            ram_graph.query_batch([
-                                "MATCH ()-[r:FILE_CHANGES_WITH]->() DELETE r"
-                            ])
-                        except Exception as e:
-                            logger.debug("Failed to clear old FILE_CHANGES_WITH edges: %s", e)
-
-                        git_coupling = self._compute_git_coupling(str(path))
-                        if git_coupling:
-                            if progress_callback:
-                                progress_callback(total_files, total_files, f"Linking {len(git_coupling)} git temporal coupling edges...")
-                            git_edges = []
-                            for f1, f2, weight in git_coupling:
-                                lbl1 = ram_graph._get_node_label(f1, ram_graph._conn)
-                                lbl2 = ram_graph._get_node_label(f2, ram_graph._conn)
-                                if lbl1 and lbl2:
-                                    git_edges.append((f1, f2, {"weight": weight}, "FILE_CHANGES_WITH"))
-                            if git_edges:
-                                ram_graph.insert_edges_bulk(git_edges, id_map)
-
-                    ramdisk.check_quota()
-                    if files_metadata:
-                        if progress_callback:
-                            progress_callback(total_files, total_files, "Updating file hash tracking in RAM...")
-                        ram_search.upsert_file_hashes_bulk(files_metadata)
-
-                    indexed_count = len(results)
-                except RamdiskQuotaExceeded as e:
-                    logger.error("[ramdisk] QUOTA EXCEEDED: %s", e)
-                    raise
+                # Insert Git temporal coupling edges
+                try:
+                    ram_graph.query_batch(["MATCH ()-[r:FILE_CHANGES_WITH]->() DELETE r"])
                 except Exception as e:
-                    logger.warning("Failed during bulk database write: %s", e)
-                    logger.debug(traceback.format_exc())
+                    logger.debug("Failed to clear old FILE_CHANGES_WITH edges: %s", e)
 
+                git_coupling = self._compute_git_coupling(str(path))
+                if git_coupling:
+                    if progress_callback:
+                        progress_callback(total_files, total_files, f"Linking {len(git_coupling)} git temporal coupling edges...")
+                    git_edges = []
+                    for f1, f2, weight in git_coupling:
+                        lbl1 = ram_graph._get_node_label(f1, ram_graph._conn)
+                        lbl2 = ram_graph._get_node_label(f2, ram_graph._conn)
+                        if lbl1 and lbl2:
+                            git_edges.append((f1, f2, {"weight": weight}, "FILE_CHANGES_WITH"))
+                    if git_edges:
+                        ram_graph.insert_edges_bulk(git_edges)
+
+                ramdisk.check_quota()
             ram_search.close()
 
         self.search_index = CodeSearchIndex(ssd_db_path)
