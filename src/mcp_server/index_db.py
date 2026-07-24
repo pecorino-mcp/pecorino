@@ -551,9 +551,9 @@ class CodeSearchIndex:
                 name = os.path.basename(filepath)
                 ext = os.path.splitext(filepath)[1]
                 q = f"""
-                    MERGE (f:File {{id: $id_{j}}})
-                    ON CREATE SET f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
-                    ON MATCH SET f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    MERGE (f:CodeNode {{id: $id_{j}}})
+                    ON CREATE SET f.kind = 'File', f.name = $name_{j}, f.path = $id_{j}, f.extension = $ext_{j}, f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
+                    ON MATCH SET f.kind = 'File', f.content_hash = $content_hash_{j}, f.mtime = $mtime_{j}, f.lang = $lang_{j}
                 """
                 queries.append(q)
                 params.update({
@@ -622,9 +622,9 @@ class CodeSearchIndex:
         name = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1]
         query = """
-            MERGE (f:File {id: $id})
-            ON CREATE SET f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
-            ON MATCH SET f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            MERGE (f:CodeNode {id: $id})
+            ON CREATE SET f.kind = 'File', f.name = $name, f.path = $id, f.extension = $ext, f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
+            ON MATCH SET f.kind = 'File', f.content_hash = $content_hash, f.mtime = $mtime, f.lang = $lang
         """
         try:
             graph = self._ensure_graph()
@@ -880,7 +880,7 @@ class CodeSearchIndex:
                 pass  # File deleted or inaccessible — stale removal handled elsewhere
         return stale
 
-    def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts", boost_ids: list[str] = None) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts", boost_ids: list[str] = None, explain: bool = False) -> List[Dict[str, Any]]:
         """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
         from src.core.errors import AnalysisError, IndexNotFoundError
         from src.mcp_server.config import settings
@@ -1140,6 +1140,8 @@ class CodeSearchIndex:
                                 query_vector_sim=vec_val,
                             )
                             r['score'] = round(float(compute_ltr_score(feats)), 4)
+                            if explain:
+                                r['ranking_explanation'] = feats
                 except Exception as e:
                     logger.warning("Failed to compute LTR scores for search candidates: %s", e)
 
