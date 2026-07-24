@@ -830,10 +830,10 @@ class CodeSearchIndex:
                 # Surface the BM25×PageRank score (already computed in SQL)
                 if len(row) > 8 and row[8] is not None:
                     if mode == "hybrid" and len(row) > 9:
-                        entry['bm25_score'] = row[8]
-                        entry['score'] = row[9]
+                        entry['bm25_score'] = round(float(row[8]), 2)
+                        entry['score'] = round(float(row[9]), 2)
                     else:
-                        entry['score'] = row[8]
+                        entry['score'] = round(float(row[8]), 2)
                 results.append(entry)
 
             # Cypher dynamic boost logic
@@ -866,6 +866,15 @@ class CodeSearchIndex:
                         in_deg = boost_map.get(k_id, 0)
                         if 'score' in r and in_deg > 0:
                             r['score'] *= (1.0 + math.log1p(in_deg))
+                    
+                    for r in results:
+                        if 'score' in r:
+                            r['score'] = round(float(r['score']), 2)
+                        if 'bm25_score' in r:
+                            r['bm25_score'] = round(float(r['bm25_score']), 2)
+                        if 'pagerank' in r:
+                            r['pagerank'] = round(float(r['pagerank']), 2)
+
                     results.sort(key=lambda x: x.get('score', 0), reverse=True)
 
                     # Fetch immediate usages (callers) for top results
@@ -932,7 +941,7 @@ class CodeSearchIndex:
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': row[7] or 0.0,
+                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0,
                 'complexity': row[8] or 0,
                 'signature': row[9],
                 'in_degree': row[10] or 0,
@@ -960,7 +969,7 @@ class CodeSearchIndex:
                 'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': row[7] or 0.0,
+                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0,
                 'complexity': row[8] or 0,
                 'signature': row[9],
                 'in_degree': row[10] or 0,
@@ -988,6 +997,6 @@ class CodeSearchIndex:
                 'metrics': {},
                 'start_line': row[3],
                 'end_line': row[4],
-                'pagerank': row[7]
+                'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0
             })
         return results
