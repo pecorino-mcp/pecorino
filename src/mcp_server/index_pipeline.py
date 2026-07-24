@@ -151,6 +151,7 @@ class CodebaseIndexer:
         with self._repo_cache_lock:
             if not hasattr(self, '_repo_files_cache'):
                 self._repo_files_cache = []
+                self._repo_basename_index = {}  # basename → [full_paths]
                 for r, d, fnames in os.walk(self.repo_path):
                     ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context"}
                     d[:] = [
@@ -161,14 +162,22 @@ class CodebaseIndexer:
                         and not dirname.endswith(".egg-info")
                     ]
                     for fname in fnames:
-                        self._repo_files_cache.append(os.path.abspath(os.path.join(r, fname)))
+                        full = os.path.abspath(os.path.join(r, fname))
+                        self._repo_files_cache.append(full)
+                        self._repo_basename_index.setdefault(fname, []).append(full)
 
         norm_dep = dep_string.replace('\\', '/').lstrip('/')
-        for filepath in self._repo_files_cache:
-            if filepath.replace('\\', '/').endswith('/' + norm_dep) or filepath.replace('\\', '/').endswith('/' + dep_string):
+        basename = os.path.basename(norm_dep)
+
+        # O(1) lookup by basename, then filter by suffix match
+        candidates = self._repo_basename_index.get(basename, [])
+        for filepath in candidates:
+            normed = filepath.replace('\\', '/')
+            if normed.endswith('/' + norm_dep) or normed.endswith('/' + dep_string):
                 return filepath
-            if os.path.basename(filepath) == dep_string:
-                return filepath
+        # If we got candidates but no suffix match, return the first one
+        if candidates:
+            return candidates[0]
         return ""
 
     def _resolve_relative_fallback(self, dep_string: str, source_filepath: str) -> str:
@@ -415,7 +424,9 @@ class CodebaseIndexer:
                     "start_line": n_props["line"],
                     "end_line": n_props["end_line"],
                     "metrics": {"complexity": n_props.get("complexity", 1)},
-                    "relationships": ""
+                    "relationships": "",
+                    "start_byte": n_props.get("start_byte", 0),
+                    "end_byte": n_props.get("end_byte", 0)
                 })
 
         return {
@@ -677,32 +688,33 @@ class CodebaseIndexer:
         try:
             # 1. SEMANTICALLY_RELATED (Vector Similarity)
             if self.enable_embeddings and self.search_index:
-                # Use DuckDB HNSW index with K-NN queries (O(N log N)) instead of O(N^2) cross join
-                query = "SELECT id, filepath, embedding FROM code_nodes WHERE kind IN ('Function', 'Method', 'Class') AND embedding IS NOT NULL"
+                # Single query: DuckDB cross-join with cosine distance, much faster than N individual queries
                 try:
-                    nodes = self.search_index._conn.execute(query).fetchall()
-                    if nodes:
+                    sem_query = """
+                    WITH ranked AS (
+                        SELECT
+                            a.id AS src_id,
+                            b.id AS dst_id,
+                            1.0 - array_cosine_distance(a.embedding, b.embedding) AS score
+                        FROM code_nodes a, code_nodes b
+                        WHERE a.kind IN ('Function', 'Method', 'Class')
+                          AND b.kind IN ('Function', 'Method', 'Class')
+                          AND a.embedding IS NOT NULL
+                          AND b.embedding IS NOT NULL
+                          AND a.id < b.id
+                          AND a.filepath != b.filepath
+                    )
+                    SELECT src_id, dst_id, score FROM ranked WHERE score >= 0.80
+                    """
+                    rows = self.search_index._conn.execute(sem_query).fetchall()
+                    if rows:
                         semantic_edges = []
-                        for nid, fpath, emb in nodes:
-                            knn_query = """
-                            SELECT id, 1.0 - array_cosine_distance(embedding, ?) as score
-                            FROM code_nodes
-                            WHERE kind IN ('Function', 'Method', 'Class')
-                              AND id != ?
-                              AND filepath != ?
-                              AND embedding IS NOT NULL
-                            ORDER BY array_cosine_distance(embedding, ?)
-                            LIMIT 5
-                            """
-                            neighbors = self.search_index._conn.execute(knn_query, [emb, nid, fpath, emb]).fetchall()
-                            for neighbor_id, score in neighbors:
-                                if score >= 0.80:
-                                    semantic_edges.extend([
-                                        (nid, neighbor_id, float(score)),
-                                        (neighbor_id, nid, float(score))
-                                    ])
+                        for src_id, dst_id, score in rows:
+                            semantic_edges.extend([
+                                (src_id, dst_id, float(score)),
+                                (dst_id, src_id, float(score))
+                            ])
                         if semantic_edges:
-                            # Write to temporary CSV and load into Kùzu
                             import csv
                             import tempfile
                             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
@@ -723,19 +735,22 @@ class CodebaseIndexer:
             # 2. SIMILAR_TO (MinHash/Jaccard via datasketch)
             try:
                 from datasketch import MinHash, MinHashLSH
-                # Fetch text content for code nodes
+                # Fetch as tuples (faster than iterrows/df)
                 text_query = "SELECT id, content FROM code_nodes WHERE kind IN ('Function', 'Method', 'Class')"
-                df_texts = self.search_index._conn.execute(text_query).df()
+                rows = self.search_index._conn.execute(text_query).fetchall()
 
-                if not df_texts.empty:
+                if rows:
                     lsh = MinHashLSH(threshold=0.70, num_perm=128)
                     minhashes = {}
 
-                    for _, row in df_texts.iterrows():
-                        nid = row['id']
-                        content = str(row['content'])
-                        # Basic 3-gram tokenization
-                        tokens = [content[i:i+3] for i in range(len(content) - 2)]
+                    for nid, content in rows:
+                        content = str(content or "")
+                        # Truncate to 4KB — beyond this, MinHash similarity stabilizes
+                        content = content[:4096]
+                        # Word-level tokens: much fewer update() calls than char 3-grams
+                        tokens = content.split()
+                        if len(tokens) < 3:
+                            continue
                         m = MinHash(num_perm=128)
                         for d in tokens:
                             m.update(d.encode('utf8'))
@@ -1118,8 +1133,9 @@ class CodebaseIndexer:
                             text = ""
                     else:
                         text = ""
-                    texts_to_embed.append(text)
-                    all_nodes_to_embed.append(n)
+                    if text.strip():  # Skip empty texts — wastes CPU
+                        texts_to_embed.append(text)
+                        all_nodes_to_embed.append(n)
 
             if texts_to_embed:
                 if progress_callback:
@@ -1137,6 +1153,9 @@ class CodebaseIndexer:
             graph_texts_to_embed = []
             for res in results:
                 for nid, props, lbl in res.get("graph_nodes", []):
+                    # Only embed meaningful graph nodes, skip External/File/Parameter
+                    if lbl in ("External", "ExternalType", "File", "Parameter"):
+                        continue
                     if lbl == "Identifier":
                         text = f"{props.get('raw', '')} {props.get('canonical_verb', '')} {props.get('canonical_entity', '')}"
                     else:
@@ -1145,8 +1164,9 @@ class CodebaseIndexer:
                         fp = nid.split("::")[0] if "::" in nid else ""
                         cv = props.get("canonical_verb", "")
                         text = f"{name} {doc} {fp} {cv}"
-                    graph_texts_to_embed.append(text)
-                    all_graph_nodes_to_embed.append(props)
+                    if text.strip():
+                        graph_texts_to_embed.append(text)
+                        all_graph_nodes_to_embed.append(props)
 
             if graph_texts_to_embed:
                 if progress_callback:
@@ -1288,6 +1308,29 @@ class CodebaseIndexer:
                         id_map = ram_graph.insert_nodes_bulk(nodes_list)
 
                         # Resolve LSP definitions into concrete CALLS edges
+                        # Build file-keyed index for O(1) lookup instead of O(N) scan per resolution
+                        from collections import defaultdict as _defaultdict
+                        _file_node_index = _defaultdict(list)  # filepath → [(start_line, end_line, node_id, label)]
+                        for node_id, (props, label) in all_graph_nodes.items():
+                            if label in ("Method", "Function", "Class"):
+                                fp_prefix = node_id.split("::")[0] if "::" in node_id else node_id
+                                _file_node_index[fp_prefix].append((
+                                    props.get("start_line", 0) or props.get("line", 0),
+                                    props.get("end_line", 0),
+                                    node_id,
+                                    label
+                                ))
+                        # Sort each file's nodes by start_line for fast lookup
+                        for fp in _file_node_index:
+                            _file_node_index[fp].sort()
+
+                        def _find_containing_node(filepath, line, kinds):
+                            """Find the node in filepath that contains the given line. O(M) where M = nodes in file."""
+                            for start, end, nid, lbl in _file_node_index.get(filepath, []):
+                                if lbl in kinds and start <= line <= end:
+                                    return nid
+                            return None
+
                         for res in results:
                             file_str = res["file_str"]
                             for resolution in res.get("lsp_resolutions", []):
@@ -1295,21 +1338,9 @@ class CodebaseIndexer:
                                 def_filepath = resolution["def_filepath"]
                                 def_line = resolution["def_line"]
 
-                                caller_id = None
-                                for node_id, (props, label) in all_graph_nodes.items():
-                                    if node_id.startswith(file_str + "::"):
-                                        if label in ("Method", "Function"):
-                                            if props.get("start_line", 0) <= call_line <= props.get("end_line", 0):
-                                                caller_id = node_id
-                                                break
+                                caller_id = _find_containing_node(file_str, call_line, ("Method", "Function"))
 
-                                callee_id = None
-                                for node_id, (props, label) in all_graph_nodes.items():
-                                    if node_id.startswith(def_filepath + "::") or node_id == def_filepath:
-                                        if label in ("Method", "Function", "Class"):
-                                            if props.get("start_line", 0) <= def_line <= props.get("end_line", 0):
-                                                callee_id = node_id
-                                                break
+                                callee_id = _find_containing_node(def_filepath, def_line, ("Method", "Function", "Class"))
 
                                 if not callee_id and self.search_index:
                                     try:

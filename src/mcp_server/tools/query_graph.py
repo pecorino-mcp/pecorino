@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Optional, Any
 from mcp.server import ServerRequestContext
 
@@ -21,8 +22,6 @@ async def do_query_graph(
     upper_query = query.upper()
     for kw in mutating_keywords:
         if kw in upper_query:
-            # simple check: if it contains the word bordered by spaces or start/end
-            import re
             if re.search(rf"\b{kw}\b", upper_query):
                 return {
                     "status": "error", 
@@ -41,7 +40,6 @@ async def do_query_graph(
     if not graph_api:
         return {"status": "error", "message": "Graph index not found or uninitialized. Run update_index first."}
 
-    import re
     # Neo4j compatibility: Kùzu uses LABEL() instead of type() for relationships
     # We use uppercase LABEL() to bypass a naive regex in Gorgonzola that replaces lowercase label() with .kind
     query = re.sub(r'(?i)\btype\s*\(', 'LABEL(', query)

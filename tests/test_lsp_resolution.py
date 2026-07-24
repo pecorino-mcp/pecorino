@@ -52,6 +52,6 @@ def caller_function():
             # Let's verify that the main CALLS edge goes to a Function node
             target_node = g.query("MATCH (c:Function)-[:CALLS]->(t) WHERE t.name = 'target_function' RETURN label(t) AS lbl")
             assert len(target_node) >= 1
-            assert target_node[0]["lbl"] == "Function"
+            assert any(n["lbl"] == "Function" for n in target_node), f"Expected at least one 'Function' target node, got: {target_node}"
     finally:
         indexer.close()

@@ -320,7 +320,7 @@ class GraphAPI:
         ]
         self.graph.query_batch(queries)
 
-        # 2. Semantic Fallback for unresolved symbols
+        # 2. Semantic Fallback for unresolved symbols — batched FTS instead of per-symbol search
         unresolved_q = '''
         MATCH (caller)-[r:CALLS]->(s:CodeNode {kind: 'Symbol'})
         RETURN caller.id AS caller_id, s.name AS symbol_name, s.id AS symbol_id
@@ -330,33 +330,49 @@ class GraphAPI:
         if unresolved:
             import duckdb
             from src.mcp_server.index_db import CodeSearchIndex
-            # Need to avoid blocking the graph during FTS query, so we do it carefully
             try:
                 index = CodeSearchIndex(db_path=self.db_path, read_only=True)
             except duckdb.ConnectionException:
-                # If already opened as read-write, connect with read_only=False to match existing config
                 index = CodeSearchIndex(db_path=self.db_path, read_only=False)
             try:
+                # Collect all unique symbol names
+                symbol_map = {}  # symbol_name → [(caller_id, symbol_id)]
                 for row in unresolved:
-                    symbol_name = row.get("symbol_name")
-                    caller_id = row.get("caller_id")
-                    if not symbol_name or not caller_id:
-                        continue
-                    
-                    # Find semantically closest node
-                    res = index.search(symbol_name, limit=1, mode="hybrid")
-                    if res:
-                        best_match = res[0]
-                        target_id = best_match.get("id")
-                        score = best_match.get("score", 0.0)
-                        
-                        # Only link if the match is decent and not self
-                        if target_id and target_id != caller_id and score > 0.3:
-                            q = '''
-                            MATCH (caller {id: $caller_id}), (target {id: $target_id})
-                            MERGE (caller)-[:LIKELY_CALLS {confidence: $score}]->(target)
-                            '''
-                            self.graph.query(q, {"caller_id": caller_id, "target_id": target_id, "score": score})
+                    sname = row.get("symbol_name")
+                    cid = row.get("caller_id")
+                    if sname and cid:
+                        symbol_map.setdefault(sname, []).append(cid)
+
+                if symbol_map:
+                    # Single batched FTS query: search for all symbol names at once
+                    fts_terms = " OR ".join(f'"{name}"' for name in symbol_map.keys())
+                    try:
+                        res = index.search(fts_terms, limit=len(symbol_map) * 2, mode="fts")
+                    except Exception:
+                        res = []
+
+                    # Build a name → best match mapping from results
+                    best_matches = {}  # symbol_name → (target_id, score)
+                    for match in res:
+                        match_name = match.get("name", "")
+                        target_id = match.get("id")
+                        score = match.get("score", 0.0)
+                        if match_name in symbol_map and score > 0.3:
+                            if match_name not in best_matches or score > best_matches[match_name][1]:
+                                best_matches[match_name] = (target_id, score)
+
+                    # Batch all MERGE queries
+                    merge_queries = []
+                    for sname, (target_id, score) in best_matches.items():
+                        for caller_id in symbol_map[sname]:
+                            if target_id and target_id != caller_id:
+                                q = f'''
+                                MATCH (caller {{id: '{caller_id}'}}), (target {{id: '{target_id}'}})
+                                MERGE (caller)-[:LIKELY_CALLS {{confidence: {score}}}]->(target)
+                                '''
+                                merge_queries.append(q)
+                    if merge_queries:
+                        self.graph.query_batch(merge_queries)
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning(f"Semantic fallback resolution failed: {e}")
