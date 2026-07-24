@@ -80,6 +80,60 @@ def _cap_body(body: str) -> str:
     return body
 
 
+# ── Result grouping by directory ──────────────────────────────
+# Keys in mode results that may contain lists of items with 'filepath'.
+_GROUPABLE_KEYS = ("results", "callers", "callees", "dependent_files", "search_results")
+
+
+def _group_results_by_directory(result: dict, repo_root: str = "") -> dict:
+    """Add a 'groups' key that clusters items by parent directory.
+
+    Scans well-known keys in *result* for lists of dicts that carry a
+    'filepath' (or 'file') field. Items are grouped by their immediate
+    parent directory. The original flat lists are preserved.
+    """
+    import os
+
+    # Collect all groupable items across known keys
+    items: list[dict] = []
+    for key in _GROUPABLE_KEYS:
+        val = result.get(key)
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict) and (item.get("filepath") or item.get("file")):
+                    items.append(item)
+
+    if not items:
+        return result
+
+    # Build groups keyed by parent directory
+    dir_groups: dict[str, list[dict]] = {}
+    for item in items:
+        fp = item.get("filepath") or item.get("file", "")
+        parent = os.path.dirname(fp)
+        dir_groups.setdefault(parent, []).append(item)
+
+    # Convert to list sorted by group size (largest first)
+    groups = []
+    for dir_path, group_items in sorted(dir_groups.items(),
+                                         key=lambda x: len(x[1]),
+                                         reverse=True):
+        label = os.path.basename(dir_path) if dir_path else "(root)"
+        # Make path relative to repo root for readability
+        display_path = dir_path
+        if repo_root and dir_path.startswith(repo_root):
+            display_path = dir_path[len(repo_root):].lstrip("/") or "."
+        groups.append({
+            "label": label,
+            "path": display_path,
+            "count": len(group_items),
+            "files": group_items,
+        })
+
+    result["groups"] = groups
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Unified search entry point
 # ═══════════════════════════════════════════════════════════════
@@ -110,8 +164,8 @@ async def do_search(
       intent    — Preset AST queries (use 'intent' param).
       dsl       — Custom JSON DSL query (use 'query_json' param).
       functional-analysis — Functional purity analysis.
-      functional-analysis — Functional purity analysis.
       cypher    — Native Cypher read-only queries (query = cypher string, required).
+      community — Semantic neighborhood of a symbol (query = symbol name, required).
       trace     — Multi-hop call graph traversal (query = symbol name, required).
       semantic  — Semantic vector search.
       snippet   — Fetch full source code body of a specific symbol (query = symbol name).
@@ -135,36 +189,49 @@ async def do_search(
             raise SecurityValidationError("Invalid characters in query")
         check_suspicious(query, "query")
 
-    # ── Route to mode-specific handlers ───────────────────────
-    if mode in ("fts", "hybrid", "semantic"):
-        return await _do_fts(target, query, mode, limit, offset, include_source,
-                             auto_expand_source, output_file, allow_external, ctx)
-    elif mode in ("callers", "callees"):
-        return await _do_callers_callees(target, mode, query, limit, offset,
-                                         allow_external, ctx)
-    elif mode == "impact":
-        return await _do_impact(target, limit, offset, max_depth,
-                                allow_external, ctx)
-    elif mode == "usages":
-        return await _do_usages(target, query, limit, allow_external, ctx)
-    elif mode == "intent":
-        return await _do_intent(target, intent, allow_external, ctx)
-    elif mode == "dsl":
-        return await _do_dsl(target, query_json, allow_external, ctx)
-    elif mode == "functional-analysis":
-        return await _do_functional_analysis(target, allow_external, ctx)
-    elif mode == "cypher":
-        return await _do_cypher(target, query, allow_external, ctx)
-    elif mode == "community":
-        return await _do_community(target, query, limit, offset, allow_external, ctx)
-    elif mode == "trace":
-        return await _do_trace(target, query, max_depth, allow_external, ctx)
-    elif mode == "snippet":
-        return await _do_snippet(target, query, allow_external, ctx)
-    elif mode == "explain":
-        return await _do_explain(target, query, allow_external, ctx)
+    # ── Resolve repo root for grouping labels ─────────────────
+    _repo_root = ""
+    try:
+        from src.mcp_server.index_db import find_repo_root
+        _safe = safe_path(target, allow_external)
+        _repo_root = find_repo_root(str(_safe))
+    except Exception:
+        pass
 
-    return {"error": "Unknown mode"}
+    # ── Route to mode-specific handlers ───────────────────────
+    result: dict
+    if mode in ("fts", "hybrid", "semantic"):
+        result = await _do_fts(target, query, mode, limit, offset, include_source,
+                               auto_expand_source, output_file, allow_external, ctx)
+    elif mode in ("callers", "callees"):
+        result = await _do_callers_callees(target, mode, query, limit, offset,
+                                           allow_external, ctx)
+    elif mode == "impact":
+        result = await _do_impact(target, limit, offset, max_depth,
+                                  allow_external, ctx)
+    elif mode == "usages":
+        result = await _do_usages(target, query, limit, allow_external, ctx)
+    elif mode == "intent":
+        result = await _do_intent(target, intent, allow_external, ctx)
+    elif mode == "dsl":
+        result = await _do_dsl(target, query_json, allow_external, ctx)
+    elif mode == "functional-analysis":
+        result = await _do_functional_analysis(target, allow_external, ctx)
+    elif mode == "cypher":
+        result = await _do_cypher(target, query, allow_external, ctx)
+    elif mode == "community":
+        result = await _do_community(target, query, limit, offset, allow_external, ctx)
+    elif mode == "trace":
+        result = await _do_trace(target, query, max_depth, allow_external, ctx)
+    elif mode == "snippet":
+        result = await _do_snippet(target, query, allow_external, ctx)
+    elif mode == "explain":
+        result = await _do_explain(target, query, allow_external, ctx)
+    else:
+        return {"error": "Unknown mode"}
+
+    # ── Post-processing: group results by directory ───────────
+    return _group_results_by_directory(result, _repo_root)
 
 
 # ═══════════════════════════════════════════════════════════════

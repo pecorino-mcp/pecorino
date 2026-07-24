@@ -22,3 +22,10 @@
   (identifier)
   (constant)
 ] @type.leaf
+
+;; Graph extraction — classes, functions, imports, calls
+(class) @graph.class
+(module) @graph.class
+(method) @graph.function
+(singleton_method) @graph.function
+(call) @graph.call
