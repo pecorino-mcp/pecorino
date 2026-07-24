@@ -152,6 +152,11 @@ async def handle_list_tools(
                         "default": False,
                         "description": "If true, attempts to include full source code. Use with caution on large result sets."
                     },
+                    "include_context": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, enriches top results with parent scope, callers, callees, recent commits, and related issues."
+                    },
                     "max_depth": {
                         "type": "integer",
                         "default": 3,
@@ -467,6 +472,7 @@ async def handle_call_tool(
                 limit=arguments.get("limit", 10),
                 offset=arguments.get("offset", 0),
                 include_source=arguments.get("include_source", False),
+                include_context=arguments.get("include_context", False),
                 max_depth=arguments.get("max_depth", 3),
                 intent=arguments.get("intent"),
                 query_json=arguments.get("query_json"),

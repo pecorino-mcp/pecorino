@@ -73,6 +73,9 @@ class Config:
         self.enable_cross_encoder = os.getenv(
             "PECORINO_ENABLE_CROSS_ENCODER", "true"
         ).lower() in ("true", "1", "yes")
+        self.cross_encoder_model_repo = os.getenv(
+            "PECORINO_CROSS_ENCODER_MODEL_REPO", "cross-encoder/ms-marco-MiniLM-L-12-v2"
+        )
         self.cross_encoder_top_n = int(os.getenv("PECORINO_CROSS_ENCODER_TOP_N", "30"))
 
 # Global singleton configuration
