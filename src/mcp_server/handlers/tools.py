@@ -134,9 +134,9 @@ async def handle_list_tools(
                     },
                     "mode": {
                         "type": "string",
-                        "default": "hybrid",
-                        "enum": ["fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis", "cypher", "hybrid", "community", "trace"],
-                        "description": "Search mode. 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL, 'cypher' = native read-only graph queries, 'trace' = multi-hop call graph traversal, 'hybrid' = vector+BM25 fusion, 'community' = semantic neighborhood."
+                        "default": "auto",
+                        "enum": ["auto", "fts", "callers", "callees", "impact", "usages", "intent", "dsl", "functional-analysis", "cypher", "hybrid", "community", "trace"],
+                        "description": "Search mode. 'auto' = intelligent routing (default), 'fts' = full-text search, 'callers'/'callees' = call graph, 'impact' = dependency trace, 'usages' = search+callers combined, 'intent' = preset AST queries, 'dsl' = custom JSON DSL, 'cypher' = native read-only graph queries, 'trace' = multi-hop call graph traversal, 'hybrid' = vector+BM25 fusion, 'community' = semantic neighborhood."
                     },
                     "intent": {
                         "type": "string",
@@ -151,6 +151,16 @@ async def handle_list_tools(
                         "type": "boolean",
                         "default": False,
                         "description": "If true, attempts to include full source code. Use with caution on large result sets."
+                    },
+                    "include_context": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, enriches top results with parent scope, callers, callees, recent commits, and related issues."
+                    },
+                    "explain": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, includes a detailed breakdown of the features and scores that contributed to the node's ranking."
                     },
                     "max_depth": {
                         "type": "integer",
@@ -467,6 +477,7 @@ async def handle_call_tool(
                 limit=arguments.get("limit", 10),
                 offset=arguments.get("offset", 0),
                 include_source=arguments.get("include_source", False),
+                include_context=arguments.get("include_context", False),
                 max_depth=arguments.get("max_depth", 3),
                 intent=arguments.get("intent"),
                 query_json=arguments.get("query_json"),
