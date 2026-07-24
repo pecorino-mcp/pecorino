@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 import mcp_types as types
@@ -14,13 +13,13 @@ from src.mcp_server.errors import SecurityValidationError, handle_mcp_error
 from src.mcp_server.middleware.security import check_suspicious
 from src.mcp_server.prometheus_metrics import TOOL_CALLS, TOOL_DURATION
 from src.mcp_server.tools.browse import do_browse
-from src.mcp_server.tools.metrics_tool import do_metrics
-from src.mcp_server.tools.search import do_search
-from src.mcp_server.tools.update_index import do_update_index
 from src.mcp_server.tools.detect_changes import do_detect_changes
 from src.mcp_server.tools.manage_adr import do_manage_adr
-from src.mcp_server.tools.snapshot import do_manage_snapshot
+from src.mcp_server.tools.metrics_tool import do_metrics
 from src.mcp_server.tools.query_graph import do_query_graph
+from src.mcp_server.tools.search import do_search
+from src.mcp_server.tools.snapshot import do_manage_snapshot
+from src.mcp_server.tools.update_index import do_update_index
 
 logger = logging.getLogger(__name__)
 
@@ -523,12 +522,12 @@ async def handle_call_tool(
             raw_target = arguments.get("target") or arguments.get("project")
             target = await _detect_directory(_normalize_target(raw_target))
             check_suspicious(target, "target")
-            
+
             query = arguments.get("query")
             max_rows = arguments.get("max_rows")
             if max_rows and query and "LIMIT " not in query.upper():
                 query = f"{query} LIMIT {max_rows}"
-                
+
             res = await do_query_graph(
                 target=target,
                 query=query,

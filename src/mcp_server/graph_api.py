@@ -201,7 +201,7 @@ class GraphAPI:
                         else:
                             edge_type = "CALLS"
                             confidence = None
-                            
+
                         callees.append({
                             "name": row.get("name", ""),
                             "id": row.get("id", ""),
@@ -243,7 +243,7 @@ class GraphAPI:
                         else:
                             edge_type = "CALLS"
                             confidence = None
-                            
+
                         callers.append({
                             "name": row.get("name", ""),
                             "id": row.get("id", ""),
@@ -329,6 +329,7 @@ class GraphAPI:
         unresolved = self.graph.query(unresolved_q)
         if unresolved:
             import duckdb
+
             from src.mcp_server.index_db import CodeSearchIndex
             try:
                 index = CodeSearchIndex(db_path=self.db_path, read_only=True)

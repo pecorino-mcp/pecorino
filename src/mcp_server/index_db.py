@@ -1106,7 +1106,10 @@ class CodeSearchIndex:
                     """, candidate_ids).fetchall()
                     feat_map = {row[0]: row for row in feat_rows}
 
-                    from src.mcp_server.ltr_ranker import extract_candidate_features, compute_ltr_score
+                    from src.mcp_server.ltr_ranker import (
+                        compute_ltr_score,
+                        extract_candidate_features,
+                    )
 
                     for r in results:
                         nid = r.get('id')

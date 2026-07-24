@@ -1,19 +1,19 @@
-import os
-import sys
 import json
-import subprocess
-import threading
 import logging
+import os
 import queue
+import subprocess
+import sys
+import threading
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 class LSPClient:
     def __init__(self, workspace_root: str, lsp_binary: str = None):
         self.workspace_root = os.path.abspath(workspace_root)
-        
+
         # Default to pylsp in current virtualenv if not specified
         if not lsp_binary:
             venv_bin = Path(sys.executable).parent / "pylsp"
@@ -23,18 +23,18 @@ class LSPClient:
                 self.lsp_binary = "pylsp"
         else:
             self.lsp_binary = lsp_binary
-            
+
         self.process: Optional[subprocess.Popen] = None
         self.read_thread: Optional[threading.Thread] = None
         self.running = False
         self._id = 0
         self._id_lock = threading.Lock()
-        
+
         # Map request ID -> Queue to deliver response
         self.response_queues: Dict[int, queue.Queue] = {}
         self.queues_lock = threading.Lock()
         self.write_lock = threading.Lock()
-        
+
     def start(self) -> bool:
         logger.info(f"Starting LSP server: {self.lsp_binary} in {self.workspace_root}")
         try:
@@ -48,11 +48,11 @@ class LSPClient:
         except Exception as e:
             logger.error(f"Failed to start LSP subprocess: {e}")
             return False
-            
+
         self.running = True
         self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
         self.read_thread.start()
-        
+
         # Initialize workspace
         init_res = self.send_request("initialize", {
             "processId": os.getpid(),
@@ -64,16 +64,16 @@ class LSPClient:
                 }
             }
         }, timeout=10.0)
-        
+
         if init_res is None:
             logger.error("LSP server failed to initialize.")
             self.stop()
             return False
-            
+
         self.send_notification("initialized", {})
         logger.info("LSP server initialized successfully.")
         return True
-        
+
     def stop(self):
         self.running = False
         if self.process:
@@ -91,11 +91,11 @@ class LSPClient:
                 except Exception:
                     pass
             self.process = None
-            
+
         if self.read_thread:
             self.read_thread.join(timeout=1.0)
             self.read_thread = None
-            
+
     def _read_loop(self):
         stdout = self.process.stdout
         while self.running and stdout:
@@ -112,17 +112,17 @@ class LSPClient:
                         break # Headers section ends with blank line
                     if line.lower().startswith("content-length:"):
                         content_length = int(line.split(":")[1].strip())
-                        
+
                 if content_length is None:
                     continue
-                    
+
                 # Read Body
                 body_bytes = stdout.read(content_length)
                 if len(body_bytes) < content_length:
                     return # Stream cut short
-                    
+
                 payload = json.loads(body_bytes.decode('utf-8', errors='ignore'))
-                
+
                 # Check if it's a response
                 if "id" in payload:
                     resp_id = payload["id"]
@@ -134,7 +134,7 @@ class LSPClient:
                 if self.running:
                     logger.debug(f"Error in LSP read loop: {e}")
                 return
-                
+
     def send_request(self, method: str, params: dict, timeout: Optional[float] = None) -> Optional[dict]:
         if not self.running or not self.process or not self.process.stdin:
             return None
@@ -145,29 +145,29 @@ class LSPClient:
                 timeout = settings.lsp_request_timeout
             except Exception:
                 timeout = 0.8
-            
+
         with self._id_lock:
             self._id += 1
             req_id = self._id
-            
+
         payload = {
             "jsonrpc": "2.0",
             "id": req_id,
             "method": method,
             "params": params
         }
-        
+
         q = queue.Queue()
         with self.queues_lock:
             self.response_queues[req_id] = q
-            
+
         try:
             body = json.dumps(payload)
             msg = f"Content-Length: {len(body)}\r\n\r\n{body}"
             with self.write_lock:
                 self.process.stdin.write(msg.encode('utf-8'))
                 self.process.stdin.flush()
-            
+
             # Wait for response
             response = q.get(timeout=timeout)
             if "error" in response:
@@ -183,11 +183,11 @@ class LSPClient:
         finally:
             with self.queues_lock:
                 self.response_queues.pop(req_id, None)
-                
+
     def send_notification(self, method: str, params: dict):
         if not self.running or not self.process or not self.process.stdin:
             return
-            
+
         payload = {
             "jsonrpc": "2.0",
             "method": method,
@@ -201,7 +201,7 @@ class LSPClient:
                 self.process.stdin.flush()
         except Exception as e:
             logger.error(f"LSP Send notification error: {e}")
-            
+
     def open_document(self, filepath: str, content: str):
         self.send_notification("textDocument/didOpen", {
             "textDocument": {
@@ -211,7 +211,7 @@ class LSPClient:
                 "text": content
             }
         })
-        
+
     def resolve_definition(self, filepath: str, line: int, character: int, timeout: Optional[float] = None) -> Optional[dict]:
         """Query definition of symbol at 1-indexed line and 0-indexed character.
         
@@ -229,10 +229,10 @@ class LSPClient:
                 "character": character
             }
         }, timeout=timeout)
-        
+
         if not res:
             return None
-            
+
         # Definition can return Location or Location[]
         if isinstance(res, list):
             if not res:
@@ -240,11 +240,11 @@ class LSPClient:
             loc = res[0]
         else:
             loc = res
-            
+
         uri = loc.get("uri")
         if not uri:
             return None
-            
+
         # Parse URI back to path
         if uri.startswith("file://"):
             import urllib.parse
@@ -253,10 +253,10 @@ class LSPClient:
                 def_path = def_path[1:]
         else:
             return None
-            
+
         range_val = loc.get("range", {})
         start_pos = range_val.get("start", {})
-        
+
         return {
             "filepath": os.path.abspath(def_path),
             "start_line": start_pos.get("line", 0) + 1, # Convert back to 1-indexed

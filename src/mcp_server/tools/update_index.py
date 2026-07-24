@@ -126,7 +126,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
             )
         except asyncio.TimeoutError:
             proc.kill()
-            raise AnalysisError(f"Indexing timed out after {INDEX_TIMEOUT_S}s")
+            raise AnalysisError(f"Indexing timed out after {INDEX_TIMEOUT_S}s") from None
 
         if proc.returncode != 0:
             err_msg = "\n".join(stderr_logs[-10:])

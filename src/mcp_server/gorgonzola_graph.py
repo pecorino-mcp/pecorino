@@ -27,7 +27,7 @@ _RELATIONSHIP_SCHEMA = [
     "CREATE REL TABLE DEFINES (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE EXTENDS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE IMPLEMENTS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE FILE_CHANGES_WITH (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE FILE_CHANGES_WITH (FROM File TO File, weight INT64)",
     "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE HTTP_CALLS (FROM CodeNode TO CodeNode)",
@@ -185,7 +185,7 @@ class GorgonzolaGraph:
             else:
                 return f"{var_part}:CodeNode {{kind: '{label}'}}{brace}"
         query = re.sub(pattern, repl, query)
-        
+
         # Rewrite label(x) to x.kind to mask the underlying CodeNode table
         query = re.sub(r'\blabel\(([a-zA-Z0-9_]+)\)', r'\1.kind', query)
         return query
@@ -193,7 +193,7 @@ class GorgonzolaGraph:
     def query(self, query: str, parameters: dict = None) -> list:
         if parameters is None:
             parameters = {}
-            
+
         query = self._rewrite_cypher_query(query)
 
         if self._in_context:
@@ -215,7 +215,7 @@ class GorgonzolaGraph:
                 self._conn.execute("CALL DROP_PROJECTED_GRAPH('call_graph')")
             except Exception:
                 pass
-            
+
             try:
                 self._conn.execute("CALL PROJECT_GRAPH('call_graph', ['CodeNode'], ['CALLS'])")
                 res = self._conn.execute("CALL leiden('call_graph') RETURN node.id AS id, leiden_id")
@@ -318,7 +318,7 @@ class GorgonzolaGraph:
                 with self._label_cache_lock:
                     if node_id not in self._label_cache:
                         ids_to_check.append(node_id)
-            
+
             existing_ids = set()
             chunk_size = 500
             for i in range(0, len(ids_to_check), chunk_size):
@@ -340,7 +340,7 @@ class GorgonzolaGraph:
                 if nid in existing_ids:
                     continue
                 filtered_group.append((nid, props))
-                
+
             if not filtered_group:
                 continue
 
@@ -421,6 +421,9 @@ class GorgonzolaGraph:
             dst_label = "CodeNode"
             if rel_type == "HAS_IDENTIFIER":
                 dst_label = "Identifier"
+            elif rel_type == "FILE_CHANGES_WITH":
+                src_label = "File"
+                dst_label = "File"
 
             if not src_label or not dst_label:
                 continue
@@ -460,6 +463,9 @@ class GorgonzolaGraph:
                     elif rel_type == "PARAMETER_OF":
                         props = props or {}
                         row.append(str(props.get("position", 0)))
+                    elif rel_type == "FILE_CHANGES_WITH":
+                        props = props or {}
+                        row.append(str(props.get("weight", 0)))
                     rows.append(row)
 
                 copy_query = f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
@@ -502,12 +508,12 @@ class GorgonzolaGraph:
 
                     conn.execute("""
                         CALL PROJECT_GRAPH('CodeGraph', 
-                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable', 'Folder', 'TestFile', 'Route', 'EnvVar', 'Type'],
+                            ['File', 'CodeNode', 'Identifier'],
                             ['DEPENDS_ON', 'CONTAINS', 'DEFINES', 'INHERITS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS', 'IMPORTS', 'READS', 'WRITES', 'RETURNS', 'HAS_PARAMETER', 'USES']
                         );
                     """)
 
-                    res = conn.execute("CALL page_rank('CodeGraph') RETURN node.id AS id, rank;")
+                    res = conn.execute("CALL pagerank('CodeGraph') RETURN node.id AS id, rank;")
                     while res.has_next():
                         row = res.get_next()
                         results.append({"node_id": row[0], "score": row[1]})
