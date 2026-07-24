@@ -80,6 +80,22 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes ADD COLUMN in_degree INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN out_degree INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN hcgs_summary VARCHAR',
+        # Phase 0: Git features (stable)
+        'ALTER TABLE code_nodes ADD COLUMN git_survival_days INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_rename_count INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_ownership_entropy DOUBLE DEFAULT 0.0',
+        # Phase 0: Git features (time-dependent)
+        'ALTER TABLE code_nodes ADD COLUMN git_commit_count INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_days_since_change INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_churn INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_authors INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN git_bug_fix_ratio DOUBLE DEFAULT 0.0',
+        # Phase 0: OOD features
+        'ALTER TABLE code_nodes ADD COLUMN instability DOUBLE DEFAULT 0.0',
+        'ALTER TABLE code_nodes ADD COLUMN coupling DOUBLE DEFAULT 0.0',
+        'ALTER TABLE code_nodes ADD COLUMN depth INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN inheritance_depth INTEGER DEFAULT 0',
+        'ALTER TABLE code_nodes ADD COLUMN betweenness DOUBLE DEFAULT 0.0',
     ]
     for query in migrations:
         try:
@@ -153,6 +169,7 @@ class CodeSearchIndex:
         self._conn = None
         self.graph = None
         self._embedder = None
+        self._tantivy = None
         self._read_only = read_only
         if db_path is None:
             repo_path = find_repo_root(os.getcwd())
@@ -220,6 +237,61 @@ class CodeSearchIndex:
             from src.mcp_server.embedding import EmbeddingPipeline
             self._embedder = EmbeddingPipeline()
         return self._embedder
+
+    def _ensure_tantivy(self):
+        """Lazily open the Tantivy index for reading."""
+        if self._tantivy is not None:
+            return self._tantivy
+
+        from src.mcp_server.config import settings
+        if not settings.enable_tantivy:
+            return None
+
+        from src.mcp_server.tantivy_search import TantivyIndex, get_tantivy_path_for_repo
+        tantivy_path = get_tantivy_path_for_repo(self.db_path)
+        idx = TantivyIndex(index_path=tantivy_path)
+        if idx.open():
+            self._tantivy = idx
+            return idx
+        return None
+
+    def build_tantivy_index(self) -> int:
+        """Build the Tantivy BM25F index from all code_nodes in DuckDB.
+
+        Returns the number of documents indexed.
+        """
+        from src.mcp_server.tantivy_search import TantivyIndex, get_tantivy_path_for_repo
+
+        tantivy_path = get_tantivy_path_for_repo(self.db_path)
+        conn = self._conn
+
+        # Fetch all nodes for the Tantivy index
+        rows = conn.execute('''
+            SELECT id, name, kind, filepath, hcgs_summary,
+                   start_line, end_line, start_byte, end_byte
+            FROM code_nodes
+        ''').fetchall()
+
+        nodes = []
+        for row in rows:
+            body = self._lazy_load_body(
+                row[3], row[5], row[6],
+                start_byte=row[7] if row[7] is not None else 0,
+                end_byte=row[8] if row[8] is not None else 0,
+            )
+            nodes.append({
+                'id': row[0],
+                'name': row[1],
+                'kind': row[2],
+                'filepath': row[3],
+                'hcgs_summary': row[4] or '',
+                'body_text': body or '',
+            })
+
+        idx = TantivyIndex(index_path=tantivy_path)
+        count = idx.build(nodes, index_path=tantivy_path)
+        self._tantivy = idx
+        return count
 
     def close(self):
         """Close the underlying database connections."""
@@ -353,12 +425,20 @@ class CodeSearchIndex:
         if data:
             conn.execute("BEGIN TRANSACTION")
             try:
-                # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
+                # Create temp table with same schema as code_nodes, then INSERT
+                # only the core columns — new feature columns keep their defaults
                 conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
-                conn.executemany("INSERT INTO temp_code_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
-                conn.execute('''
-                    INSERT INTO code_nodes
-                    SELECT * FROM temp_code_nodes
+                insert_cols = (
+                    "id, name, kind, filepath, start_line, end_line, "
+                    "relationships, pagerank, start_byte, end_byte, "
+                    "community_id, embedding, complexity, signature, "
+                    "in_degree, out_degree, hcgs_summary"
+                )
+                placeholders = ", ".join(["?"] * 17)
+                conn.executemany(f"INSERT INTO temp_code_nodes ({insert_cols}) VALUES ({placeholders})", data)
+                conn.execute(f'''
+                    INSERT INTO code_nodes ({insert_cols})
+                    SELECT {insert_cols} FROM temp_code_nodes
                     ON CONFLICT(id) DO UPDATE SET
                         name=excluded.name,
                         kind=excluded.kind,
@@ -796,25 +876,72 @@ class CodeSearchIndex:
                 params.extend([q_emb, limit, offset])
                 res = conn.execute(sql, params).fetchall()
             else:
-                params = [query, query]
-                if target_path:
-                    if path_filter == "AND c.filepath = ?":
-                        params.append(target_path)
-                    else:
-                        params.append(f"{prefix}%")
-                params.extend([limit, offset])
+                # FTS mode: try Tantivy BM25F first, fall back to DuckDB FTS
+                tantivy = self._ensure_tantivy()
+                if tantivy is not None and tantivy.is_ready:
+                    # Tantivy BM25F candidate retrieval
+                    tantivy_hits = tantivy.search(query, limit=max(limit + offset, 100))
 
-                # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
-                # WHERE clause for filtering and in the SELECT clause to retrieve the score.
-                res = conn.execute(f'''
-                    SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
-                           (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
-                    FROM code_nodes c
-                    WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
-                    {path_filter}
-                    ORDER BY score DESC
-                    LIMIT ? OFFSET ?
-                ''', params).fetchall()
+                    if tantivy_hits:
+                        # Build score map from Tantivy results
+                        score_map = {nid: score for nid, score in tantivy_hits}
+                        hit_ids = list(score_map.keys())
+
+                        # Fetch full node data from DuckDB for matched IDs
+                        placeholders = ",".join(["?"] * len(hit_ids))
+                        filter_clause = ""
+                        filter_params = []
+                        if target_path:
+                            if path_filter == "AND c.filepath = ?":
+                                filter_clause = "AND c.filepath = ?"
+                                filter_params = [target_path]
+                            else:
+                                filter_clause = "AND c.filepath LIKE ?"
+                                filter_params = [f"{prefix}%"]
+
+                        rows = conn.execute(f'''
+                            SELECT c.id, c.name, c.kind, c.filepath,
+                                   c.start_line, c.end_line, c.start_byte, c.end_byte,
+                                   c.pagerank
+                            FROM code_nodes c
+                            WHERE c.id IN ({placeholders})
+                            {filter_clause}
+                        ''', hit_ids + filter_params).fetchall()
+
+                        # Combine Tantivy BM25F score with PageRank
+                        res = []
+                        for row in rows:
+                            tantivy_score = score_map.get(row[0], 0.0)
+                            pr = float(row[8]) if row[8] is not None else 0.0
+                            combined = tantivy_score * (1.0 + pr)
+                            res.append(row[:8] + (combined,))
+
+                        # Sort by combined score and apply limit/offset
+                        res.sort(key=lambda r: r[8], reverse=True)
+                        res = res[offset:offset + limit]
+                    else:
+                        res = []
+                else:
+                    # Fallback: DuckDB FTS
+                    params = [query, query]
+                    if target_path:
+                        if path_filter == "AND c.filepath = ?":
+                            params.append(target_path)
+                        else:
+                            params.append(f"{prefix}%")
+                    params.extend([limit, offset])
+
+                    # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
+                    # WHERE clause for filtering and in the SELECT clause to retrieve the score.
+                    res = conn.execute(f'''
+                        SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                               (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
+                        FROM code_nodes c
+                        WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
+                        {path_filter}
+                        ORDER BY score DESC
+                        LIMIT ? OFFSET ?
+                    ''', params).fetchall()
 
             results = []
             for row in res:
