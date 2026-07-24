@@ -278,10 +278,21 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                     ''', (f"{prefix}%",)).fetchone()
                     total_symbols = sym_res[0] if sym_res else 0
                     
+                    from src.mcp_server.index_db import estimate_index_size_mb
+                    from src.mcp_server.config import settings
+                    size_estimation = estimate_index_size_mb(
+                        total_files=total_files,
+                        total_symbols=total_symbols,
+                        enable_embeddings=settings.enable_embeddings,
+                        embedding_dim=settings.embedding_dim
+                    )
+
                     result["structure"] = {
                         "total_indexed_files": total_files,
                         "total_symbols": total_symbols,
                         "languages": languages,
+                        "projected_db_size_mb": size_estimation["projected_db_size_mb"],
+                        "projected_db_breakdown_mb": size_estimation["breakdown_mb"],
                         "note": "Summary overview."
                     }
                 except Exception:

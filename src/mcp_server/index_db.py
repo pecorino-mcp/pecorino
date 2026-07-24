@@ -1267,3 +1267,35 @@ class CodeSearchIndex:
                 'pagerank': round(float(row[7]), 2) if row[7] is not None else 0.0
             })
         return results
+
+
+def estimate_index_size_mb(
+    total_files: int,
+    total_symbols: int,
+    total_edges: int = 0,
+    enable_embeddings: bool = True,
+    embedding_dim: int = 384
+) -> dict:
+    """Accurately estimate index disk footprint in MB based on codebase structural metrics."""
+    s_fixed = 15.0  # Kùzu buffer pool & schema pages base overhead
+    s_graph = (total_symbols * 0.0008) + (total_edges * 0.00015)
+    s_duckdb = (total_files * 0.0005) + (total_symbols * 0.0004)
+    s_tantivy = (total_files * 0.003) + (total_symbols * 0.0001)
+
+    if enable_embeddings:
+        s_embeddings = (total_symbols * embedding_dim * 4) / 1_048_576.0
+    else:
+        s_embeddings = 0.0
+
+    s_total = s_fixed + s_graph + s_duckdb + s_tantivy + s_embeddings
+    return {
+        "projected_db_size_mb": round(s_total, 2),
+        "breakdown_mb": {
+            "fixed_overhead": round(s_fixed, 2),
+            "graph_db": round(s_graph, 2),
+            "duckdb_fts": round(s_duckdb, 2),
+            "tantivy_bm25": round(s_tantivy, 2),
+            "vector_embeddings": round(s_embeddings, 2)
+        }
+    }
+
