@@ -21,3 +21,13 @@
   (identifier)
   (type_identifier)
 ] @type.leaf
+
+;; Graph extraction — classes, functions, imports, calls
+(class_declaration) @graph.class
+(interface_declaration) @graph.interface
+(type_alias_declaration) @graph.class
+(function_declaration) @graph.function
+(method_definition) @graph.function
+(arrow_function) @graph.function
+(import_statement) @graph.import
+(call_expression) @graph.call

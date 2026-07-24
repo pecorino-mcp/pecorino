@@ -20,3 +20,12 @@
   (identifier)
   (type_identifier)
 ] @type.leaf
+
+;; Graph extraction — classes, functions, imports, calls
+(class_specifier) @graph.class
+(struct_specifier) @graph.class
+(enum_specifier) @graph.class
+(namespace_definition) @graph.class
+(function_definition) @graph.function
+(preproc_include) @graph.import
+(call_expression) @graph.call

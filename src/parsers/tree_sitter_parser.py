@@ -1258,3 +1258,31 @@ def get_raw_tree_sitter_tree(source: str, extension: str) -> Optional[Any]:
 
     parser = tree_sitter.Parser(lang_obj)
     return parser.parse(source.encode('utf-8'))
+
+
+def get_language_obj(extension: str) -> Optional[Any]:
+    """Returns the tree_sitter.Language object for the given file extension.
+
+    Used by the graph extractor to compile .scm queries against the
+    correct grammar.
+    """
+    global _grammar_manager
+
+    language = get_language_from_extension(extension)
+    if language == 'unknown':
+        return None
+
+    with _parser_lock:
+        if _grammar_manager is None:
+            from src.parsers.tsgm import TreeSitterGrammarManager
+            _grammar_manager = TreeSitterGrammarManager()
+        try:
+            return _grammar_manager.get_language(language)
+        except Exception:
+            try:
+                _grammar_manager.install(language)
+                _grammar_manager.build_all()
+                return _grammar_manager.get_language(language)
+            except Exception:
+                return None
+
