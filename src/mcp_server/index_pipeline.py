@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import json
 import logging
@@ -6,15 +7,15 @@ import pathlib
 import shutil
 import sys
 import threading
+import time
 import traceback
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import time
-import contextlib
-from collections import defaultdict
 from typing import Any
 
 from src.mcp_server.naming_analyzer import analyze_name
+
 
 class IndexProfiler:
     def __init__(self):
@@ -48,7 +49,7 @@ if str(workspace_root) not in sys.path:
 from src.core.constants import SUPPORTED_EXTENSIONS, get_language_for_extension
 from src.mcp_server.config import settings
 from src.mcp_server.index_db import CodeSearchIndex, find_repo_root, get_db_path_for_repo
-from src.mcp_server.ramdisk import RamdiskIndex, RamdiskQuotaExceeded
+from src.mcp_server.ramdisk import RamdiskIndex
 
 logger = logging.getLogger(__name__)
 
@@ -1187,9 +1188,9 @@ class CodebaseIndexer:
                             f"Graph has 0 File nodes but DuckDB has {duck_file_count} files — "
                             "graph may be empty or corrupted"
                         )
-                    elif duck_file_count > 0 and abs(duck_file_count - graph_file_count) > duck_file_count * 0.5:
+                    elif duck_file_count > 0 and graph_file_count < duck_file_count:
                         warnings.append(
-                            f"File count mismatch: DuckDB={duck_file_count}, Graph={graph_file_count} — "
+                            f"File count mismatch: Graph ({graph_file_count}) has fewer files than DuckDB ({duck_file_count}) — "
                             "stores may be out of sync"
                         )
 
@@ -1471,7 +1472,7 @@ class CodebaseIndexer:
                                         if i < len(graph_embeddings):
                                             props["embedding"] = graph_embeddings[i]
                                 except Exception as e:
-                                    logger.warning("Failed vector embeddings for chunk graph nodes: %e", e)
+                                    logger.warning("Failed vector embeddings for chunk graph nodes: %s", e)
 
                         # 2. Clear existing indexes for modified files in this chunk
                         with profiler.profile("Bulk Database Ingestion"):
@@ -1691,7 +1692,7 @@ class CodebaseIndexer:
             res["fts_error"] = fts_error
         if integrity_stats.get("warnings"):
             res["integrity_warnings"] = integrity_stats["warnings"]
-            
+
         profiler.print_summary()
         return res
 

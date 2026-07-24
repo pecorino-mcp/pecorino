@@ -3,12 +3,12 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import HTTPException
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src.mcp_server.config import settings
 from src.mcp_server.prometheus_metrics import ACTIVE_SESSIONS
 from src.transports.auth import verify_oauth_token
 
-from starlette.types import ASGIApp, Scope, Receive, Send
 
 class OAuthASGIMiddleware:
     def __init__(self, app: ASGIApp):
@@ -28,7 +28,7 @@ class OAuthASGIMiddleware:
                 headers=e.headers
             )
             return await response(scope, receive, send)
-            
+
         return await self.app(scope, receive, send)
 
 def create_base_app(title: str) -> FastAPI:

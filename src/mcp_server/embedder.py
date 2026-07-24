@@ -37,6 +37,7 @@ class Embedder:
             return
         try:
             import os
+
             import torch
             max_threads = max(1, int((os.cpu_count() or 4) * 0.75))
             torch.set_num_threads(max_threads)

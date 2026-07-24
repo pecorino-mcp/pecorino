@@ -73,6 +73,6 @@ class TreeSitterGrammarManager:
             self.loaded_languages[language] = lang
             return lang
         except ImportError:
-            raise ImportError(f"Parser for {language} is not installed. Please run: pip install {module_name}")
+            raise ImportError(f"Parser for {language} is not installed. Please run: pip install {module_name}") from None
 
 

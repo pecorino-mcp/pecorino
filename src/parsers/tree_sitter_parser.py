@@ -1,4 +1,5 @@
 import os
+import threading
 from collections import defaultdict
 from typing import Any, List, Optional, Set
 
@@ -10,12 +11,12 @@ def get_ast_classes():
         AttributeDef,
         ClassDef,
         ControlFlowDef,
+        EnvVarDef,
         FunctionDef,
         ImportDef,
         InterfaceDef,
         ModuleDef,
         RouteDef,
-        EnvVarDef,
     )
     return ModuleDef, ClassDef, InterfaceDef, FunctionDef, ImportDef, AttributeDef, ControlFlowDef, RouteDef, EnvVarDef
 
@@ -963,7 +964,7 @@ class TreeSitterExtractor:
             else:
                 self.module.classes.append(cls)
 
-        for node, iface in flat_interfaces:
+        for _node, iface in flat_interfaces:
             self.module.interfaces.append(iface)
 
         for node, func in flat_functions:
@@ -999,7 +1000,7 @@ class TreeSitterExtractor:
             lmd = self._parse_lambda(node, parent_name)
 
             # Replace the node in containers with the actual LambdaDef object so nested things can find it
-            for i, (cs, ce, co, ct) in enumerate(containers):
+            for i, (cs, ce, _co, ct) in enumerate(containers):
                 if ct == 'lambda_node' and cs == node.start_byte and ce == node.end_byte:
                     containers[i] = (cs, ce, lmd, 'lambda')
                     break
@@ -1161,8 +1162,6 @@ class TreeSitterExtractor:
 _grammar_manager = None
 _parsers: dict = {}
 
-
-import threading
 
 _parser_lock = threading.Lock()
 

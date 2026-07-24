@@ -1,9 +1,8 @@
 import logging
 import re
-from typing import Optional, Any
-from mcp.server import ServerRequestContext
+from typing import Any, Optional
 
-from src.core.errors import AnalysisError
+from mcp.server import ServerRequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +14,7 @@ async def do_query_graph(
     ctx: Optional[ServerRequestContext] = None
 ) -> dict:
     """Execute an openCypher query against the Kùzu graph."""
-    
+
     # Basic Read-Only Check
     # This checks for mutating openCypher keywords to prevent accidental writes.
     mutating_keywords = ["CREATE", "MERGE", "SET", "DELETE", "REMOVE", "DROP"]
@@ -24,13 +23,13 @@ async def do_query_graph(
         if kw in upper_query:
             if re.search(rf"\b{kw}\b", upper_query):
                 return {
-                    "status": "error", 
+                    "status": "error",
                     "message": f"Mutation operations are not allowed in query_graph. Keyword {kw} detected."
                 }
 
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     from src.mcp_server.middleware.security import safe_path
-    
+
     path = safe_path(target, allow_external)
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)

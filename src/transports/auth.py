@@ -32,7 +32,7 @@ def verify_oauth_token(request: Request) -> dict:
             status_code=401,
             detail="Token expired",
             headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Token expired"'}
-        )
+        ) from None
     except jwt.InvalidTokenError as e:
         sys.stderr.write(f"[AUTH ERROR] Invalid token: {str(e)}\n")
         sys.stderr.flush()
@@ -40,7 +40,7 @@ def verify_oauth_token(request: Request) -> dict:
             status_code=401,
             detail="Invalid token",
             headers={"www-authenticate": 'Bearer error="invalid_token", error_description="Invalid token"'}
-        )
+        ) from e
 
     if payload.get("iss") != settings.oauth_issuer:
         sys.stderr.write("[AUTH ERROR] Issuer mismatch\n")

@@ -6,6 +6,7 @@ All functionality is organized into focused modules for better maintainability.
 """
 import sys
 from pathlib import Path
+
 workspace_root = Path(__file__).resolve().parent.parent
 utils_path = workspace_root / "modules" / "pecorino-utils"
 if str(utils_path) not in sys.path:

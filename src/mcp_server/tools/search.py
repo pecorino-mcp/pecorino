@@ -2,14 +2,14 @@ import asyncio
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from src.core.errors import AnalysisError, IndexNotFoundError, SecurityValidationError
+from src.mcp_server.intent_router import IntentRouter
 from src.mcp_server.middleware.caching import _get_cached_api, clear_index_cache
 from src.mcp_server.middleware.security import check_suspicious, safe_path
 from src.mcp_server.middleware.sync import _auto_sync_stale
 from src.mcp_server.prometheus_metrics import FTS_SCAN_DURATION
-from src.mcp_server.intent_router import IntentRouter
 from src.mcp_server.telemetry import log_search_event
 
 logger = logging.getLogger(__name__)
@@ -207,7 +207,7 @@ async def do_search(
     original_query = query
     original_mode = mode
     start_time = time.time()
-    
+
     if mode == "auto" and query:
         router = IntentRouter()
         mode, query, intent_override = router.route(query)
@@ -248,12 +248,12 @@ async def do_search(
 
     # ── Post-processing: group results by directory ───────────
     final_res = _group_results_by_directory(result, _repo_root)
-    
+
     # ── Telemetry Logging ─────────────────────────────────────
     try:
         latency_ms = (time.time() - start_time) * 1000
         result_count = sum(len(g.get("files", [])) for g in final_res.get("groups", []))
-        
+
         # We fire the async telemetry event without awaiting to avoid blocking search response.
         # However, asyncio.create_task is safer to fire-and-forget
         asyncio.create_task(log_search_event(
@@ -266,7 +266,7 @@ async def do_search(
         ))
     except Exception as e:
         logger.warning(f"Failed to log telemetry: {e}")
-        
+
     return final_res
 
 
@@ -339,13 +339,13 @@ async def _do_fts(
                             end_idx = min(len(lines), i + 2)
                             n["matched_snippet"] = "\n".join(lines[start_idx:end_idx]).strip()
                             break
-                            
+
         # Apply context assembly if requested
         if include_context or (auto_expanded and len(nodes) <= 3):
             from src.mcp_server.context_assembler import assemble_context
             graph_api = _get_cached_api(repo_root, db_path, "graph")
             nodes = [assemble_context(n, graph_api.graph, repo_root) for n in nodes]
-            
+
         result = {"query": query, "results": nodes, "search_status": "ok"}
         if auto_expanded:
             result["auto_expanded"] = True
@@ -387,12 +387,13 @@ async def _do_fts(
                 index = _get_cached_api(repo_root, db_path, "index")
 
     _fts_start = time.time()
-    
+
     boost_ids = None
     if mode == "hybrid" and query:
         try:
             import re
-            from src.mcp_server.naming_analyzer import canonicalize_verb, canonicalize_entity
+
+            from src.mcp_server.naming_analyzer import canonicalize_entity, canonicalize_verb
             tokens = [t.lower() for t in re.findall(r'\b[a-zA-Z]+\b', query)]
             cv = canonicalize_verb(tokens)
             ce = canonicalize_entity(tokens)
@@ -442,7 +443,7 @@ async def _do_fts(
         from src.mcp_server.context_assembler import assemble_context
         graph_api = _get_cached_api(repo_root, db_path, "graph")
         top_k = 3 if not include_context else len(results)
-        
+
         enriched_results = []
         for i, r in enumerate(results):
             if i < top_k:
@@ -912,36 +913,36 @@ async def _do_community(
 ) -> dict:
     if not query:
         raise SecurityValidationError("Query is required for community mode")
-        
+
     path = safe_path(target, allow_external)
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
 
     index = _get_cached_api(repo_root, db_path, "index")
-    
+
     conn = index._conn
     def _fetch():
         res = conn.execute(
-            "SELECT community_id, name FROM code_nodes WHERE name LIKE ? OR name = ? ORDER BY pagerank DESC LIMIT 1", 
+            "SELECT community_id, name FROM code_nodes WHERE name LIKE ? OR name = ? ORDER BY pagerank DESC LIMIT 1",
             (f"%{query}%", query)
         )
         return res.fetchone()
-        
+
     row = await asyncio.to_thread(_fetch)
-    
+
     if not row or row[0] is None:
         return {"status": "ok", "results": [], "message": f"No community found for '{query}'"}
-        
+
     community_id = row[0]
     matched_name = row[1]
-    
+
     nodes = await asyncio.to_thread(index.get_community_nodes, community_id)
-    
+
     sliced_nodes = nodes[offset:offset+limit]
-    
+
     return {
-        "status": "ok", 
+        "status": "ok",
         "community_id": community_id,
         "matched_symbol": matched_name,
         "total_in_community": len(nodes),
@@ -983,10 +984,10 @@ async def _do_trace(
     api = _get_cached_api(repo_root, db_path, "graph")
 
     result = await asyncio.to_thread(api.trace_calls, query, "both", max_depth)
-    
+
     callers = result.get("callers", [])
     callees = result.get("callees", [])
-    
+
     summary_parts = []
     if callees:
         fuzzy = sum(1 for c in callees if c.get("edge_type") == "LIKELY_CALLS")
@@ -996,7 +997,7 @@ async def _do_trace(
         fuzzy = sum(1 for c in callers if c.get("edge_type") == "LIKELY_CALLS")
         data = sum(1 for c in callers if c.get("edge_type") == "DATA_FLOWS_TO")
         summary_parts.append(f"{len(callers)} callers ({fuzzy} fuzzy, {data} data-flow)")
-        
+
     if summary_parts:
         result["summary"] = " | ".join(summary_parts)
     else:
@@ -1041,7 +1042,7 @@ async def _do_snippet(
             """,
             [symbol, symbol]
         ).fetchall()
-        
+
         if not res:
             res = conn.execute(
                 """
@@ -1072,7 +1073,7 @@ async def _do_snippet(
         return results
 
     results = await asyncio.to_thread(_fetch_snippet)
-    
+
     if not results:
         return {"status": "not_found", "message": f"Symbol '{symbol}' not found in index."}
 
@@ -1096,7 +1097,7 @@ async def _do_explain(
         raise SecurityValidationError("'query' (node id) is required for explain mode")
 
     path = safe_path(target, allow_external)
-    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo, CodeSearchIndex
+    from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
 
