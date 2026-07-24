@@ -430,26 +430,30 @@ async def handle_call_tool(
 
         async def _detect_directory(t: Any) -> str:
             if t is None or (isinstance(t, str) and (not t.strip() or t.strip() == ".")):
+                from src.mcp_server.index_db import find_repo_root
+
+                if settings.workspace_root and (settings.workspace_root / ".git").is_dir():
+                    return str(settings.workspace_root.resolve())
+
                 try:
                     roots = await helper.require_roots()
                     if roots and isinstance(roots, list) and len(roots) > 0:
-                        first_root = roots[0]
-                        uri = getattr(first_root, "uri", None)
-                        if uri is None and isinstance(first_root, dict):
-                            uri = first_root.get("uri")
-                        if uri and uri.startswith("file://"):
-                            from urllib.parse import unquote
-                            path = unquote(uri[7:])
-                            return path
+                        for first_root in roots:
+                            uri = getattr(first_root, "uri", None)
+                            if uri is None and isinstance(first_root, dict):
+                                uri = first_root.get("uri")
+                            if uri and uri.startswith("file://"):
+                                from urllib.parse import unquote
+                                path = unquote(uri[7:])
+                                if os.path.exists(path):
+                                    return path
                 except Exception as e:
                     if type(e).__name__ == "NeedsInputError":
                         raise e
 
-                from src.mcp_server.index_db import find_repo_root
-                
-                if (settings.workspace_root / ".git").is_dir():
-                    return str(settings.workspace_root)
-                    
+                if settings.workspace_root and settings.workspace_root.exists():
+                    return str(settings.workspace_root.resolve())
+
                 cwd = os.getcwd()
                 return find_repo_root(cwd)
             return str(t) if not isinstance(t, str) else t
