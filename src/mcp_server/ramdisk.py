@@ -78,8 +78,11 @@ class RamdiskIndex:
         # Copy existing database and graph files from SSD to RAM disk if they exist
         if os.path.exists(self.ssd_db_path):
             shutil.copy2(self.ssd_db_path, self.db_path)
-        if os.path.exists(self.ssd_gorgonzola_path) and os.path.isdir(self.ssd_gorgonzola_path):
-            shutil.copytree(self.ssd_gorgonzola_path, self.gorgonzola_path)
+        if os.path.exists(self.ssd_gorgonzola_path):
+            if os.path.isfile(self.ssd_gorgonzola_path):
+                shutil.copy2(self.ssd_gorgonzola_path, self.gorgonzola_path)
+            elif os.path.isdir(self.ssd_gorgonzola_path):
+                shutil.copytree(self.ssd_gorgonzola_path, self.gorgonzola_path)
 
         logger.info(f"[ramdisk] Building index in RAM: {self.ram_dir} "
               f"(quota {self.max_bytes / 1024 / 1024:.0f} MB)")

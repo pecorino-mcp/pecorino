@@ -57,14 +57,21 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
 
     try:
         if path.is_dir():
-            # Spawn index_pipeline.py in a subprocess using same python executable
-            python_bin = sys.executable or "python"
+            venv_python = workspace_root / ".venv" / "bin" / "python"
+            if venv_python.exists():
+                python_bin = str(venv_python)
+            else:
+                python_bin = sys.executable or "python"
+
+            env = dict(os.environ)
+            env["PECORINO_USE_RAMDISK"] = "false"
 
             proc = await asyncio.create_subprocess_exec(
-                python_bin, "-m", "src.mcp_server.index_pipeline", repo_root, str(path),
+                python_bin, "-u", "-m", "src.mcp_server.index_pipeline", repo_root, str(path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(workspace_root)
+                cwd=str(workspace_root),
+                env=env
             )
 
         final_res = {}
@@ -129,7 +136,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
             raise AnalysisError(f"Indexing timed out after {INDEX_TIMEOUT_S}s") from None
 
         if proc.returncode != 0:
-            err_msg = "\n".join(stderr_logs[-10:])
+            err_msg = "\n".join(stderr_logs[-50:])
             raise AnalysisError(f"Index subprocess failed with exit code {proc.returncode}. Stderr: {err_msg}")
 
         final_res["target"] = path.as_posix()
