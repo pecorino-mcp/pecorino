@@ -12,30 +12,6 @@ from src.mcp_server.index_db import CodeSearchIndex, get_db_path_for_repo
 from src.mcp_server.index_pipeline import CodebaseIndexer
 
 
-@pytest.fixture
-def temp_repo(tmp_path):
-    """Create a minimal git repo with a Python file for indexing."""
-    repo = tmp_path / "test_repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()  # Fake git root marker
-
-    py_file = repo / "example.py"
-    py_file.write_text(
-        'class Foo:\n'
-        '    def bar(self):\n'
-        '        return 42\n'
-        '\n'
-        'def baz():\n'
-        '    return Foo().bar()\n',
-        encoding="utf-8",
-    )
-    return repo
-
-
-@pytest.fixture
-def db_path(temp_repo):
-    return get_db_path_for_repo(str(temp_repo))
-
 
 class TestCodebaseIndexerLifecycle:
     """Tests for CodebaseIndexer connection management."""

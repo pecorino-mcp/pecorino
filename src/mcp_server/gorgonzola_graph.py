@@ -190,7 +190,7 @@ class GorgonzolaGraph:
 
     def _rewrite_cypher_query(self, query: str) -> str:
         import re
-        target_nodes = ["Project", "Package", "Folder", "File", "Module", "Class", "Function", "Method", "Interface", "Enum", "Type", "Route", "Resource", "Symbol"]
+        target_nodes = ["Project", "Package", "Folder", "Module", "Class", "Function", "Method", "Interface", "Enum", "Type", "Route", "Resource", "Symbol"]
         pattern = r'(\([a-zA-Z0-9_]*)\s*:\s*(' + '|'.join(target_nodes) + r')\b(\s*\{?)'
         def repl(m):
             var_part = m.group(1)

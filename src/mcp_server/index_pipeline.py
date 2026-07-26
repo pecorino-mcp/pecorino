@@ -1188,9 +1188,9 @@ class CodebaseIndexer:
                             f"Graph has 0 File nodes but DuckDB has {duck_file_count} files — "
                             "graph may be empty or corrupted"
                         )
-                    elif duck_file_count > 0 and abs(duck_file_count - graph_file_count) > duck_file_count * 0.5:
+                    elif duck_file_count > 0 and graph_file_count < duck_file_count:
                         warnings.append(
-                            f"File count mismatch: DuckDB={duck_file_count}, Graph={graph_file_count} — "
+                            f"File count mismatch: Graph ({graph_file_count}) has fewer files than DuckDB ({duck_file_count}) — "
                             "stores may be out of sync"
                         )
 
