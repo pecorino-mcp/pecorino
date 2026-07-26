@@ -27,7 +27,7 @@ _RELATIONSHIP_SCHEMA = [
     "CREATE REL TABLE DEFINES (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE EXTENDS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE IMPLEMENTS (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE FILE_CHANGES_WITH (FROM File TO File, weight INT64)",
+    "CREATE REL TABLE FILE_CHANGES_WITH (FROM File TO File, weight DOUBLE)",
     "CREATE REL TABLE RAISES (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE TESTS (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE HTTP_CALLS (FROM CodeNode TO CodeNode)",
@@ -111,7 +111,7 @@ class GorgonzolaGraph:
             logger.warning(f"Failed to load Leiden extension: {e}")
 
     def __enter__(self):
-        self._db_ctx = self.gorgonzola.Database(self.gorgonzola_db_path)
+        self._db_ctx = self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024)
         self._db = self._db_ctx.__enter__()
         self._conn_ctx = self.gorgonzola.Connection(self._db)
         self._conn = self._conn_ctx.__enter__()
@@ -168,6 +168,22 @@ class GorgonzolaGraph:
                 writer.writerows(rows)
             r = conn.execute(copy_query)
             r.close()
+        except Exception as e:
+            if "duplicated primary key" in str(e):
+                logger.warning("[CSV COPY FAILED] Duplicate primary key detected. Falling back to row-by-row INSERT.")
+                table = copy_query.split(" ")[1]
+                for row in rows:
+                    if not row:
+                        continue
+                    nid = row[0]
+                    try:
+                        # Simple INSERT fallback; if it fails, it's already there
+                        conn.execute(f"CREATE (n:{table} {{id: $id}})", {"id": nid})
+                    except Exception:
+                        pass
+            else:
+                logger.error("[CSV COPY FAILED] Query: %s, Error: %s", copy_query, e)
+                raise e
         finally:
             if os.path.exists(csv_path):
                 os.remove(csv_path)
@@ -199,7 +215,7 @@ class GorgonzolaGraph:
         if self._in_context:
             return self._query_conn(query, parameters, self._conn)
         else:
-            with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
+            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     return self._query_conn(query, parameters, conn)
@@ -286,7 +302,7 @@ class GorgonzolaGraph:
         if self._in_context:
             return self._insert_nodes_bulk_conn(nodes, self._conn)
         else:
-            with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
+            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     return self._insert_nodes_bulk_conn(nodes, conn)
@@ -314,13 +330,16 @@ class GorgonzolaGraph:
 
             # Query existing IDs to avoid duplicate primary key errors during incremental indexing
             ids_to_check = []
-            for node_id, _ in group:
+            normalized_group = []
+            for node_id, props in group:
+                norm_id = str(node_id).replace('\n', ' ').replace('\r', '')
+                normalized_group.append((norm_id, props))
                 with self._label_cache_lock:
-                    if node_id not in self._label_cache:
-                        ids_to_check.append(node_id)
+                    if norm_id not in self._label_cache:
+                        ids_to_check.append(norm_id)
 
             existing_ids = set()
-            chunk_size = 500
+            chunk_size = 1
             for i in range(0, len(ids_to_check), chunk_size):
                 chunk = ids_to_check[i:i+chunk_size]
                 try:
@@ -330,10 +349,15 @@ class GorgonzolaGraph:
                     res.close()
                 except Exception as e:
                     logger.warning(f"Failed to check existing ids for {label}: {e}")
+                    raise e
 
             # Filter group to only new nodes (not in DB, not in cache)
             filtered_group = []
-            for nid, props in group:
+            seen_nids_in_batch = set()
+            for nid, props in normalized_group:
+                if nid in seen_nids_in_batch:
+                    continue
+                seen_nids_in_batch.add(nid)
                 with self._label_cache_lock:
                     if nid in self._label_cache:
                         continue
@@ -346,7 +370,11 @@ class GorgonzolaGraph:
 
             csv_path = os.path.join(csv_dir, f"_bulk_nodes_{label}.csv")
             rows = []
+            final_seen = set()
             for node_id, properties in filtered_group:
+                if node_id in final_seen:
+                    raise RuntimeError(f"BUG! Duplicate {node_id} found in filtered_group for {label}")
+                final_seen.add(node_id)
                 row = []
                 for col in columns:
                     if col == "id":
@@ -355,17 +383,24 @@ class GorgonzolaGraph:
                         val = properties[col]
                         if col in _NUMERIC_COLUMNS:
                             row.append(int(val) if col != "mtime" else float(val))
+                        elif col == "embedding":
+                            emb = val if (isinstance(val, list) and len(val) == 384) else [0.0] * 384
+                            row.append("[" + ",".join(str(v) for v in emb) + "]")
                         elif isinstance(val, list):
-                            # Gorgonzola expects [a,b,c] for array in CSV
                             row.append("[" + ",".join(str(v).replace('\n', ' ').replace('\r', '') for v in val) + "]")
                         else:
                             row.append(str(val).replace('\n', ' ').replace('\r', ''))
                     else:
-                        # Default: 0 for numeric columns, empty string for strings
                         if col in _NUMERIC_COLUMNS:
                             row.append(0)
+                        elif col == "embedding":
+                            row.append("[" + ",".join(["0.0"] * 384) + "]")
                         else:
                             row.append("")
+                
+                # Double check the row's actual ID string
+                if row[0] in final_seen and row[0] != node_id:
+                    raise RuntimeError(f"BUG! ID mutation caused duplicate: {row[0]}")
                 rows.append(row)
 
             copy_query = f"COPY {label} FROM '{csv_path}' (HEADER=false, PARALLEL=false, ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
@@ -390,7 +425,7 @@ class GorgonzolaGraph:
         if self._in_context:
             self._insert_edges_bulk_conn(edges, self._conn, label_map)
         else:
-            with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
+            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     self._insert_edges_bulk_conn(edges, conn, label_map)
@@ -406,7 +441,7 @@ class GorgonzolaGraph:
                 r = self._conn.execute(query)
                 r.close()
             else:
-                with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
+                with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
                     with self.gorgonzola.Connection(db) as conn_ctx:
                         r = conn_ctx.execute(query)
                         r.close()
@@ -480,7 +515,7 @@ class GorgonzolaGraph:
         if self._in_context:
             self._query_batch_conn(queries, parameters, self._conn)
         else:
-            with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
+            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     self._query_batch_conn(queries, parameters, conn)
@@ -496,7 +531,7 @@ class GorgonzolaGraph:
     def pagerank(self) -> list:
         try:
             results = []
-            with self.gorgonzola.Database(self.gorgonzola_db_path) as db:
+            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
 
