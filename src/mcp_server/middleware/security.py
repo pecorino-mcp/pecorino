@@ -92,7 +92,12 @@ def safe_path(p: str, allow_external: bool = False) -> Path:
     """Resolve and validate a path, ensuring it's safe."""
     if not p:
         p = str(settings.workspace_root)
-    path = Path(p).expanduser().resolve()
+    
+    path_obj = Path(p).expanduser()
+    if not path_obj.is_absolute():
+        path = (settings.workspace_root / path_obj).resolve()
+    else:
+        path = path_obj.resolve()
 
     if not path.exists():
         raise TargetNotFoundError(f"Not found: {path}")
