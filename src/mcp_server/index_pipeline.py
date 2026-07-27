@@ -1319,7 +1319,8 @@ class CodebaseIndexer:
             self.graph = self.search_index.graph
 
             tracked_files = self.search_index.get_all_tracked_files()
-            stale_files = [tf for tf in tracked_files if tf not in current_files_set]
+            target_prefix = str(path) + os.sep
+            stale_files = [tf for tf in tracked_files if (tf == str(path) or tf.startswith(target_prefix)) and tf not in current_files_set]
             stale_count = len(stale_files)
             if stale_files:
                 if progress_callback:
@@ -1612,7 +1613,8 @@ class CodebaseIndexer:
         self.graph = self.search_index.graph
 
         tracked_files = self.search_index.get_all_tracked_files()
-        stale_files = [tf for tf in tracked_files if tf not in current_files_set]
+        target_prefix = str(path) + os.sep
+        stale_files = [tf for tf in tracked_files if (tf == str(path) or tf.startswith(target_prefix)) and tf not in current_files_set]
         stale_count = len(stale_files)
         if stale_files:
             if progress_callback:
