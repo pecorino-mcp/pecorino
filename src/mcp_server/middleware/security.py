@@ -91,7 +91,7 @@ def is_safe_path(p: str, allow_external: bool = False) -> bool:
 def safe_path(p: str, allow_external: bool = False) -> Path:
     """Resolve and validate a path, ensuring it's safe."""
     if not p:
-        p = "."
+        p = str(settings.workspace_root)
     path = Path(p).expanduser().resolve()
 
     if not path.exists():
