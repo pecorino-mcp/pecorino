@@ -44,9 +44,13 @@ class CrossEncoderPipeline:
                 model_path = os.path.join(self.model_id, "onnx", "model.onnx")
                 tokenizer_path = os.path.join(self.model_id, "tokenizer.json")
             else:
-                # Assuming the model has an 'onnx/model.onnx' just like Xenova exports
-                model_path = hf_hub_download(repo_id=self.model_id, filename="onnx/model.onnx", token=hf_token)
-                tokenizer_path = hf_hub_download(repo_id=self.model_id, filename="tokenizer.json", token=hf_token)
+                try:
+                    # Assuming the model has an 'onnx/model.onnx' just like Xenova exports
+                    model_path = hf_hub_download(repo_id=self.model_id, filename="onnx/model.onnx", token=hf_token, local_files_only=True)
+                    tokenizer_path = hf_hub_download(repo_id=self.model_id, filename="tokenizer.json", token=hf_token, local_files_only=True)
+                except Exception:
+                    model_path = hf_hub_download(repo_id=self.model_id, filename="onnx/model.onnx", token=hf_token)
+                    tokenizer_path = hf_hub_download(repo_id=self.model_id, filename="tokenizer.json", token=hf_token)
 
             self.tokenizer = Tokenizer.from_file(tokenizer_path)
             # Enable truncation to 512 tokens
