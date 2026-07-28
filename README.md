@@ -22,8 +22,8 @@ Pecorino allows Large Language Models (LLMs) and dev tools (such as Claude Deskt
 ### 1. System Prerequisites
 Before setting up the environment, ensure you have the required build tools installed (needed to compile the native `gorgonzola` database module):
 
-* **Fedora/RHEL**: `sudo dnf install cmake ninja-build gcc gcc-c++ ccache`
-* **Ubuntu/Debian**: `sudo apt install cmake ninja-build build-essential ccache`
+* **Fedora/RHEL**: `sudo dnf install cmake ninja-build gcc gcc-c++ ccache python3-devel`
+* **Ubuntu/Debian**: `sudo apt install cmake ninja-build build-essential ccache python3-dev`
 * **macOS**: `brew install cmake ninja ccache`
 
 ### 2. Installation
