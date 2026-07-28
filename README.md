@@ -19,7 +19,14 @@ Pecorino allows Large Language Models (LLMs) and dev tools (such as Claude Deskt
 
 ##  Quick Start
 
-### 1. Installation
+### 1. System Prerequisites
+Before setting up the environment, ensure you have the required build tools installed (needed to compile the native `gorgonzola` database module):
+
+* **Fedora/RHEL**: `sudo dnf install cmake ninja-build gcc gcc-c++ ccache python3-devel`
+* **Ubuntu/Debian**: `sudo apt install cmake ninja-build build-essential ccache python3-dev`
+* **macOS**: `brew install cmake ninja ccache`
+
+### 2. Installation
 Clone the repository recursively (to fetch the MCP SDK submodule) and set up the environment:
 
 ```bash
@@ -27,16 +34,15 @@ Clone the repository recursively (to fetch the MCP SDK submodule) and set up the
 git clone --recursive https://github.com/pecorino-mcp/pecorino.git
 cd pecorino
 
-# Create and activate virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+# Run the environment setup script
+# This will initialize the .venv, install dependencies, and compile the gorgonzola module
+./scripts/setup_env.sh
 
-# Install dependencies and package in editable mode
-pip install -r requirements.txt
-pip install -e .
+# Activate the virtual environment
+source .venv/bin/activate
 ```
 
-### 2. Configure Claude Desktop
+### 3. Configure Claude Desktop
 Add Pecorino to your `claude_desktop_config.json`:
 
 * **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
