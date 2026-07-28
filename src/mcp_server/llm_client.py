@@ -71,20 +71,27 @@ Rules:
     try:
         import litellm
         import os
+        import sys
         logger.info("Using litellm fallback for Cypher generation...")
         
-        # Default to a generic local ollama model or get from environment
         fallback_model = os.getenv("PECORINO_LLM_MODEL", "ollama/llama3")
         
-        response = litellm.completion(
-            model=fallback_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=256
-        )
-        
+        # Suppress litellm stdout print statements which corrupt MCP stream
+        litellm.suppress_debug_info = True
+        old_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            response = litellm.completion(
+                model=fallback_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=256
+            )
+        finally:
+            sys.stdout = old_stdout
+            
         cypher = response.choices[0].message.content.strip()
         # Clean up markdown
         if cypher.startswith("```cypher"):
