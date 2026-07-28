@@ -37,15 +37,10 @@ pip install -v -r requirements.txt
 
 echo "4. Compiling gorgonzola Python package using cmake (forced lite configuration)..."
 # We retain the build directory to leverage Ninja and ccache for fast incremental builds
-cmake -B modules/gorgonzola/build/release -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_PCH=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON -DGORGONZOLA_LITE_ENABLE_GDS=ON -DGORGONZOLA_LITE_ENABLE_EXTENSIONS=ON modules/gorgonzola
-cmake --build modules/gorgonzola/build/release --config Release
+cmake -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_PCH=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON -DGORGONZOLA_LITE_ENABLE_GDS=ON -DGORGONZOLA_LITE_ENABLE_EXTENSIONS=ON modules/gorgonzola
+cmake --build build --config Release
 
-# Symlink compile_commands.json for IDE support
-if [ -f "modules/gorgonzola/build/release/compile_commands.json" ]; then
-    ln -sf "$(pwd)/modules/gorgonzola/build/release/compile_commands.json" modules/gorgonzola/modules/api-langs/python_api/compile_commands.json
-    ln -sf "$(pwd)/modules/gorgonzola/build/release/compile_commands.json" compile_commands.json
-fi
-COMPILED_SO=$(find modules/gorgonzola/modules/api-langs/python_api -name "_gorgonzola*.so" -print -quit)
+COMPILED_SO=$(find build -name "_gorgonzola*.so" -print -quit)
 if [ -z "$COMPILED_SO" ]; then
     echo "Error: Failed to find the compiled gorgonzola shared object (.so)."
     exit 1
