@@ -15,6 +15,27 @@ async def do_query_graph(
 ) -> dict:
     """Execute an openCypher query against the Kùzu graph."""
 
+    # Natural Language Detection and Text-to-Cypher translation
+    upper_query = query.upper()
+    is_cypher = any(kw in upper_query for kw in ["MATCH ", "RETURN ", "WITH ", "CALL "])
+    
+    if not is_cypher:
+        from src.mcp_server.llm_client import generate_cypher
+        from src.mcp_server.context_helper import PecorinoContext
+        schema = """
+- Node CodeNode (id STRING, kind STRING, name STRING, qualified_name STRING, file STRING, line INT64, docstring STRING)
+- Node File (id STRING, name STRING, path STRING)
+- Rel CALLS (FROM CodeNode TO CodeNode)
+- Rel IN_FILE (FROM CodeNode TO File)
+        """
+        generated = await generate_cypher(query, schema, PecorinoContext(ctx))
+        if generated:
+            logger.info(f"Generated Cypher from NL: {generated}")
+            query = generated
+            upper_query = query.upper()
+        else:
+            return {"status": "error", "message": "Failed to generate Cypher query from natural language."}
+
     # Basic Read-Only Check
     # This checks for mutating openCypher keywords to prevent accidental writes.
     mutating_keywords = ["CREATE", "MERGE", "SET", "DELETE", "REMOVE", "DROP"]

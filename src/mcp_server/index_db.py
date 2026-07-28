@@ -1,4 +1,4 @@
-print("Running patched clear_files_bulk!")
+
 import functools
 import hashlib
 import logging
