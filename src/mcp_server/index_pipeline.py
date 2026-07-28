@@ -1681,6 +1681,15 @@ class CodebaseIndexer:
         # Post-indexing integrity verification
         integrity_stats = self._verify_index_integrity()
 
+        # Force Kuzu to checkpoint WAL to disk immediately, avoiding slow startups for subsequent query clients
+        if getattr(self, "graph", None):
+            try:
+                with self.graph:
+                    self.graph._conn.execute("CHECKPOINT;")
+                    logger.info("Gorgonzola WAL checkpointed successfully.")
+            except Exception as e:
+                logger.warning("Failed to checkpoint Gorgonzola WAL: %s", e)
+
         self.search_index.close()
 
         res = {
