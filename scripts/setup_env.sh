@@ -40,7 +40,7 @@ echo "4. Compiling gorgonzola Python package using cmake (forced lite configurat
 cmake -B build -G Ninja -DCMAKE_UNITY_BUILD=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_PCH=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON -DGORGONZOLA_LITE_ENABLE_GDS=ON -DGORGONZOLA_LITE_ENABLE_EXTENSIONS=ON modules/gorgonzola
 cmake --build build --config Release
 
-COMPILED_SO=$(ls modules/gorgonzola/modules/api-langs/python_api/build/gorgonzola/_gorgonzola*.so | head -n 1)
+COMPILED_SO=$(find build -name "_gorgonzola*.so" -print -quit)
 if [ -z "$COMPILED_SO" ]; then
     echo "Error: Failed to find the compiled gorgonzola shared object (.so)."
     exit 1
