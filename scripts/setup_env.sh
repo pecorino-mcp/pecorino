@@ -37,7 +37,7 @@ pip install -v -r requirements.txt
 
 echo "4. Compiling gorgonzola Python package using cmake (forced lite configuration)..."
 # We retain the build directory to leverage Ninja and ccache for fast incremental builds
-cmake -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_PCH=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON -DGORGONZOLA_LITE_ENABLE_GDS=ON -DGORGONZOLA_LITE_ENABLE_EXTENSIONS=ON modules/gorgonzola
+cmake -B build -G Ninja -DCMAKE_UNITY_BUILD=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_PCH=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE -DGORGONZOLA_LITE=ON -DGORGONZOLA_LITE_ENABLE_GDS=ON -DGORGONZOLA_LITE_ENABLE_EXTENSIONS=ON modules/gorgonzola
 cmake --build build --config Release
 
 COMPILED_SO=$(find build -name "_gorgonzola*.so" -print -quit)
