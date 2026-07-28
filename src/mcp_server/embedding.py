@@ -42,8 +42,12 @@ class EmbeddingPipeline:
                     model_path = os.path.join(self.model_id, filename)
                     tokenizer_path = os.path.join(self.model_id, "tokenizer.json")
                 else:
-                    model_path = hf_hub_download(repo_id=self.model_id, filename=filename, token=hf_token)
-                    tokenizer_path = hf_hub_download(repo_id=self.model_id, filename="tokenizer.json", token=hf_token)
+                    try:
+                        model_path = hf_hub_download(repo_id=self.model_id, filename=filename, token=hf_token, local_files_only=True)
+                        tokenizer_path = hf_hub_download(repo_id=self.model_id, filename="tokenizer.json", token=hf_token, local_files_only=True)
+                    except Exception:
+                        model_path = hf_hub_download(repo_id=self.model_id, filename=filename, token=hf_token)
+                        tokenizer_path = hf_hub_download(repo_id=self.model_id, filename="tokenizer.json", token=hf_token)
             except Exception as download_err:
                 err_msg = str(download_err)
                 if "401" in err_msg or "403" in err_msg or "gated" in err_msg.lower() or "unauthorized" in err_msg.lower():
