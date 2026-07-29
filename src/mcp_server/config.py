@@ -62,17 +62,7 @@ class Config:
             if r.strip():
                 self.allowed_external_roots.add(Path(r.strip()).expanduser().resolve())
 
-        # Tantivy BM25F search engine
-        self.enable_tantivy = os.getenv(
-            "PECORINO_ENABLE_TANTIVY", "true"
-        ).lower() in ("true", "1", "yes")
 
-        # Per-field boost weights for Tantivy BM25F (JSON dict, e.g. '{"name":5,"kind":4}')
-        import json
-        default_boosts = '{"name": 5.0, "kind": 4.0, "summary": 3.0, "filepath": 2.0, "body": 1.0}'
-        self.tantivy_field_boosts: dict[str, float] = json.loads(
-            os.getenv("PECORINO_TANTIVY_FIELD_BOOSTS", default_boosts)
-        )
 
         # Cross-encoder reranker
         self.enable_cross_encoder = os.getenv(

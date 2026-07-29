@@ -2,25 +2,29 @@
 	path = modules/python-sdk
 	url = https://github.com/modelcontextprotocol/python-sdk
 	branch = main
-	ignore = dirty
+	ignore = all
 [submodule "tree-sitter"]
 	path = modules/tree-sitter
 	url = https://github.com/tree-sitter/tree-sitter
 	branch = master
-	ignore = dirty
+	ignore = all
 [submodule "modules/gorgonzola"]
 	path = modules/gorgonzola
 	url = https://github.com/gorgonzola-graph-db/gorgonzola
-	ignore = dirty
+	ignore = all
 [submodule "modules/py-tree-sitter"]
 	path = modules/py-tree-sitter
 	url = https://github.com/tree-sitter/py-tree-sitter
-	ignore = dirty
+	ignore = all
 [submodule "modules/pecorino-utils"]
 	path = modules/pecorino-utils
 	url = https://github.com/pecorino-mcp/pecorino-utils.git
-	ignore = dirty
+	ignore = all
 [submodule "modules/web-client"]
 	path = modules/web-client
 	url = https://github.com/gorgonzola-graph-db/gorgonzola-web-client.git
-	ignore = dirty
+	ignore = all
+[submodule "modules/c_fts_uring"]
+	path = modules/c_fts_uring
+	url = https://github.com/gorgonzola-graph-db/c_fts_uring.git
+	ignore = all
