@@ -24,3 +24,6 @@
 	path = modules/web-client
 	url = https://github.com/gorgonzola-graph-db/gorgonzola-web-client.git
 	ignore = dirty
+[submodule "modules/c_fts_uring"]
+	path = modules/c_fts_uring
+	url = https://github.com/gorgonzola-graph-db/c_fts_uring.git
