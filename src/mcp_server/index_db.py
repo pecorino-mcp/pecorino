@@ -414,6 +414,7 @@ class CodeSearchIndex:
         conn = self._conn
         conn.execute('DELETE FROM code_nodes WHERE filepath = ?', (filepath,))
         conn.execute('DELETE FROM files WHERE filepath = ?', (filepath,))
+        conn.commit()
 
         try:
             graph = self._ensure_graph()
@@ -529,18 +530,14 @@ class CodeSearchIndex:
         conn = self._conn
         pass
         try:
-            # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
-            conn.execute("CREATE TEMP TABLE temp_files AS SELECT * FROM files LIMIT 0")
-            conn.executemany("INSERT INTO temp_files VALUES (?, ?, ?, ?)", files_data)
-            conn.execute('''
-                INSERT INTO files
-                SELECT * FROM temp_files
+            conn.executemany('''
+                INSERT INTO files (filepath, content_hash, mtime, lang)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(filepath) DO UPDATE SET
                     content_hash=excluded.content_hash,
                     mtime=excluded.mtime,
                     lang=excluded.lang
-            ''')
-            conn.execute("DROP TABLE temp_files")
+            ''', files_data)
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -622,6 +619,7 @@ class CodeSearchIndex:
                 mtime=excluded.mtime,
                 lang=excluded.lang
         ''', (filepath, content_hash, mtime, lang))
+        conn.commit()
 
         name = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1]
