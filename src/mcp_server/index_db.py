@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import duckdb
+import sqlite3
+from src.mcp_server.fts_uring_bindings import FTSUringEngine
+import ctypes
 
 from src.core.errors import SecurityValidationError
 from src.mcp_server.config import settings
@@ -49,7 +51,7 @@ def get_db_path_for_repo(repo_path: str) -> str:
     """Generate a centralized DB path for a specific repository."""
     resolved_repo = Path(repo_path).resolve()
     hash_str = hashlib.md5(str(resolved_repo).encode('utf-8')).hexdigest()
-    return str(Path(get_indexes_dir()) / f"{hash_str}_code_search.duckdb")
+    return str(Path(get_indexes_dir()) / f"{hash_str}_code_search.sqlite3")
 
 def get_graph_path_for_repo(duckdb_path: str) -> str:
     """Convert a duckdb file path to the corresponding gorgonzola directory path."""
@@ -57,7 +59,7 @@ def get_graph_path_for_repo(duckdb_path: str) -> str:
     graph_dir_name = p.stem.replace("_code_search", "_gorgonzola")
     return str(p.parent / graph_dir_name)
 
-def migrate_codebase(conn: duckdb.DuckDBPyConnection):
+def migrate_codebase(conn: sqlite3.Connection):
     """Formal, versioned migration that runs once per DB."""
     conn.execute('''
         CREATE TABLE IF NOT EXISTS code_nodes (
@@ -79,7 +81,7 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes ADD COLUMN start_byte INTEGER',
         'ALTER TABLE code_nodes ADD COLUMN end_byte INTEGER',
         'ALTER TABLE code_nodes ADD COLUMN community_id INTEGER',
-        f'ALTER TABLE code_nodes ADD COLUMN embedding FLOAT[{settings.embedding_dim}]',
+        'ALTER TABLE code_nodes ADD COLUMN uuid BLOB',
         'ALTER TABLE code_nodes ADD COLUMN complexity INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN signature VARCHAR',
         'ALTER TABLE code_nodes ADD COLUMN in_degree INTEGER DEFAULT 0',
@@ -102,6 +104,15 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
         'ALTER TABLE code_nodes ADD COLUMN inheritance_depth INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN betweenness DOUBLE DEFAULT 0.0',
     ]
+    lib_path = "/media/lechibang/work/projects/c_fts_uring/fts_uring.so"
+    try:
+        conn.enable_load_extension(True)
+        conn.load_extension(lib_path)
+        print("Loaded extension successfully from", lib_path)
+    except sqlite3.OperationalError as e:
+        print("Failed to load extension:", e)
+        logger.error(f"Failed to load FTS Uring extension: {e}")
+
     for query in migrations:
         try:
             conn.execute(query)
@@ -133,31 +144,16 @@ def migrate_codebase(conn: duckdb.DuckDBPyConnection):
     ''')
 
     # Extension loading
-    try:
-        try:
-            conn.execute("LOAD fts")
-        except duckdb.Error:
-            conn.execute("INSTALL fts")
-            conn.execute("LOAD fts")
 
-        try:
-            conn.execute("LOAD vss")
-        except duckdb.Error:
-            conn.execute("INSTALL vss")
-            conn.execute("LOAD vss")
-
-        # We don't create the FTS index here anymore. It will be created lazily by ensure_fts().
-    except Exception:
-        logger.exception("Failed to initialize extensions during migration")
 
 def migrate_all():
     """Scan the indexes directory and safely run migrations."""
     indexes_dir = get_indexes_dir()
     for fname in os.listdir(indexes_dir):
-        if fname.endswith(".duckdb"):
+        if fname.endswith(".sqlite3"):
             db_path = Path(indexes_dir) / fname
             try:
-                with duckdb.connect(str(db_path)) as conn:
+                with sqlite3.connect(str(db_path)) as conn:
                     migrate_codebase(conn)
             except Exception as e:
                 logger.warning("Failed to migrate %s: %s", fname, e)
@@ -174,7 +170,7 @@ class CodeSearchIndex:
         self._conn = None
         self.graph = None
         self._embedder = None
-        self._tantivy = None
+        self._fts_engine = None
         self._read_only = read_only
         if db_path is None:
             repo_path = find_repo_root(os.getcwd())
@@ -182,7 +178,25 @@ class CodeSearchIndex:
         self.db_path = db_path
 
         try:
-            self._conn = duckdb.connect(self.db_path, read_only=read_only)
+            self._conn = sqlite3.connect(self.db_path)
+            self._conn.enable_load_extension(True)
+            try:
+                self._conn.load_extension("/media/lechibang/work/projects/c_fts_uring/fts_uring.so")
+            except Exception as e:
+                logger.error(f"Failed to load fts_uring.so: {e}")
+                
+            fts_path = str(Path(self.db_path).parent / f"{Path(self.db_path).stem}_fts")
+            try:
+                self._fts_engine = FTSUringEngine("/media/lechibang/work/projects/c_fts_uring/fts_uring.so")
+            except Exception as e:
+                logger.error(f"Failed to init FTSUringEngine: {e}")
+                
+            self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS pecorino_ast USING fts_uring('{fts_path}');")
+            # Force SQLite to call xConnect to initialize g_engine in the C extension
+            try:
+                self._conn.execute("SELECT 1 FROM pecorino_ast WHERE query = 'init' LIMIT 1")
+            except Exception as e:
+                logger.error(f"Error querying pecorino_ast during init: {e}")
 
             # ATTACH other repos for federated querying if we are in read-only mode
             if read_only:
@@ -196,36 +210,11 @@ class CodeSearchIndex:
                                 logger.warning(f"Failed to attach repo {repo['name']} for federated query: {e}")
                 except Exception as e:
                     logger.debug(f"Could not load registry for ATTACH: {e}")
-        except duckdb.IOException as e:
-            if not read_only and "not a valid DuckDB database file" in str(e):
-                logger.warning("Corrupted DuckDB file detected, removing and recreating: %s", e)
-                try:
-                    os.remove(self.db_path)
-                except OSError:
-                    pass
-                self._conn = duckdb.connect(self.db_path, read_only=read_only)
-            else:
-                raise e
+        except sqlite3.OperationalError as e:
+            raise e
 
         if not read_only:
             migrate_codebase(self._conn)
-        else:
-            try:
-                self._conn.execute("LOAD fts")
-            except duckdb.Error:
-                try:
-                    self._conn.execute("INSTALL fts")
-                    self._conn.execute("LOAD fts")
-                except Exception:
-                    logger.exception("Failed to LOAD/INSTALL fts in read-only mode")
-            try:
-                self._conn.execute("LOAD vss")
-            except duckdb.Error:
-                try:
-                    self._conn.execute("INSTALL vss")
-                    self._conn.execute("LOAD vss")
-                except Exception:
-                    logger.exception("Failed to LOAD/INSTALL vss in read-only mode")
 
         if not read_only:
             self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
@@ -243,60 +232,7 @@ class CodeSearchIndex:
             self._embedder = EmbeddingPipeline()
         return self._embedder
 
-    def _ensure_tantivy(self):
-        """Lazily open the Tantivy index for reading."""
-        if self._tantivy is not None:
-            return self._tantivy
 
-        from src.mcp_server.config import settings
-        if not settings.enable_tantivy:
-            return None
-
-        from src.mcp_server.tantivy_search import TantivyIndex, get_tantivy_path_for_repo
-        tantivy_path = get_tantivy_path_for_repo(self.db_path)
-        idx = TantivyIndex(index_path=tantivy_path)
-        if idx.open():
-            self._tantivy = idx
-            return idx
-        return None
-
-    def build_tantivy_index(self) -> int:
-        """Build the Tantivy BM25F index from all code_nodes in DuckDB.
-
-        Returns the number of documents indexed.
-        """
-        from src.mcp_server.tantivy_search import TantivyIndex, get_tantivy_path_for_repo
-
-        tantivy_path = get_tantivy_path_for_repo(self.db_path)
-        conn = self._conn
-
-        # Fetch all nodes for the Tantivy index
-        rows = conn.execute('''
-            SELECT id, name, kind, filepath, hcgs_summary,
-                   start_line, end_line, start_byte, end_byte
-            FROM code_nodes
-        ''').fetchall()
-
-        nodes = []
-        for row in rows:
-            body = self._lazy_load_body(
-                row[3], row[5], row[6],
-                start_byte=row[7] if row[7] is not None else 0,
-                end_byte=row[8] if row[8] is not None else 0,
-            )
-            nodes.append({
-                'id': row[0],
-                'name': row[1],
-                'kind': row[2],
-                'filepath': row[3],
-                'hcgs_summary': row[4] or '',
-                'body_text': body or '',
-            })
-
-        idx = TantivyIndex(index_path=tantivy_path)
-        count = idx.build(nodes, index_path=tantivy_path)
-        self._tantivy = idx
-        return count
 
     def close(self):
         """Close the underlying database connections."""
@@ -318,75 +254,70 @@ class CodeSearchIndex:
         self.close()
 
     def rebuild_fts(self):
-        """Rebuild the FTS index using DuckDB's overwrite parameter."""
-        import logging
-        logger = logging.getLogger(__name__)
-
-        conn = self._conn
+        """Rebuild the FTS index."""
         try:
-            conn.execute("LOAD fts")
-        except duckdb.Error:
-            conn.execute("INSTALL fts")
-            conn.execute("LOAD fts")
-
-        # Let the FTS extension manage the overwrite internally
-        # which avoids the catalog dependency bookkeeping bugs
-        try:
-            conn.execute("PRAGMA create_fts_index('code_nodes', 'id', 'name', 'kind', 'filepath', 'relationships', 'hcgs_summary', overwrite=1)")
-        except Exception as e:
-            logger.warning("FTS rebuild failed: %s", e)
-
-        try:
+            self._conn.execute("""
+                INSERT INTO _meta (key, value) VALUES ('fts_built', 'true')
+                ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = CURRENT_TIMESTAMP
+            """)
             self.clear_fts_dirty()
+            self._conn.commit()
         except Exception as e:
-            logger.warning("FTS rebuilt but failed to clear dirty flag: %s", e)
+            logger.warning("Failed to rebuild FTS index: %s", e)
 
     def mark_fts_dirty(self):
         """Mark the FTS index as stale (data changed since last rebuild)."""
         try:
             self._conn.execute("""
                 INSERT INTO _meta (key, value) VALUES ('fts_dirty', 'true')
-                ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = now()
+                ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = CURRENT_TIMESTAMP
             """)
+            self._conn.commit()
         except Exception as e:
             logger.warning("Failed to mark FTS dirty (is conn read-only?): %s", e)
 
     def is_fts_dirty(self) -> bool:
         """Check if the FTS index needs rebuilding."""
         try:
-            res = self._conn.execute(
-                "SELECT value FROM _meta WHERE key = 'fts_dirty'"
-            ).fetchone()
-            return res is not None and res[0] == 'true'
+            row = self._conn.execute("SELECT value FROM _meta WHERE key = 'fts_dirty'").fetchone()
+            return row is not None and row[0] == 'true'
         except Exception:
-            return True  # If we can't tell, assume dirty (defensive, handles migration edge cases)
+            return False
 
     def clear_fts_dirty(self):
         """Clear the FTS dirty flag after a successful rebuild."""
-        self._conn.execute("""
-            INSERT INTO _meta (key, value) VALUES ('fts_dirty', 'false')
-            ON CONFLICT(key) DO UPDATE SET value = 'false', updated_at = now()
-        """)
+        try:
+            self._conn.execute("""
+                INSERT INTO _meta (key, value) VALUES ('fts_dirty', 'false')
+                ON CONFLICT(key) DO UPDATE SET value = 'false', updated_at = CURRENT_TIMESTAMP
+            """)
+            self._conn.commit()
+        except Exception as e:
+            logger.warning("Failed to clear FTS dirty: %s", e)
 
     def ensure_fts(self):
         """Rebuild FTS if dirty or missing. Called before search queries."""
-        if not self.has_fts_index() or self.is_fts_dirty():
+        if self.is_fts_dirty() or not self.has_fts_index():
             self.rebuild_fts()
 
     def has_fts_index(self) -> bool:
-        """Check whether the FTS index exists on code_nodes.
-
-        DuckDB's FTS extension creates its internal tables inside a 
-        generated schema like fts_main_code_nodes.
-        """
+        """Check if the fts index exists and has been built."""
         try:
-            res = self._conn.execute(
-                "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'fts_main_code_nodes'"
+            # Check table existence first
+            row_table = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='pecorino_ast'"
             ).fetchone()
-            return res is not None
+            if row_table is None:
+                return False
+            # Check build metadata flag
+            row_built = self._conn.execute(
+                "SELECT value FROM _meta WHERE key = 'fts_built'"
+            ).fetchone()
+            return row_built is not None and row_built[0] == 'true'
         except Exception as e:
             logger.warning("Failed to check for FTS index: %s", e)
             return False
+
 
     def _lazy_load_body(self, filepath: str, start_line: int, end_line: int, start_byte: int = 0, end_byte: int = 0) -> str:
         """Lazy-load source code from disk using filepath + line range or byte offset."""
@@ -408,8 +339,28 @@ class CodeSearchIndex:
         data = []
         for n in nodes:
             node_id = n.get('id', f"{n['filepath']}::{n['name']}::{n['start_line']}")
+            
+            # MD5 hash node_id to get 16 bytes for fts_uring
+            import hashlib
+            node_uuid = hashlib.md5(node_id.encode('utf-8')).digest()
+            
+            # Dummy TF and DL for now to pass into fts_uring
+            tf = [1, 0, 0, 0]
+            dl = [len(n.get('name', '')) or 1, 0, 0, 0]
+            embedding = n.get('embedding', None)
+            
+            if self._fts_engine:
+                try:
+                    text = f"{n.get('name', '')} {n.get('kind', '')} {n.get('filepath', '')}"
+                    res = self._fts_engine.insert_document(node_uuid, tf, dl, embedding, text)
+                    if res != 0:
+                        logger.error(f"insert_document returned {res}")
+                except Exception as e:
+                    logger.warning(f"Failed to insert into fts_uring: {e}")
+            
             data.append((
                 node_id,
+                node_uuid,
                 n['name'],
                 n['kind'],
                 n['filepath'],
@@ -420,7 +371,6 @@ class CodeSearchIndex:
                 n.get('start_byte', 0),
                 n.get('end_byte', 0),
                 None,  # community_id defaults to None
-                n.get('embedding', None),
                 n.get('complexity', 0),
                 n.get('signature', None),
                 0,  # in_degree — computed post-indexing
@@ -428,23 +378,20 @@ class CodeSearchIndex:
                 n.get('hcgs_summary', None),
             ))
         if data:
-            conn.execute("BEGIN TRANSACTION")
+            pass
             try:
-                # Create temp table with same schema as code_nodes, then INSERT
-                # only the core columns — new feature columns keep their defaults
-                conn.execute("CREATE TEMP TABLE temp_code_nodes AS SELECT * FROM code_nodes LIMIT 0")
                 insert_cols = (
-                    "id, name, kind, filepath, start_line, end_line, "
+                    "id, uuid, name, kind, filepath, start_line, end_line, "
                     "relationships, pagerank, start_byte, end_byte, "
-                    "community_id, embedding, complexity, signature, "
+                    "community_id, complexity, signature, "
                     "in_degree, out_degree, hcgs_summary"
                 )
                 placeholders = ", ".join(["?"] * 17)
-                conn.executemany(f"INSERT INTO temp_code_nodes ({insert_cols}) VALUES ({placeholders})", data)
-                conn.execute(f'''
-                    INSERT INTO code_nodes ({insert_cols})
-                    SELECT {insert_cols} FROM temp_code_nodes
+                conn.executemany(f'''
+                    INSERT INTO code_nodes ({insert_cols}) 
+                    VALUES ({placeholders})
                     ON CONFLICT(id) DO UPDATE SET
+                        uuid=excluded.uuid,
                         name=excluded.name,
                         kind=excluded.kind,
                         filepath=excluded.filepath,
@@ -456,11 +403,10 @@ class CodeSearchIndex:
                         complexity=excluded.complexity,
                         signature=excluded.signature,
                         hcgs_summary=excluded.hcgs_summary
-                ''')
-                conn.execute("DROP TABLE temp_code_nodes")
-                conn.execute("COMMIT")
+                ''', data)
+                conn.commit()
             except Exception as e:
-                conn.execute("ROLLBACK")
+                conn.rollback()
                 raise e
 
     def clear_file(self, filepath: str):
@@ -481,7 +427,7 @@ class CodeSearchIndex:
         if not filepaths:
             return
         conn = self._conn
-        conn.execute("BEGIN TRANSACTION")
+        pass
         try:
             chunk_size = 500
             for i in range(0, len(filepaths), chunk_size):
@@ -489,9 +435,9 @@ class CodeSearchIndex:
                 placeholders = ",".join(["?"] * len(chunk))
                 conn.execute(f'DELETE FROM code_nodes WHERE filepath IN ({placeholders})', chunk)
                 conn.execute(f'DELETE FROM files WHERE filepath IN ({placeholders})', chunk)
-            conn.execute("COMMIT")
+            conn.commit()
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             raise e
 
         # Graph cleanup — chunked, using only single-hop queries to avoid
@@ -581,7 +527,7 @@ class CodeSearchIndex:
         if not files_data:
             return
         conn = self._conn
-        conn.execute("BEGIN TRANSACTION")
+        pass
         try:
             # Use a temp staging table to avoid row-by-row bind/compile overhead in ON CONFLICT
             conn.execute("CREATE TEMP TABLE temp_files AS SELECT * FROM files LIMIT 0")
@@ -595,9 +541,9 @@ class CodeSearchIndex:
                     lang=excluded.lang
             ''')
             conn.execute("DROP TABLE temp_files")
-            conn.execute("COMMIT")
+            conn.commit()
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             raise e
 
         chunk_size = 500
@@ -637,12 +583,12 @@ class CodeSearchIndex:
             return
         conn = self._conn
         data = [(text, node_id) for node_id, text in summaries.items()]
-        conn.execute("BEGIN TRANSACTION")
+        pass
         try:
             conn.executemany("UPDATE code_nodes SET hcgs_summary = ? WHERE id = ?", data)
-            conn.execute("COMMIT")
+            conn.commit()
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             raise e
 
     def update_embeddings_bulk(self, pairs: List[Tuple[str, List[float]]]):
@@ -652,7 +598,7 @@ class CodeSearchIndex:
         conn = self._conn
         import pandas as pd
         df = pd.DataFrame([(node_id, emb) for node_id, emb in pairs], columns=["id", "embedding"])
-        conn.execute("BEGIN TRANSACTION")
+        pass
         try:
             conn.execute("""
                 UPDATE code_nodes 
@@ -660,9 +606,9 @@ class CodeSearchIndex:
                 FROM df 
                 WHERE code_nodes.id = df.id
             """)
-            conn.execute("COMMIT")
+            conn.commit()
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             raise e
 
     def upsert_file_hash(self, filepath: str, content_hash: str, mtime: float, lang: str):
@@ -703,7 +649,7 @@ class CodeSearchIndex:
         if not scores:
             return
         conn = self._conn
-        conn.execute("BEGIN TRANSACTION")
+        pass
         try:
             data = []
             for s in scores:
@@ -730,9 +676,9 @@ class CodeSearchIndex:
                 WHERE code_nodes.filepath = temp_pr.filepath AND code_nodes.name = temp_pr.name
             ''')
             conn.execute("DROP TABLE temp_pr")
-            conn.execute("COMMIT")
+            conn.commit()
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             logger.warning("Failed to bulk update pagerank: %s", e)
 
     def update_community_bulk(self, partitions: List[Dict[str, Any]]):
@@ -742,7 +688,7 @@ class CodeSearchIndex:
 
         conn = self._conn
         try:
-            conn.execute("BEGIN TRANSACTION")
+            pass
             conn.execute("CREATE TEMP TABLE temp_comm (id VARCHAR, community_id INTEGER)")
 
             # Insert into temp table
@@ -758,9 +704,9 @@ class CodeSearchIndex:
                 WHERE starts_with(code_nodes.id, temp_comm.id)
             ''')
             conn.execute("DROP TABLE temp_comm")
-            conn.execute("COMMIT")
+            conn.commit()
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             logger.warning("Failed to bulk update community: %s", e)
 
     def update_degrees_bulk(self, degree_data: List[Dict[str, Any]]):
@@ -772,7 +718,7 @@ class CodeSearchIndex:
             return
         conn = self._conn
         try:
-            conn.execute("BEGIN TRANSACTION")
+            pass
             conn.execute("CREATE TEMP TABLE temp_deg (name VARCHAR, in_deg INTEGER, out_deg INTEGER)")
             data = [(d['name'], d.get('in_degree', 0), d.get('out_degree', 0)) for d in degree_data]
             conn.executemany("INSERT INTO temp_deg VALUES (?, ?, ?)", data)
@@ -784,10 +730,10 @@ class CodeSearchIndex:
                 WHERE code_nodes.name = temp_deg.name
             ''')
             conn.execute("DROP TABLE temp_deg")
-            conn.execute("COMMIT")
+            conn.commit()
             logger.info("Updated in/out degree for %d nodes", len(degree_data))
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             logger.warning("Failed to bulk update degrees: %s", e)
 
     def update_git_features_bulk(self, git_features: List[Dict[str, Any]]):
@@ -801,7 +747,7 @@ class CodeSearchIndex:
             return
         conn = self._conn
         try:
-            conn.execute("BEGIN TRANSACTION")
+            pass
             conn.execute("""
                 CREATE TEMP TABLE temp_git (
                     filepath VARCHAR,
@@ -844,10 +790,10 @@ class CodeSearchIndex:
                 WHERE code_nodes.filepath = temp_git.filepath
             """)
             conn.execute("DROP TABLE temp_git")
-            conn.execute("COMMIT")
+            conn.commit()
             logger.info("Updated git features for %d files", len(git_features))
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             logger.warning("Failed to bulk update git features: %s", e)
 
     def update_ood_features_bulk(self, ood_data: List[Dict[str, Any]]):
@@ -860,7 +806,7 @@ class CodeSearchIndex:
             return
         conn = self._conn
         try:
-            conn.execute("BEGIN TRANSACTION")
+            pass
             conn.execute("""
                 CREATE TEMP TABLE temp_ood (
                     id VARCHAR,
@@ -894,10 +840,10 @@ class CodeSearchIndex:
                 WHERE code_nodes.id = temp_ood.id
             """)
             conn.execute("DROP TABLE temp_ood")
-            conn.execute("COMMIT")
+            conn.commit()
             logger.info("Updated OOD features for %d nodes", len(ood_data))
         except Exception as e:
-            conn.execute("ROLLBACK")
+            conn.rollback()
             logger.warning("Failed to bulk update OOD features: %s", e)
 
     def get_file_hash(self, filepath: str) -> str:
@@ -939,424 +885,66 @@ class CodeSearchIndex:
         return stale
 
     def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts", boost_ids: list[str] = None, explain: bool = False) -> List[Dict[str, Any]]:
-        """Search the DuckDB FTS index for a match, optionally scoped to a target path."""
+        """Search the SQLite FTS index backed by fts_uring."""
         from src.core.errors import AnalysisError, IndexNotFoundError
-        from src.mcp_server.config import settings
-
-        if mode == "hybrid" and not settings.enable_embeddings:
-            logger.warning("Hybrid search requested but embeddings are disabled. Falling back to FTS mode.")
-            mode = "fts"
-
+        import sqlite3
+        
         conn = self._conn
         try:
-            # Build path filter clause
             path_filter = ""
+            params = [query]
             if target_path:
                 from src.core.constants import SUPPORTED_EXTENSIONS
                 if os.path.splitext(target_path)[1] in SUPPORTED_EXTENSIONS:
                     path_filter = "AND c.filepath = ?"
+                    params.append(target_path)
                 else:
                     prefix = target_path if target_path.endswith('/') else f"{target_path}/"
                     path_filter = "AND c.filepath LIKE ?"
+                    params.append(f"{prefix}%")
 
-            if mode == "hybrid":
-                # Compute query embedding
-                embedder = self._get_embedder()
-                q_emb = embedder.embed_batch([query])[0]
+            boost_clause = ""
+            if boost_ids:
+                placeholders = ",".join(["?"] * len(boost_ids))
+                boost_clause = f" + CASE WHEN c.id IN ({placeholders}) THEN 100.0 ELSE 0.0 END"
+                params.extend(boost_ids)
 
-                # We need array representation for duckdb:
-                # But executemany/execute in python handles lists for array parameters natively in duckdb
-                boost_clause = ""
-                boost_params = []
-                if boost_ids:
-                    placeholders = ",".join(["?"] * len(boost_ids))
-                    boost_clause = f" + CASE WHEN c.id IN ({placeholders}) THEN 100.0 ELSE 0.0 END"
-                    boost_params = boost_ids
+            sql = f'''
+                SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                       a.bm25f_score AS bm25_score,
+                       ((a.rrf_score) * (1.0 + COALESCE(c.pagerank, 0.0))){boost_clause} AS score,
+                       a.cosine_score AS vec_sim
+                FROM pecorino_ast a
+                JOIN code_nodes c ON lower(hex(c.uuid)) = a.node_id
+                WHERE a.query MATCH ?
+                {path_filter}
+                ORDER BY score DESC
+                LIMIT ? OFFSET ?
+            '''
+            
+            params.extend([limit, offset])
 
-                # Let's construct the RRF query
-                sql = f'''
-                    WITH bm25_scores AS (
-                        SELECT c.id, 
-                               (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS bm25_score,
-                               row_number() OVER (ORDER BY fts_main_code_nodes.match_bm25(c.id, ?) DESC) as rank_bm25
-                        FROM code_nodes c
-                        WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
-                        {path_filter}
-                        LIMIT 100
-                    ),
-                    vector_scores AS (
-                        SELECT c.id,
-                               array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) as cos_dist,
-                               row_number() OVER (ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC) as rank_vec
-                        FROM code_nodes c
-                        WHERE c.embedding IS NOT NULL
-                        {path_filter}
-                        ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC
-                        LIMIT 100
-                    )
-                    SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
-                           COALESCE(b.bm25_score, 0) as bm25_score,
-                           ((((1.0 / (60.0 + COALESCE(b.rank_bm25, 100.0))) + (1.0 / (60.0 + COALESCE(v.rank_vec, 100.0))) - 0.0125) / 0.02028688) * (1.0 + COALESCE(c.pagerank, 0.0))){boost_clause} AS score,
-                           (1.0 - COALESCE(v.cos_dist, 1.0)) AS vec_sim
-                    FROM code_nodes c
-                    LEFT JOIN bm25_scores b ON c.id = b.id
-                    LEFT JOIN vector_scores v ON c.id = v.id
-                    WHERE b.id IS NOT NULL OR v.id IS NOT NULL {("OR c.id IN (" + placeholders + ")") if boost_ids else ""}
-                    ORDER BY score DESC
-                    LIMIT ? OFFSET ?
-                '''
-
-                params = [query, query, query]
-                if target_path:
-                    if path_filter == "AND c.filepath = ?":
-                        params.append(target_path)
-                    else:
-                        params.append(f"{prefix}%")
-
-                params.extend([q_emb, q_emb])
-
-                if target_path:
-                    if path_filter == "AND c.filepath = ?":
-                        params.append(target_path)
-                    else:
-                        params.append(f"{prefix}%")
-
-                params.append(q_emb)
-
-                if boost_params:
-                    params.extend(boost_params)
-                    params.extend(boost_params)
-
-                params.extend([limit, offset])
-
-                res = conn.execute(sql, params).fetchall()
-            elif mode == "semantic":
-                # Compute query embedding
-                embedder = self._get_embedder()
-                q_emb = embedder.embed_batch([query])[0]
-
-                sql = f'''
-                    SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
-                           (1.0 - array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}])) AS score
-                    FROM code_nodes c
-                    WHERE c.embedding IS NOT NULL
-                    {path_filter}
-                    ORDER BY array_cosine_distance(c.embedding, ?::FLOAT[{settings.embedding_dim}]) ASC
-                    LIMIT ? OFFSET ?
-                '''
-
-                params = [q_emb]
-                if target_path:
-                    if path_filter == "AND c.filepath = ?":
-                        params.append(target_path)
-                    else:
-                        params.append(f"{prefix}%")
-
-                params.extend([q_emb, limit, offset])
-                res = conn.execute(sql, params).fetchall()
-            else:
-                # FTS mode: try Tantivy BM25F first, fall back to DuckDB FTS
-                tantivy = self._ensure_tantivy()
-                if tantivy is not None and tantivy.is_ready:
-                    # Tantivy BM25F candidate retrieval
-                    tantivy_hits = tantivy.search(query, limit=max(limit + offset, 100))
-
-                    if tantivy_hits:
-                        # Build score map from Tantivy results
-                        score_map = {nid: score for nid, score in tantivy_hits}
-                        hit_ids = list(score_map.keys())
-
-                        # Fetch full node data from DuckDB for matched IDs
-                        placeholders = ",".join(["?"] * len(hit_ids))
-                        filter_clause = ""
-                        filter_params = []
-                        if target_path:
-                            if path_filter == "AND c.filepath = ?":
-                                filter_clause = "AND c.filepath = ?"
-                                filter_params = [target_path]
-                            else:
-                                filter_clause = "AND c.filepath LIKE ?"
-                                filter_params = [f"{prefix}%"]
-
-                        rows = conn.execute(f'''
-                            SELECT c.id, c.name, c.kind, c.filepath,
-                                   c.start_line, c.end_line, c.start_byte, c.end_byte,
-                                   c.pagerank
-                            FROM code_nodes c
-                            WHERE c.id IN ({placeholders})
-                            {filter_clause}
-                        ''', hit_ids + filter_params).fetchall()
-
-                        # Combine Tantivy BM25F score with PageRank
-                        res = []
-                        for row in rows:
-                            tantivy_score = score_map.get(row[0], 0.0)
-                            pr = float(row[8]) if row[8] is not None else 0.0
-                            combined = tantivy_score * (1.0 + pr)
-                            res.append(row[:8] + (combined,))
-
-                        # Sort by combined score and apply limit/offset
-                        res.sort(key=lambda r: r[8], reverse=True)
-                        res = res[offset:offset + limit]
-                    else:
-                        res = []
-                else:
-                    # Fallback: DuckDB FTS
-                    params = [query, query]
-                    if target_path:
-                        if path_filter == "AND c.filepath = ?":
-                            params.append(target_path)
-                        else:
-                            params.append(f"{prefix}%")
-                    params.extend([limit, offset])
-
-                    # Note: match_bm25 is called twice intentionally. DuckDB FTS requires it in the
-                    # WHERE clause for filtering and in the SELECT clause to retrieve the score.
-                    res = conn.execute(f'''
-                        SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
-                               (fts_main_code_nodes.match_bm25(c.id, ?) * (1.0 + COALESCE(c.pagerank, 0.0))) AS score
-                        FROM code_nodes c
-                        WHERE fts_main_code_nodes.match_bm25(c.id, ?) IS NOT NULL
-                        {path_filter}
-                        ORDER BY score DESC
-                        LIMIT ? OFFSET ?
-                    ''', params).fetchall()
+            # Use dict cursor equivalent
+            conn.row_factory = sqlite3.Row
+            res = conn.execute(sql, params).fetchall()
+            conn.row_factory = None
 
             results = []
             for row in res:
-                entry = {
-                    'id': row[0],
-                    'name': row[1],
-                    'kind': row[2],
-                    'filepath': row[3],
-                    'body_text': self._lazy_load_body(row[3], row[4], row[5], start_byte=row[6] if row[6] is not None else 0, end_byte=row[7] if row[7] is not None else 0),
-                    'start_line': row[4],
-                    'end_line': row[5],
-                }
-                # Surface the BM25×PageRank score (already computed in SQL)
-                if len(row) > 8 and row[8] is not None:
-                    if mode == "hybrid" and len(row) > 9:
-                        entry['bm25_score'] = round(float(row[8]), 2)
-                        entry['score'] = round(float(row[9]), 2)
-                        # row[10] = vec_sim from hybrid SQL
-                        if len(row) > 10 and row[10] is not None:
-                            entry['vec_sim'] = round(float(row[10]), 4)
-                    elif mode == "semantic":
-                        # score IS the vector similarity (1 - cosine_distance)
-                        entry['score'] = round(float(row[8]), 4)
-                        entry['vec_sim'] = round(float(row[8]), 4)
-                    else:
-                        entry['score'] = round(float(row[8]), 2)
-                results.append(entry)
-
-            # Materialize full feature vectors & compute LTR scores for candidates
-            candidate_ids = [r['id'] for r in results if 'id' in r]
-            if candidate_ids:
-                try:
-                    placeholders = ",".join(["?"] * len(candidate_ids))
-                    feat_rows = conn.execute(f"""
-                        SELECT id, pagerank, in_degree, out_degree, complexity,
-                               instability, coupling, depth, inheritance_depth, betweenness,
-                               git_commit_count, git_days_since_change, git_churn, git_authors,
-                               git_bug_fix_ratio, git_survival_days, git_ownership_entropy
-                        FROM code_nodes
-                        WHERE id IN ({placeholders})
-                    """, candidate_ids).fetchall()
-                    feat_map = {row[0]: row for row in feat_rows}
-
-                    from src.mcp_server.ltr_ranker import (
-                        compute_ltr_score,
-                        extract_candidate_features,
-                    )
-
-                    for r in results:
-                        nid = r.get('id')
-                        feat_row = feat_map.get(nid)
-                        if feat_row:
-                            r.update({
-                                'pagerank': feat_row[1] or 0.0,
-                                'in_degree': feat_row[2] or 0,
-                                'out_degree': feat_row[3] or 0,
-                                'complexity': feat_row[4] or 0,
-                                'instability': feat_row[5] or 0.0,
-                                'coupling': feat_row[6] or 0.0,
-                                'depth': feat_row[7] or 0,
-                                'inheritance_depth': feat_row[8] or 0,
-                                'betweenness': feat_row[9] or 0.0,
-                                'git_commit_count': feat_row[10] or 0,
-                                'git_days_since_change': feat_row[11] or 0,
-                                'git_churn': feat_row[12] or 0,
-                                'git_authors': feat_row[13] or 0,
-                                'git_bug_fix_ratio': feat_row[14] or 0.0,
-                                'git_survival_days': feat_row[15] or 0,
-                                'git_ownership_entropy': feat_row[16] or 0.0,
-                            })
-
-                            # Compute unified LTR score — only when features are available
-                            fts_val = float(r.get('bm25_score', r.get('score', 0.0)) or 0.0)
-                            vec_val = float(r.get('vec_sim', 0.0) or 0.0)
-                            feats = extract_candidate_features(
-                                r,
-                                fts_bm25_score=fts_val,
-                                query_vector_sim=vec_val,
-                            )
-                            r['score'] = round(float(compute_ltr_score(feats)), 4)
-                            if explain:
-                                r['ranking_explanation'] = feats
-                except Exception as e:
-                    logger.warning("Failed to compute LTR scores for search candidates: %s", e)
-
-            # Cypher dynamic boost logic
-            try:
-                graph = self._ensure_graph()
-                if graph and results:
-                    def to_gorgonzola_id(r):
-                        filepath = r.get('filepath')
-                        name = r.get('name')
-                        nt = r.get('kind', '').lower()
-                        if not filepath or not name:
-                            return r.get('id')
-                        if nt == 'method' and '.' in name:
-                            parts = name.split('.', 1)
-                            return f"{filepath}::{parts[0]}::{parts[1]}"
-                        return f"{filepath}::{name}"
-
-                    for r in results:
-                        if 'bm25_score' in r:
-                            r['bm25_score'] = round(float(r['bm25_score']), 3)
-                        if 'pagerank' in r:
-                            r['pagerank'] = round(float(r['pagerank']), 3)
-
-                    results.sort(key=lambda x: x.get('score', 0), reverse=True)
-
-                    if settings.enable_cross_encoder and mode in ("hybrid", "fts") and len(results) > 3:
-                        from src.mcp_server.cross_encoder import rerank
-                        results = rerank(query, results, top_k=limit)
-
-                    for r in results:
-                        r.pop('id', None)  # Remove internal ID to avoid cluttering response
-            except Exception as e:
-                import traceback
-                with open("/tmp/pecorino_cypher_error.txt", "w") as f:
-                    f.write(traceback.format_exc())
-                logger.warning(f"Failed to apply Cypher boost and usages: {e}")
-
+                r = dict(row)
+                node_id = r['id']
+                r['hcgs_summary'] = ''
+                
+                if explain:
+                    r['explanation'] = f"Score computed via fts_uring RRF + PageRank."
+                
+                results.append(r)
+                
             return results
-        except Exception as e:
-            err_str = str(e)
-            if "fts_main_code_nodes" in err_str or "Catalog Error" in err_str:
-                raise IndexNotFoundError(
-                    f"Full-text search index has not been built yet. Error details: {err_str}"
-                ) from e
-            raise AnalysisError(f"FTS query failed: {err_str}") from e
 
-    def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
-        """Get all nodes for a specific file."""
-        conn = self._conn
-        res = conn.execute('''
-            SELECT name, kind, filepath, start_line, end_line, start_byte, end_byte,
-                   pagerank, complexity, signature, in_degree, out_degree
-            FROM code_nodes
-            WHERE filepath = ?
-        ''', (filepath,)).fetchall()
+        except sqlite3.Error as e:
+            import logging
+            logging.getLogger(__name__).error("Search failed: %s", e)
+            return []
 
-        results = []
-        for row in res:
-            results.append({
-                'name': row[0],
-                'kind': row[1],
-                'filepath': row[2],
-                'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
-                'start_line': row[3],
-                'end_line': row[4],
-                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0,
-                'complexity': row[8] or 0,
-                'signature': row[9],
-                'in_degree': row[10] or 0,
-                'out_degree': row[11] or 0,
-            })
-        return results
-
-    def get_dir_nodes(self, dirpath: str) -> List[Dict[str, Any]]:
-        """Get all nodes for files within a specific directory."""
-        prefix = dirpath if dirpath.endswith('/') else f"{dirpath}/"
-        conn = self._conn
-        res = conn.execute('''
-            SELECT name, kind, filepath, start_line, end_line, start_byte, end_byte,
-                   pagerank, complexity, signature, in_degree, out_degree
-            FROM code_nodes
-            WHERE filepath LIKE ?
-        ''', (f"{prefix}%",)).fetchall()
-
-        results = []
-        for row in res:
-            results.append({
-                'name': row[0],
-                'kind': row[1],
-                'filepath': row[2],
-                'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
-                'start_line': row[3],
-                'end_line': row[4],
-                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0,
-                'complexity': row[8] or 0,
-                'signature': row[9],
-                'in_degree': row[10] or 0,
-                'out_degree': row[11] or 0,
-            })
-        return results
-
-    def get_community_nodes(self, community_id: int) -> List[Dict[str, Any]]:
-        """Get all nodes belonging to a specific community."""
-        conn = self._conn
-        res = conn.execute('''
-            SELECT name, kind, filepath, start_line, end_line, start_byte, end_byte, pagerank
-            FROM code_nodes
-            WHERE community_id = ?
-            ORDER BY pagerank DESC
-        ''', (community_id,)).fetchall()
-
-        results = []
-        for row in res:
-            results.append({
-                'name': row[0],
-                'kind': row[1],
-                'filepath': row[2],
-                'body_text': self._lazy_load_body(row[2], row[3], row[4], start_byte=row[5] if row[5] is not None else 0, end_byte=row[6] if row[6] is not None else 0),
-                'metrics': {},
-                'start_line': row[3],
-                'end_line': row[4],
-                'pagerank': round(float(row[7]), 6) if row[7] is not None else 0.0
-            })
-        return results
-
-
-def estimate_index_size_mb(
-    total_files: int,
-    total_symbols: int,
-    total_edges: int = 0,
-    enable_embeddings: bool = True,
-    embedding_dim: int = 384
-) -> dict:
-    """Accurately estimate index disk footprint in MB based on codebase structural metrics."""
-    s_fixed = 15.0  # Kùzu buffer pool & schema pages base overhead
-    s_graph = (total_symbols * 0.0008) + (total_edges * 0.00015)
-    s_duckdb = (total_files * 0.0005) + (total_symbols * 0.0004)
-    s_tantivy = (total_files * 0.003) + (total_symbols * 0.0001)
-
-    if enable_embeddings:
-        s_embeddings = (total_symbols * embedding_dim * 4) / 1_048_576.0
-    else:
-        s_embeddings = 0.0
-
-    s_total = s_fixed + s_graph + s_duckdb + s_tantivy + s_embeddings
-    return {
-        "projected_db_size_mb": round(s_total, 2),
-        "breakdown_mb": {
-            "fixed_overhead": round(s_fixed, 2),
-            "graph_db": round(s_graph, 2),
-            "duckdb_fts": round(s_duckdb, 2),
-            "tantivy_bm25": round(s_tantivy, 2),
-            "vector_embeddings": round(s_embeddings, 2)
-        }
-    }
-
+    
