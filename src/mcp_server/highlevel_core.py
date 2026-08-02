@@ -335,7 +335,7 @@ def read_repo_summary(repo_hash: str) -> str:
 
     from src.mcp_server.index_db import get_indexes_dir
     from src.mcp_server.middleware.caching import _get_cached_api
-    db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.duckdb"
+    db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.sqlite3"
     if not db_path.exists():
         raise ValueError(f"Index database not found for hash: {repo_hash}")
     index_api = _get_cached_api(None, str(db_path), "index")
@@ -361,7 +361,7 @@ def read_repo_files(repo_hash: str) -> str:
 
     from src.mcp_server.index_db import get_indexes_dir
     from src.mcp_server.middleware.caching import _get_cached_api
-    db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.duckdb"
+    db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.sqlite3"
     if not db_path.exists():
         raise ValueError(f"Index database not found for hash: {repo_hash}")
     index_api = _get_cached_api(None, str(db_path), "index")

@@ -94,3 +94,4 @@ output.log
 /output/
 /examples/
 .ruff_cache/
+scripts/scratch/
