@@ -191,7 +191,12 @@ class CodeSearchIndex:
             except Exception as e:
                 logger.error(f"Failed to init FTSUringEngine: {e}")
                 
-            self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS pecorino_ast USING fts_uring('{fts_path}', 6144);")
+            from src.mcp_server.config import settings
+            import sys
+            max_ram = getattr(settings, 'fts_ram_mb', 6144)
+            if 'pytest' in sys.modules:
+                max_ram = 128
+            self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS pecorino_ast USING fts_uring('{fts_path}', {max_ram});")
             # Force SQLite to call xConnect to initialize g_engine in the C extension
             try:
                 self._conn.execute("SELECT 1 FROM pecorino_ast WHERE query = 'init' LIMIT 1")
