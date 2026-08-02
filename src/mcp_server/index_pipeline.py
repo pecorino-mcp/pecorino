@@ -1336,15 +1336,7 @@ class CodebaseIndexer:
                     fts_error = str(e)
                     logger.warning("Failed to rebuild FTS index: %s", fts_error)
 
-            # Build Tantivy BM25F index
-            tantivy_error = None
-            try:
-                if settings.enable_tantivy:
-                    tantivy_count = self.search_index.build_tantivy_index()
-                    logger.info("Tantivy BM25F index built with %d documents", tantivy_count)
-            except Exception as e:
-                tantivy_error = str(e)
-                logger.warning("Failed to build Tantivy index: %s", tantivy_error)
+
 
             res = {
                 "status": "success" if not fts_error else "partial",
@@ -1639,13 +1631,7 @@ class CodebaseIndexer:
                 logger.warning("Failed to rebuild FTS index: %s", fts_error)
                 logger.debug(traceback.format_exc())
 
-        # Build Tantivy BM25F index
-        try:
-            if settings.enable_tantivy:
-                tantivy_count = self.search_index.build_tantivy_index()
-                logger.info("Tantivy BM25F index built with %d documents", tantivy_count)
-        except Exception as e:
-            logger.warning("Failed to build Tantivy index: %s", e)
+
 
         if progress_callback:
             progress_callback(total_files, total_files, "Resolving symbols...")
