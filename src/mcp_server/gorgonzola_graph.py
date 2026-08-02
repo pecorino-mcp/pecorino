@@ -80,6 +80,19 @@ class GorgonzolaGraph:
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
 
+        # Prevent runaway disk usage from Kuzu lack of compaction
+        if os.path.exists(self.gorgonzola_db_path) and os.path.isdir(self.gorgonzola_db_path):
+            total_size = sum(
+                os.path.getsize(os.path.join(dirpath, f)) 
+                for dirpath, _, filenames in os.walk(self.gorgonzola_db_path) 
+                for f in filenames if not os.path.islink(os.path.join(dirpath, f))
+            )
+            # 5 GB threshold
+            if total_size > 5 * 1024 * 1024 * 1024:
+                import shutil
+                logger.warning(f"Gorgonzola DB at {self.gorgonzola_db_path} exceeded 5GB ({total_size} bytes). Wiping to reclaim space...")
+                shutil.rmtree(self.gorgonzola_db_path)
+
         import gorgonzola
         self.gorgonzola = gorgonzola
 
@@ -292,10 +305,10 @@ class GorgonzolaGraph:
 
     def insert_nodes_bulk(self, nodes) -> dict:
         """Insert nodes using CSV COPY FROM for performance.
-        
+
         Args:
             nodes: list of (node_id, properties_dict, label) tuples
-            
+
         Returns:
             dict mapping node_id -> label
         """
@@ -397,7 +410,7 @@ class GorgonzolaGraph:
                             row.append("[" + ",".join(["0.0"] * 384) + "]")
                         else:
                             row.append("")
-                
+
                 # Double check the row's actual ID string
                 if row[0] in final_seen and row[0] != node_id:
                     raise RuntimeError(f"BUG! ID mutation caused duplicate: {row[0]}")
@@ -413,7 +426,7 @@ class GorgonzolaGraph:
 
     def insert_edges_bulk(self, edges, id_map=None):
         """Insert edges using CSV COPY FROM for performance.
-        
+
         Args:
             edges: list of (src_id, dst_id, properties_dict, rel_type) tuples
             id_map: dict mapping node_id -> label for label lookups
@@ -542,13 +555,13 @@ class GorgonzolaGraph:
                         pass
 
                     conn.execute("""
-                        CALL PROJECT_GRAPH('CodeGraph', 
+                        CALL PROJECT_GRAPH('CodeGraph',
                             ['File', 'CodeNode', 'Identifier'],
                             ['DEPENDS_ON', 'CONTAINS', 'DEFINES', 'INHERITS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS', 'IMPORTS', 'READS', 'WRITES', 'RETURNS', 'HAS_PARAMETER', 'USES']
                         );
                     """)
 
-                    res = conn.execute("CALL pagerank('CodeGraph') RETURN node.id AS id, rank;")
+                    res = conn.execute("CALL page_rank('CodeGraph') RETURN node.id AS id, rank;")
                     while res.has_next():
                         row = res.get_next()
                         results.append({"node_id": row[0], "score": row[1]})

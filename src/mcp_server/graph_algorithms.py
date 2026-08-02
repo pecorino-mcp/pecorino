@@ -16,8 +16,8 @@ def sweep_gamma(graph, gammas: List[float] = None, graph_name: str = 'g') -> Lis
         try:
             # Execute Native Leiden with CPM and given gamma
             query = (
-                f"CALL LEIDEN('{graph_name}', quality:='cpm', gamma:={gamma}, seed:=42) "
-                f"RETURN id(node) AS node_id, leiden_id"
+                f"CALL leiden('{graph_name}') "
+                f"RETURN node.id AS node_id, leiden_id"
             )
             # Depending on Gorgonzola's python API, execute may return rows
             rows = graph.query(query)
@@ -125,13 +125,13 @@ def get_best_partition(stable_regions: List[Dict[str, Any]]) -> Dict[str, Any]:
 def compute_ppr_scores(graph, seed_scores: Dict[str, float], alpha: float = 0.15, n_iter: int = 10) -> Dict[str, float]:
     """
     Personalized PageRank (PPR) on candidate seed nodes over a 2-hop truncated subgraph.
-    
+
     Args:
         graph: GorgonzolaGraph instance
         seed_scores: Dict mapping node_id -> initial score
         alpha: Teleport probability (default 0.15)
         n_iter: Number of power iterations (default 10)
-        
+
     Returns:
         Dict mapping node_id -> normalized PPR score
     """
@@ -200,14 +200,14 @@ def compute_ppr_scores(graph, seed_scores: Dict[str, float], alpha: float = 0.15
 def compute_prone_embeddings(graph, dim: int = 64) -> Dict[str, List[int]]:
     """
     Compute ProNE structural embeddings (64d int8) for graph nodes.
-    
+
     Step 1: Sparse Matrix Factorization (Truncated SVD).
     Step 2: Spectral propagation via Chebyshev polynomials over graph manifold.
-    
+
     Args:
         graph: GorgonzolaGraph instance
         dim: Embedding dimension (default 64)
-        
+
     Returns:
         Dict mapping node_id -> list of 64 int8 values
     """
