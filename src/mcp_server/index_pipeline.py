@@ -479,7 +479,6 @@ class CodebaseIndexer:
         nodes_to_index = records.get("nodes_to_index", [])
         graph_nodes = records.get("graph_nodes", [])
         graph_edges = records.get("graph_edges", [])
-        file_id = filepath
 
         if nodes_to_index:
             self.search_index.index_nodes(nodes_to_index)
@@ -740,7 +739,7 @@ class CodebaseIndexer:
 
     def _compute_git_coupling(self, dirpath: str) -> list:
         """Run git log to calculate file co-change coupling scores (Jaccard similarity).
-        
+
         Returns list of (filepath_a, filepath_b, weight) tuples.
         """
         import subprocess
@@ -779,7 +778,7 @@ class CodebaseIndexer:
                     commit_files[current_commit].add(abs_path)
 
         pair_counts = defaultdict(lambda: defaultdict(int))
-        for commit, files in commit_files.items():
+        for _commit, files in commit_files.items():
             if len(files) > 50 or len(files) < 2:
                 continue
             for f in files:
@@ -1060,9 +1059,9 @@ class CodebaseIndexer:
                     except Exception:
                         pass
                     self.graph._conn.execute("""
-                        CALL PROJECT_GRAPH('CodeGraph', 
-                            ['File', 'Class', 'Method', 'Function', 'Interface', 'Symbol', 'Module', 'ControlFlow', 'Lambda', 'Variable', 'Folder', 'TestFile', 'Route', 'EnvVar'],
-                            ['DEPENDS_ON', 'CONTAINS', 'EXTENDS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS']
+                        CALL PROJECT_GRAPH('CodeGraph',
+                            ['File', 'CodeNode', 'Identifier'],
+                            ['DEPENDS_ON', 'CONTAINS', 'DEFINES', 'INHERITS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS', 'IMPORTS', 'READS', 'WRITES', 'RETURNS', 'HAS_PARAMETER', 'USES']
                         );
                     """)
 
@@ -1386,7 +1385,7 @@ class CodebaseIndexer:
                 current_processed = skipped_count
 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    for chunk_idx, chunk in enumerate(chunk_jobs):
+                    for _chunk_idx, chunk in enumerate(chunk_jobs):
                         chunk_results = []
                         futures = {executor.submit(self._parse_file_task, job[0], job[1], job[2]): job[1] for job in chunk}
 
@@ -1489,7 +1488,7 @@ class CodebaseIndexer:
                             if res["graph_edges"]:
                                 for src, dst, props, rel in res["graph_edges"]:
                                     chunk_graph_edges.add((src, dst, frozenset(props.items()), rel))
-                            for dep, resolved_dep in res["resolved_deps"]:
+                            for _dep, resolved_dep in res["resolved_deps"]:
                                 if os.path.exists(resolved_dep) and os.path.isabs(resolved_dep):
                                     dep_name = os.path.basename(resolved_dep)
                                     dep_ext = os.path.splitext(resolved_dep)[1]
