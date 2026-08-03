@@ -3,18 +3,17 @@ import functools
 import hashlib
 import logging
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import sqlite3
-from src.mcp_server.fts_uring_bindings import FTSUringEngine
-import ctypes
-
 from src.core.errors import SecurityValidationError
-from src.mcp_server.config import settings
+from src.mcp_server.fts_uring_bindings import FTSUringEngine
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
 logger = logging.getLogger(__name__)
+
+FTS_URING_LIB_PATH = str(Path(__file__).resolve().parent.parent.parent / "modules" / "c_fts_uring" / "fts_uring.so")
 
 def find_repo_root(filepath: str, max_depth: int = 20) -> str:
     """Find the root directory of the repository containing the given filepath."""
@@ -104,13 +103,11 @@ def migrate_codebase(conn: sqlite3.Connection):
         'ALTER TABLE code_nodes ADD COLUMN inheritance_depth INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN betweenness DOUBLE DEFAULT 0.0',
     ]
-    lib_path = "/media/lechibang/work/projects/c_fts_uring/fts_uring.so"
+    lib_path = FTS_URING_LIB_PATH
     try:
         conn.enable_load_extension(True)
         conn.load_extension(lib_path)
-        print("Loaded extension successfully from", lib_path)
     except sqlite3.OperationalError as e:
-        print("Failed to load extension:", e)
         logger.error(f"Failed to load FTS Uring extension: {e}")
 
     for query in migrations:
@@ -181,18 +178,19 @@ class CodeSearchIndex:
             self._conn = sqlite3.connect(self.db_path)
             self._conn.enable_load_extension(True)
             try:
-                self._conn.load_extension("/media/lechibang/work/projects/c_fts_uring/fts_uring.so")
+                self._conn.load_extension(FTS_URING_LIB_PATH)
             except Exception as e:
                 logger.error(f"Failed to load fts_uring.so: {e}")
-                
+
             fts_path = str(Path(self.db_path).parent / f"{Path(self.db_path).stem}_fts")
             try:
-                self._fts_engine = FTSUringEngine("/media/lechibang/work/projects/c_fts_uring/fts_uring.so")
+                self._fts_engine = FTSUringEngine(FTS_URING_LIB_PATH)
             except Exception as e:
                 logger.error(f"Failed to init FTSUringEngine: {e}")
-                
-            from src.mcp_server.config import settings
+
             import sys
+
+            from src.mcp_server.config import settings
             max_ram = getattr(settings, 'fts_ram_mb', 6144)
             if 'pytest' in sys.modules:
                 max_ram = 128
@@ -210,7 +208,7 @@ class CodeSearchIndex:
                     for repo in registry.get_all_repos():
                         if repo['duckdb_path'] != self.db_path:
                             try:
-                                self._conn.execute(f"ATTACH '{repo['duckdb_path']}' AS repo_{repo['hash']} (READ_ONLY)")
+                                self._conn.execute(f"ATTACH '{repo['duckdb_path']}' AS repo_{repo['hash']}")
                             except Exception as e:
                                 logger.warning(f"Failed to attach repo {repo['name']} for federated query: {e}")
                 except Exception as e:
@@ -242,10 +240,17 @@ class CodeSearchIndex:
     def close(self):
         """Close the underlying database connections."""
         if self._conn:
+            import time
+            time.sleep(1.0)  # Give fts_uring async I/O time to flush before destroying virtual table
             try:
                 self._conn.close()
             except Exception:
                 pass
+            if self._fts_engine:
+                try:
+                    self._fts_engine.close()
+                except Exception as e:
+                    pass
             self._conn = None
 
         if getattr(self, 'graph', None):
@@ -344,16 +349,16 @@ class CodeSearchIndex:
         data = []
         for n in nodes:
             node_id = n.get('id', f"{n['filepath']}::{n['name']}::{n['start_line']}")
-            
+
             # MD5 hash node_id to get 16 bytes for fts_uring
             import hashlib
             node_uuid = hashlib.md5(node_id.encode('utf-8')).digest()
-            
+
             # Dummy TF and DL for now to pass into fts_uring
             tf = [1, 0, 0, 0]
             dl = [len(n.get('name', '')) or 1, 0, 0, 0]
             embedding = n.get('embedding', None)
-            
+
             if self._fts_engine:
                 try:
                     text = f"{n.get('name', '')} {n.get('kind', '')} {n.get('filepath', '')}"
@@ -362,7 +367,7 @@ class CodeSearchIndex:
                         logger.error(f"insert_document returned {res}")
                 except Exception as e:
                     logger.warning(f"Failed to insert into fts_uring: {e}")
-            
+
             data.append((
                 node_id,
                 node_uuid,
@@ -393,7 +398,7 @@ class CodeSearchIndex:
                 )
                 placeholders = ", ".join(["?"] * 17)
                 conn.executemany(f'''
-                    INSERT INTO code_nodes ({insert_cols}) 
+                    INSERT INTO code_nodes ({insert_cols})
                     VALUES ({placeholders})
                     ON CONFLICT(id) DO UPDATE SET
                         uuid=excluded.uuid,
@@ -599,13 +604,13 @@ class CodeSearchIndex:
             return
         conn = self._conn
         import pandas as pd
-        df = pd.DataFrame([(node_id, emb) for node_id, emb in pairs], columns=["id", "embedding"])
+        pd.DataFrame([(node_id, emb) for node_id, emb in pairs], columns=["id", "embedding"])
         pass
         try:
             conn.execute("""
-                UPDATE code_nodes 
-                SET embedding = df.embedding 
-                FROM df 
+                UPDATE code_nodes
+                SET embedding = df.embedding
+                FROM df
                 WHERE code_nodes.id = df.id
             """)
             conn.commit()
@@ -673,9 +678,9 @@ class CodeSearchIndex:
             conn.execute("CREATE TEMP TABLE temp_pr (filepath VARCHAR, name VARCHAR, pagerank DOUBLE)")
             conn.executemany("INSERT INTO temp_pr VALUES (?, ?, ?)", data)
             conn.execute('''
-                UPDATE code_nodes 
-                SET pagerank = temp_pr.pagerank 
-                FROM temp_pr 
+                UPDATE code_nodes
+                SET pagerank = temp_pr.pagerank
+                FROM temp_pr
                 WHERE code_nodes.filepath = temp_pr.filepath AND code_nodes.name = temp_pr.name
             ''')
             conn.execute("DROP TABLE temp_pr")
@@ -704,7 +709,7 @@ class CodeSearchIndex:
                 UPDATE code_nodes
                 SET community_id = temp_comm.community_id
                 FROM temp_comm
-                WHERE starts_with(code_nodes.id, temp_comm.id)
+                WHERE code_nodes.id LIKE temp_comm.id || '%'
             ''')
             conn.execute("DROP TABLE temp_comm")
             conn.commit()
@@ -889,9 +894,8 @@ class CodeSearchIndex:
 
     def search(self, query: str, limit: int = 10, target_path: str = None, offset: int = 0, mode: str = "fts", boost_ids: list[str] = None, explain: bool = False) -> List[Dict[str, Any]]:
         """Search the SQLite FTS index backed by fts_uring."""
-        from src.core.errors import AnalysisError, IndexNotFoundError
         import sqlite3
-        
+
         conn = self._conn
         try:
             path_filter = ""
@@ -924,7 +928,7 @@ class CodeSearchIndex:
                 ORDER BY score DESC
                 LIMIT ? OFFSET ?
             '''
-            
+
             params.extend([limit, offset])
 
             # Use dict cursor equivalent
@@ -935,14 +939,14 @@ class CodeSearchIndex:
             results = []
             for row in res:
                 r = dict(row)
-                node_id = r['id']
+                r['id']
                 r['hcgs_summary'] = ''
-                
+
                 if explain:
-                    r['explanation'] = f"Score computed via fts_uring RRF + PageRank."
-                
+                    r['explanation'] = "Score computed via fts_uring RRF + PageRank."
+
                 results.append(r)
-                
+
             return results
 
         except sqlite3.Error as e:
@@ -950,4 +954,3 @@ class CodeSearchIndex:
             logging.getLogger(__name__).error("Search failed: %s", e)
             return []
 
-    
