@@ -3,14 +3,14 @@ import logging
 """
 RAM-backed index builder.
 
-Builds DuckDB and Gorgonzola indexes in /dev/shm (tmpfs) to avoid SSD write
+Builds SQLite and Gorgonzola indexes in /dev/shm (tmpfs) to avoid SSD write
 amplification, then copies the final database files to their persistent SSD
 location in a single, sequential write.
 
 Usage as a context manager:
 
     with RamdiskIndex(ssd_db_path, max_bytes=60*1024*1024) as ram:
-        # ram.db_path  -> points to /dev/shm/<session>/...duckdb
+        # ram.db_path  -> points to /dev/shm/<session>/...sqlite3
         # ram.gorgonzola_path -> /dev/shm/<session>/..._gorgonzola/
         # ... do all indexing work against ram.db_path ...
     # On __exit__, files are synced to SSD and the tmpfs dir is cleaned up.
@@ -42,8 +42,8 @@ class RamdiskIndex:
     def __init__(self, ssd_db_path: str, max_bytes: int = 60 * 1024 * 1024):
         """
         Args:
-            ssd_db_path: The *final* DuckDB path on the SSD
-                         (e.g. ~/.pecorino/indexes/<hash>_code_search.duckdb).
+            ssd_db_path: The *final* DB path on the SSD
+                         (e.g. ~/.pecorino/indexes/<hash>_code_search.sqlite3).
             max_bytes:   Hard cap on total bytes written to the ramdisk dir.
                          Default 60 MB.  Set to 0 to disable the quota.
         """
@@ -147,7 +147,7 @@ class RamdiskIndex:
         """Copy finished databases from ramdisk to their SSD locations."""
         t0 = time.monotonic()
 
-        # 1. Sync DuckDB file
+        # 1. Sync SQLite file
         if os.path.exists(self.db_path):
             ssd_dir = os.path.dirname(self.ssd_db_path)
             os.makedirs(ssd_dir, exist_ok=True)
@@ -172,7 +172,7 @@ class RamdiskIndex:
                         os.remove(ssd_wal)
 
             db_size = os.path.getsize(self.ssd_db_path)
-            logger.info(f"[ramdisk] Synced DuckDB to SSD: "
+            logger.info(f"[ramdisk] Synced SQLite to SSD: "
                   f"{db_size / 1024 / 1024:.2f} MB")
 
         # 2. Sync Gorgonzola file (single file, not a directory)

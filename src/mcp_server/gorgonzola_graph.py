@@ -80,6 +80,19 @@ class GorgonzolaGraph:
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
 
+        # Prevent runaway disk usage from Kuzu lack of compaction
+        if os.path.exists(self.gorgonzola_db_path) and os.path.isdir(self.gorgonzola_db_path):
+            total_size = sum(
+                os.path.getsize(os.path.join(dirpath, f)) 
+                for dirpath, _, filenames in os.walk(self.gorgonzola_db_path) 
+                for f in filenames if not os.path.islink(os.path.join(dirpath, f))
+            )
+            # 5 GB threshold
+            if total_size > 5 * 1024 * 1024 * 1024:
+                import shutil
+                logger.warning(f"Gorgonzola DB at {self.gorgonzola_db_path} exceeded 5GB ({total_size} bytes). Wiping to reclaim space...")
+                shutil.rmtree(self.gorgonzola_db_path)
+
         import gorgonzola
         self.gorgonzola = gorgonzola
 
