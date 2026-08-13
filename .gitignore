@@ -72,24 +72,13 @@ secrets.json
 # Build artifacts from src/
 *.egg-info/
 
-# GitStats3 output data and cache
-/gitstats_output/
-/gitstats_output_multi/
-/gitstats_export_oop_metrics.json
+# Transient data & caches
 *.cache
-
+*.duckdb
 grammars/
 bin/
 /reports/
 /indexes/
-gitstats_metrics.json
-test_metrics.json
-git
-test_db
-output.log
-
-# Transient data & caches
-.gitstats3_data/
 .mcp_outputs/
 /output/
 /examples/
