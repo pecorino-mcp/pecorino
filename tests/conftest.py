@@ -14,6 +14,14 @@ def isolate_index_dir(tmp_path_factory):
     # Set the environment variable so subprocesses also get the isolated directory
     os.environ["PECORINO_INDEX_DIR"] = str(test_index_dir)
     
+    # Limit resource usage for embeddings/models/DBs during tests
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    os.environ["RAY_num_cpus"] = "1"
+    
     from src.mcp_server.config import settings
     settings.index_dir = test_index_dir
 

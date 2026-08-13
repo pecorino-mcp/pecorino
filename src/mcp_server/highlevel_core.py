@@ -39,33 +39,6 @@ from mcp.server.context import ServerRequestContext
 from mcp_types import NotificationParams
 
 
-async def handle_roots_list_changed(ctx: ServerRequestContext, params: NotificationParams) -> None:
-    """Handle root list changes by refreshing the cached roots."""
-    global _cached_roots_paths
-    logger.info("Received notifications/roots/list_changed. Refreshing roots.")
-    try:
-        from mcp_types import ListRootsRequest, ListRootsResult
-        res = await ctx.session.send_request(ListRootsRequest(), ListRootsResult)
-        if res and res.roots:
-            new_roots = []
-            for root in res.roots:
-                uri = getattr(root, "uri", None)
-                if uri is None and isinstance(root, dict):
-                    uri = root.get("uri")
-                if uri and str(uri).startswith("file://"):
-                    from urllib.parse import unquote
-                    new_roots.append(unquote(str(uri)[7:]))
-            if new_roots:
-                _cached_roots_paths = new_roots
-                logger.info(f"Updated cached roots: {_cached_roots_paths}")
-    except Exception as e:
-        logger.warning(f"Failed to refresh roots after list_changed: {e}")
-
-server._lowlevel_server.add_notification_handler(
-    "notifications/roots/list_changed",
-    NotificationParams,
-    handle_roots_list_changed
-)
 
 async def _resolve_target(target: Any, roots_result: ListRootsResult) -> str:
     global _cached_roots_paths
