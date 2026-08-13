@@ -1316,6 +1316,8 @@ class CodebaseIndexer:
         if not parse_jobs:
             self.search_index = CodeSearchIndex(ssd_db_path)
             self.graph = self.search_index.graph
+            if self.embedder:
+                self.embedder.db_conn = self.search_index._conn
 
             tracked_files = self.search_index.get_all_tracked_files()
             target_prefix = str(path) + os.sep
@@ -1377,6 +1379,8 @@ class CodebaseIndexer:
         with ramdisk:
             ram_search = CodeSearchIndex(ramdisk.db_path)
             ram_graph = ram_search.graph
+            if self.embedder:
+                self.embedder.db_conn = ram_search._conn
 
             with ram_graph:
                 max_workers = settings.index_max_workers
@@ -1464,6 +1468,7 @@ class CodebaseIndexer:
                                         if i < len(graph_embeddings):
                                             props["embedding"] = graph_embeddings[i]
                                 except Exception as e:
+                                    import traceback; traceback.print_exc()
                                     logger.warning("Failed vector embeddings for chunk graph nodes: %s", e)
 
                         # 2. Clear existing indexes for modified files in this chunk
@@ -1602,6 +1607,8 @@ class CodebaseIndexer:
 
         self.search_index = CodeSearchIndex(ssd_db_path)
         self.graph = self.search_index.graph
+        if self.embedder:
+            self.embedder.db_conn = self.search_index._conn
 
         tracked_files = self.search_index.get_all_tracked_files()
         target_prefix = str(path) + os.sep
@@ -1660,6 +1667,7 @@ class CodebaseIndexer:
                                 pairs = list(zip(summary_ids, embeddings))
                                 self.search_index.update_embeddings_bulk(pairs)
             except Exception as e:
+                import traceback; traceback.print_exc()
                 logger.warning("Failed to process static HCGS summaries: %s", e)
                 logger.debug(traceback.format_exc())
 
