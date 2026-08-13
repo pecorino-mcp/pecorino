@@ -56,6 +56,7 @@ async def _auto_sync_stale(repo_root: str, db_path: str, scope_path: str):
                         indexer.search_index.upsert_file_hash(filepath, content_hash, mtime, lang)
                     except Exception as e:
                         logger.warning("Auto-sync failed for %s: %s", filepath, e)
+                indexer.search_index.rebuild_fts()
             finally:
                 indexer.close()
 

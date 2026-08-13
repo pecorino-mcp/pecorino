@@ -101,7 +101,6 @@ class TestAutoSyncIntegration:
         py_file = repo / "example.py"
 
         # Modify the file — add a new function
-        time.sleep(0.05)
         py_file.write_text(
             'class Foo:\n'
             '    def bar(self):\n'
@@ -111,6 +110,8 @@ class TestAutoSyncIntegration:
             '    return "hello"\n',
             encoding="utf-8",
         )
+        st = os.stat(py_file)
+        os.utime(py_file, (st.st_atime + 10, st.st_mtime + 10))
 
         from src.mcp_server.middleware.sync import _auto_sync_stale
         from src.mcp_server.middleware.caching import clear_api_cache
