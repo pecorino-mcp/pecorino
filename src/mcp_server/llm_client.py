@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from mcp import types
+import mcp_types as types
 from src.mcp_server.context_helper import PecorinoContext
 
 logger = logging.getLogger(__name__)
@@ -28,51 +28,12 @@ Rules:
     
     prompt = f"Question: {natural_language_query}\n"
 
-    # Try IDE sampling first
-    if ctx and ctx.supports_sampling:
-        try:
-            logger.info("Attempting to generate Cypher using IDE sampling...")
-            result = await ctx.create_message(
-                messages=[
-                    types.SamplingMessage(
-                        role="user", 
-                        content=types.TextContent(type="text", text=prompt)
-                    )
-                ],
-                system_prompt=system_prompt,
-                max_tokens=256,
-            )
-            
-            if result and result.content:
-                # Extract text content from the response
-                text_content = ""
-                for msg_part in result.content:
-                    if hasattr(msg_part, "text"):
-                        text_content += msg_part.text
-                    elif isinstance(msg_part, dict) and "text" in msg_part:
-                        text_content += msg_part["text"]
-                    elif isinstance(msg_part, str):
-                        text_content += msg_part
-                
-                if text_content:
-                    cypher = text_content.strip()
-                    # Clean up markdown code blocks if the LLM ignored Rule 1
-                    if cypher.startswith("```cypher"):
-                        cypher = cypher[9:]
-                    elif cypher.startswith("```"):
-                        cypher = cypher[3:]
-                    if cypher.endswith("```"):
-                        cypher = cypher[:-3]
-                    return cypher.strip()
-        except Exception as e:
-            logger.warning(f"IDE sampling failed: {e}. Falling back to local model.")
-            
-    # Fallback to litellm (local model)
+    # Use litellm (local model)
     try:
         import litellm
         import os
         import sys
-        logger.info("Using litellm fallback for Cypher generation...")
+        logger.info("Using litellm for Cypher generation...")
         
         fallback_model = os.getenv("PECORINO_LLM_MODEL", "ollama/llama3")
         
