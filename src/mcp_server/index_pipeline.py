@@ -178,7 +178,7 @@ class CodebaseIndexer:
                 self._repo_files_cache = []
                 self._repo_basename_index = {}  # basename → [full_paths]
                 for r, d, fnames in os.walk(self.repo_path):
-                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context"}
+                    ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context", "modules"}
                     d[:] = [
                         dirname for dirname in d
                         if dirname not in ignore_dirs
@@ -1254,7 +1254,7 @@ class CodebaseIndexer:
     def _index_directory_impl(self, dirpath: str, progress_callback=None) -> dict:
         profiler = IndexProfiler()
         path = pathlib.Path(dirpath).resolve()
-        ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context"}
+        ignore_dirs = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "third_party", "dataset", "build_test", "build-context", "modules"}
         files = []
         for r, d, fnames in os.walk(str(path)):
             d[:] = [
