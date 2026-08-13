@@ -53,7 +53,6 @@ dependencies = [
     "onnxruntime>=1.15.0",
     "tokenizers>=0.15.0",
     "huggingface_hub>=0.20.0",
-    "tantivy>=0.22.0",
     "litellm>=1.0.0",
     "python-lsp-server>=1.11.0",
     "fastembed>=0.2.0",
