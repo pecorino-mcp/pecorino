@@ -25,8 +25,8 @@ jmespath==1.1.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 librt==0.15.0
--e git+https://github.com/modelcontextprotocol/python-sdk@00a70148bcd39b40ee0b0745e0b468eac0a44efb#egg=mcp&subdirectory=../../modules/python-sdk
--e git+https://github.com/modelcontextprotocol/python-sdk@00a70148bcd39b40ee0b0745e0b468eac0a44efb#egg=mcp_types&subdirectory=../../modules/python-sdk/src/mcp-types
+-e ./modules/python-sdk
+-e ./modules/python-sdk/src/mcp-types
 mypy==2.3.0
 mypy_extensions==1.1.0
 numpy==2.5.2
@@ -34,7 +34,7 @@ opentelemetry-api==1.44.0
 packaging==26.3
 pandas==3.0.5
 pathspec==1.1.1
--e git+https://github.com/pecorino-mcp/pecorino-utils.git@2cb4c8d4a8b514423bcc20c32df543c4b9c1ce1b#egg=pecorino_utils&subdirectory=../../../modules/pecorino-utils
+-e ./modules/pecorino-utils
 pluggy==1.6.0
 prometheus_client==0.26.0
 psutil==7.2.2
