@@ -66,7 +66,11 @@ async def handle_list_prompts(
             )
         )
 
-    return types.ListPromptsResult(prompts=prompts)
+    return types.ListPromptsResult(
+        prompts=prompts,
+        cache_scope="public",
+        ttl_ms=86400000
+    )
 
 async def handle_get_prompt(
     ctx: ServerRequestContext,
