@@ -378,7 +378,11 @@ async def handle_list_tools(
             )
         )
 
-    return types.ListToolsResult(tools=tools)
+    return types.ListToolsResult(
+        tools=tools,
+        cache_scope="public",
+        ttl_ms=86400000
+    )
 
 async def handle_call_tool(
     ctx: ServerRequestContext,

@@ -58,7 +58,11 @@ async def handle_list_resources(
                 )
             )
 
-    return types.ListResourcesResult(resources=resources)
+    return types.ListResourcesResult(
+        resources=resources,
+        cache_scope="public",
+        ttl_ms=300000
+    )
 
 
 async def handle_read_resource(
@@ -95,14 +99,18 @@ async def handle_read_resource(
             "languages": {row[0]: row[1] for row in lang_counts}
         }
         return types.ReadResourceResult(
-            contents=[types.TextResourceContents(uri=uri, mimeType="application/json", text=json.dumps(data, indent=2))]
+            contents=[types.TextResourceContents(uri=uri, mimeType="application/json", text=json.dumps(data, indent=2))],
+            cache_scope="public",
+            ttl_ms=300000
         )
 
     elif resource_type == "files":
         files = conn.execute("SELECT filepath, lang, mtime FROM files ORDER BY filepath").fetchall()
         data = [{"filepath": r[0], "language": r[1], "mtime": r[2]} for r in files]
         return types.ReadResourceResult(
-            contents=[types.TextResourceContents(uri=uri, mimeType="application/json", text=json.dumps(data, indent=2))]
+            contents=[types.TextResourceContents(uri=uri, mimeType="application/json", text=json.dumps(data, indent=2))],
+            cache_scope="public",
+            ttl_ms=300000
         )
 
     raise ValueError(f"Unknown resource type: {resource_type}")

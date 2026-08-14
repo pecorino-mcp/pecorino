@@ -76,7 +76,8 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                     json.dump(result, f, indent=2)
                 return {"saved_to": str(out_path), "target": target_path, "type": target_type, "view": "all"}
             except Exception as e:
-                logger.error("Failed to write browse output: %s", e)
+                from src.core.errors import AnalysisError
+                raise AnalysisError(f"Failed to write browse output: {e}")
 
         def truncate_lists(obj):
             if isinstance(obj, dict):
@@ -99,15 +100,15 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
     # Remove explicit index requirement
     try:
         index = _get_cached_api(repo_root, db_path, "index")
-    except Exception:
-        index = None
+    except Exception as e:
+        raise IndexNotFoundError(f"Failed to load index database. Have you run update_index? Error: {e}")
 
     api = None
     if view in ("deps", "pagerank"):
         try:
             api = _get_cached_api(repo_root, db_path, "graph")
-        except Exception:
-            api = None
+        except Exception as e:
+            raise IndexNotFoundError(f"Failed to load graph database. Have you run update_index? Error: {e}")
 
 
     # ── Structural views: classes, functions, deps, tree, summary ──
@@ -139,33 +140,19 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
             result["structure"] = {"tree": tree_str}
         else:
             # Directory: indexed file listing grouped by language
-            if index is None:
-                file_entries = []
-                try:
-                    for root, dirs, fnames in os.walk(str(path)):
-                        dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".tox", "build", "dist", "modules", "third_party", "dataset", "build_test", "build-context"}]
-                        for fname in fnames:
-                            file_entries.append({"path": os.path.relpath(os.path.join(root, fname), str(path)), "lang": "unknown"})
-                            if len(file_entries) >= 1000:
-                                break
-                        if len(file_entries) >= 1000:
-                            break
-                except Exception:
-                    pass
-                result["structure"] = {"file_tree": file_entries, "total_files": len(file_entries), "note": "Dynamic scan (unindexed)"}
-            else:
-                try:
-                    prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
-                    db_res = index._conn.execute('''
-                        SELECT filepath, lang
-                        FROM files
-                        WHERE filepath LIKE ?
-                        ORDER BY filepath
-                    ''', (f"{prefix}%",)).fetchall()
-                    file_entries = [{"path": row[0][len(prefix):], "lang": row[1]} for row in db_res]
-                except Exception:
-                    file_entries = []
-                result["structure"] = {"file_tree": file_entries, "total_indexed_files": len(file_entries)}
+            try:
+                prefix = path.as_posix() if path.as_posix().endswith('/') else f"{path.as_posix()}/"
+                db_res = index._conn.execute('''
+                    SELECT filepath, lang
+                    FROM files
+                    WHERE filepath LIKE ?
+                    ORDER BY filepath
+                ''', (f"{prefix}%",)).fetchall()
+                file_entries = [{"path": row[0][len(prefix):], "lang": row[1]} for row in db_res]
+            except Exception as e:
+                from src.core.errors import AnalysisError
+                raise AnalysisError(f"Index database query failed: {e}")
+            result["structure"] = {"file_tree": file_entries, "total_indexed_files": len(file_entries)}
 
     elif view == "deps":
         if is_file:
@@ -181,8 +168,9 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                     SELECT filepath FROM files WHERE filepath LIKE ?
                 ''', (f"{prefix}%",)).fetchall()
                 dir_files = [row[0] for row in db_res]
-            except Exception:
-                dir_files = []
+            except Exception as e:
+                from src.core.errors import AnalysisError
+                raise AnalysisError(f"Index database query failed: {e}")
 
             all_deps: dict[str, list] = {}
             for fp in dir_files:
@@ -194,7 +182,8 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                             all_deps[dep_id] = []
                         if fp not in all_deps[dep_id]:
                             all_deps[dep_id].append(fp)
-                except Exception:
+                except Exception as e:
+                    logger.warning("Failed to get dependencies for %s: %s", fp, e)
                     continue
 
             result["structure"] = [
@@ -253,8 +242,8 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                 graph_metrics = await asyncio.to_thread(api.get_file_dependencies, path.as_posix())
                 result["structure"] = {"pagerank_score": graph_metrics.get("pagerank_score", 0.0)}
             except Exception as e:
-                logger.warning("Graph database query failed: %s", e)
-                result["structure"] = {"pagerank_score": 0.0}
+                from src.core.errors import AnalysisError
+                raise AnalysisError(f"Graph database query failed: {e}")
 
     elif view == "summary":
         if is_file:
@@ -285,10 +274,10 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                         "note": "Summary overview."
                     }
                 except Exception as e:
-                    logger.warning("Failed to generate complete summary: %s", e)
-                    result["structure"] = {"total_indexed_files": 0, "total_symbols": 0, "languages": {}}
+                    from src.core.errors import AnalysisError
+                    raise AnalysisError(f"Failed to generate complete summary: {e}")
             else:
-                result["structure"] = {"total_indexed_files": 0, "total_symbols": 0, "languages": {}, "note": "Unindexed directory."}
+                raise IndexNotFoundError("Summary view requires running 'update_index' first.")
 
     elif view == "code":
         if not is_file:
@@ -324,7 +313,8 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
             graph_metrics = await asyncio.to_thread(api.get_file_dependencies, path.as_posix())
             result["graph_metrics"] = graph_metrics
         except Exception as e:
-            logger.warning("Graph database query failed: %s", e)
+            from src.core.errors import AnalysisError
+            raise AnalysisError(f"Graph database query failed: {e}")
 
     if view == "tree":
         result["next_steps"] = "Use analyze(analysis='impact') on interesting files, or metrics(what=['hotspots']) for repo risk triage."
@@ -341,8 +331,8 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
             dumped = json.dumps(result)
             if len(dumped) > 50000:
                 output_file = f".mcp_outputs/browse_{view}_{int(time.time())}.json"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to serialize or auto-save output: %s", e)
 
     if output_file:
         try:
@@ -351,7 +341,8 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                 json.dump(result, f, indent=2)
             output_file = str(out_path)  # Use safe path in results
         except Exception as e:
-            logger.error("Failed to write browse output: %s", e)
+            from src.core.errors import AnalysisError
+            raise AnalysisError(f"Failed to write browse output: {e}")
 
         # Create a summarized version of result to return to the LLM
         summary_result = {"saved_to": output_file}
@@ -414,8 +405,8 @@ async def do_browse(target: str, view: str = "tree", query: Optional[str] = None
                         "stale_file_count": stale_count,
                         "hint": "Run update_index to refresh. Search/graph views auto-sync."
                     }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to check index staleness: %s", e)
 
     return truncate_lists(result)
 
