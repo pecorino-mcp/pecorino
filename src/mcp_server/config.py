@@ -45,7 +45,7 @@ class Config:
         self.embedding_dim = int(os.getenv("PECORINO_EMBEDDING_DIM", default_dim))
         self.enable_lsp = os.getenv("PECORINO_ENABLE_LSP", "false").lower() in ("true", "1", "yes")
         self.lsp_pool_size = int(os.getenv("PECORINO_LSP_POOL_SIZE", "2"))
-        self.lsp_request_timeout = float(os.getenv("PECORINO_LSP_TIMEOUT", "0.8"))
+        self.lsp_request_timeout = float(os.getenv("PECORINO_LSP_TIMEOUT", "5.0"))
         self.enable_hcgs = os.getenv("PECORINO_ENABLE_HCGS", "true").lower() in ("true", "1", "yes")
 
         # FTS buffer pool memory limit (MB)

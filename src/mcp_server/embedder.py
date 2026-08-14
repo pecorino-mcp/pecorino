@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 from typing import List
@@ -27,7 +28,7 @@ class Embedder:
             CREATE TABLE IF NOT EXISTS embeddings_cache (
                 text_hash VARCHAR PRIMARY KEY,
                 text VARCHAR,
-                embedding DOUBLE[384],
+                embedding TEXT,
                 model VARCHAR,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -53,8 +54,8 @@ class Embedder:
             logger.warning(f"sentence-transformers/torch unavailable ({e}). Falling back to fastembed.")
             try:
                 from fastembed import TextEmbedding
-                self._model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L12-v2", threads=max_threads)
-                self._encode = lambda texts: [list(v) for v in self._model.embed(texts)]
+                self._model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", threads=max_threads)
+                self._encode = lambda texts: [[float(x) for x in v] for v in self._model.embed(texts)]
                 logger.info(f"Loaded fastembed model {self.model_name}")
             except (ImportError, Exception) as e2:
                 logger.warning(f"Neither sentence-transformers nor fastembed is available ({e2}). Disabling vector embeddings.")
@@ -75,9 +76,17 @@ class Embedder:
         hash_list_str = ", ".join(f"'{h}'" for h in hashes)
         cached = {}
         if hash_list_str:
-            res = self.db_conn.execute(f"SELECT text_hash, embedding FROM embeddings_cache WHERE text_hash IN ({hash_list_str}) AND model = '{self.model_name}'").fetchall()
+            res = self.db_conn.execute(
+                f"SELECT text_hash, embedding FROM embeddings_cache WHERE text_hash IN ({hash_list_str}) AND model = '{self.model_name}'"
+            ).fetchall()
             for r in res:
-                cached[r[0]] = r[1]
+                emb = r[1]
+                if isinstance(emb, str):
+                    try:
+                        emb = json.loads(emb)
+                    except Exception:
+                        pass
+                cached[r[0]] = emb
 
         # Embed missing
         missing_indices = [i for i, h in enumerate(hashes) if h not in cached]
@@ -87,7 +96,8 @@ class Embedder:
                 return []
             missing_texts = [truncated[i] for i in missing_indices]
             logger.info(f"Embedding {len(missing_texts)} texts (batch_size={_BATCH_SIZE})...")
-            new_embeddings = self._encode(missing_texts)
+            raw_embeddings = self._encode(missing_texts)
+            new_embeddings = [[float(x) for x in emb] for emb in raw_embeddings]
 
             # Cache new embeddings
             insert_data = []
@@ -96,14 +106,14 @@ class Embedder:
                 t = truncated[idx]
                 emb = new_embeddings[i]
                 cached[h] = emb
-                insert_data.append((h, t, emb, self.model_name))
+                emb_val = json.dumps(emb)
+                insert_data.append((h, t, emb_val, self.model_name))
 
             if insert_data:
-                # Fast insert via pandas DataFrame to avoid DuckDB executemany slowness with arrays
-                import pandas as pd
-                df = pd.DataFrame(insert_data, columns=["text_hash", "text", "embedding", "model"])
-                self.db_conn.execute("INSERT OR REPLACE INTO embeddings_cache (text_hash, text, embedding, model) SELECT * FROM df")
+                self.db_conn.executemany(
+                    "INSERT OR REPLACE INTO embeddings_cache (text_hash, text, embedding, model) VALUES (?, ?, ?, ?)",
+                    insert_data
+                )
 
         # Return in original order
         return [cached[h] for h in hashes]
-# test
