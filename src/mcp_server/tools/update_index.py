@@ -162,7 +162,8 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
             return final_res
 
         elif path.is_file():
-            if path.suffix not in SUPPORTED:
+            is_adr = path.suffix == ".md" and "docs/adr" in path.as_posix()
+            if path.suffix not in SUPPORTED and not is_adr:
                 raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
 
             content = await asyncio.to_thread(read_limited, path)
