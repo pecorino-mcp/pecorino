@@ -1,6 +1,34 @@
 import os
+import resource
 import pytest
 from pathlib import Path
+
+# Enforce 4 cores (4c), 4 threads (4t), and 6GB RAM at module/session startup
+if hasattr(os, "sched_setaffinity"):
+    try:
+        os.sched_setaffinity(0, {0, 1, 2, 3})
+    except Exception:
+        pass
+
+# Enforce 6GB RAM limit (RLIMIT_DATA: 6 * 1024^3 bytes)
+try:
+    limit_bytes = 6 * 1024 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_DATA, (limit_bytes, limit_bytes))
+except Exception:
+    pass
+
+# Enforce 4 threads across all parallel libraries
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["MKL_NUM_THREADS"] = "4"
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "4"
+os.environ["NUMEXPR_NUM_THREADS"] = "4"
+os.environ["TORCH_NUM_THREADS"] = "4"
+os.environ["RAY_num_cpus"] = "4"
+os.environ["PECORINO_INDEX_MAX_WORKERS"] = "4"
+os.environ["PECORINO_FTS_RAM_MB"] = "256"
+os.environ["PECORINO_GRAPH_MAX_THREADS"] = "4"
+os.environ["PECORINO_LSP_TIMEOUT"] = "5.0"
 
 @pytest.fixture(autouse=True, scope="session")
 def isolate_index_dir(tmp_path_factory):
@@ -14,16 +42,17 @@ def isolate_index_dir(tmp_path_factory):
     # Set the environment variable so subprocesses also get the isolated directory
     os.environ["PECORINO_INDEX_DIR"] = str(test_index_dir)
     
-    # Limit resource usage for embeddings/models/DBs during tests
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
-    os.environ["RAY_num_cpus"] = "1"
-    
     from src.mcp_server.config import settings
     settings.index_dir = test_index_dir
+    settings.index_max_workers = 4
+    settings.fts_ram_mb = 256
+
+    yield
+
+    from src.mcp_server.middleware.caching import clear_api_cache
+    clear_api_cache()
+    import gc
+    gc.collect()
 
 @pytest.fixture
 def temp_repo(tmp_path):

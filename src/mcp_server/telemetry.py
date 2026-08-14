@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import uuid
+import asyncio
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -16,17 +17,20 @@ def get_telemetry_log_path() -> str:
         return _LOG_FILE_PATH
 
     try:
-        from src.mcp_server.config import get_data_dir
-        data_dir = get_data_dir()
-        log_dir = os.path.join(data_dir, "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        _LOG_FILE_PATH = os.path.join(log_dir, "search_events.log")
+        from src.mcp_server.config import settings
+        log_dir = settings.index_dir.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _LOG_FILE_PATH = str(log_dir / "search_events.log")
         return _LOG_FILE_PATH
     except Exception as e:
         logger.warning(f"Could not resolve telemetry log path: {e}")
         # Fallback to local directory
         _LOG_FILE_PATH = os.path.abspath("search_events.log")
         return _LOG_FILE_PATH
+
+def _append_log(log_path: str, line: str):
+    with open(log_path, mode='a', encoding='utf-8') as f:
+        f.write(line + "\n")
 
 async def log_search_event(
     original_query: str,
@@ -54,10 +58,8 @@ async def log_search_event(
             "repo_root": repo_root
         }
 
-        # Write to .log file as a JSONL entry
-        import aiofiles
-        async with aiofiles.open(log_path, mode='a') as f:
-            await f.write(json.dumps(event) + "\n")
+        line = json.dumps(event)
+        await asyncio.to_thread(_append_log, log_path, line)
 
     except Exception as e:
         logger.warning(f"Failed to log search telemetry: {e}")

@@ -123,8 +123,20 @@ class GorgonzolaGraph:
         except Exception as e:
             logger.warning(f"Failed to load Leiden extension: {e}")
 
+    def _open_db(self, buffer_pool_size=64 * 1024 * 1024, max_db_size=None, max_num_threads=None):
+        if max_db_size is None:
+            max_db_size = int(os.getenv("PECORINO_GRAPH_MAX_DB_SIZE", str(2 * 1024 * 1024 * 1024)))
+        if max_num_threads is None:
+            max_num_threads = int(os.getenv("PECORINO_GRAPH_MAX_THREADS", "4"))
+        return self.gorgonzola.Database(
+            self.gorgonzola_db_path,
+            buffer_pool_size=buffer_pool_size,
+            max_num_threads=max_num_threads,
+            max_db_size=max_db_size
+        )
+
     def __enter__(self):
-        self._db_ctx = self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024)
+        self._db_ctx = self._open_db()
         self._db = self._db_ctx.__enter__()
         self._conn_ctx = self.gorgonzola.Connection(self._db)
         self._conn = self._conn_ctx.__enter__()
@@ -228,7 +240,7 @@ class GorgonzolaGraph:
         if self._in_context:
             return self._query_conn(query, parameters, self._conn)
         else:
-            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
+            with self._open_db() as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     return self._query_conn(query, parameters, conn)
@@ -259,6 +271,10 @@ class GorgonzolaGraph:
             except Exception as e:
                 logger.error("Failed to compute Leiden communities: %s", e)
                 return {}
+
+    def close(self):
+        """Close the active connection and database contexts."""
+        self.__exit__(None, None, None)
 
     def _query_conn(self, query: str, parameters: dict, conn) -> list:
         res = conn.execute(query, parameters)
@@ -315,7 +331,7 @@ class GorgonzolaGraph:
         if self._in_context:
             return self._insert_nodes_bulk_conn(nodes, self._conn)
         else:
-            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
+            with self._open_db() as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     return self._insert_nodes_bulk_conn(nodes, conn)
@@ -438,7 +454,7 @@ class GorgonzolaGraph:
         if self._in_context:
             self._insert_edges_bulk_conn(edges, self._conn, label_map)
         else:
-            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
+            with self._open_db() as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     self._insert_edges_bulk_conn(edges, conn, label_map)
@@ -454,7 +470,7 @@ class GorgonzolaGraph:
                 r = self._conn.execute(query)
                 r.close()
             else:
-                with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
+                with self._open_db() as db:
                     with self.gorgonzola.Connection(db) as conn_ctx:
                         r = conn_ctx.execute(query)
                         r.close()
@@ -528,7 +544,7 @@ class GorgonzolaGraph:
         if self._in_context:
             self._query_batch_conn(queries, parameters, self._conn)
         else:
-            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
+            with self._open_db() as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
                     self._query_batch_conn(queries, parameters, conn)
@@ -544,7 +560,7 @@ class GorgonzolaGraph:
     def pagerank(self) -> list:
         try:
             results = []
-            with self.gorgonzola.Database(self.gorgonzola_db_path, buffer_pool_size=256 * 1024 * 1024) as db:
+            with self._open_db() as db:
                 with self.gorgonzola.Connection(db) as conn:
                     self._ensure_schema(conn)
 

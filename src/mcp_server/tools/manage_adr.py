@@ -66,8 +66,10 @@ async def do_manage_adr(
             f.write(file_content)
 
         try:
-            from src.mcp_server.tools.update_index import do_update_index
-            await do_update_index(target=filepath, allow_external=True, ctx=ctx)
+            from src.core.constants import SUPPORTED_EXTENSIONS
+            if os.path.splitext(filepath)[1] in SUPPORTED_EXTENSIONS:
+                from src.mcp_server.tools.update_index import do_update_index
+                await do_update_index(target=filepath, allow_external=True, ctx=ctx)
         except Exception as e:
             logger.warning(f"Failed to auto-index new ADR {filename}: {e}")
 
@@ -92,8 +94,10 @@ async def do_manage_adr(
             f.write(content or "")
 
         try:
-            from src.mcp_server.tools.update_index import do_update_index
-            await do_update_index(target=filepath, allow_external=True, ctx=ctx)
+            from src.core.constants import SUPPORTED_EXTENSIONS
+            if os.path.splitext(filepath)[1] in SUPPORTED_EXTENSIONS:
+                from src.mcp_server.tools.update_index import do_update_index
+                await do_update_index(target=filepath, allow_external=True, ctx=ctx)
         except Exception as e:
             logger.warning(f"Failed to auto-index updated ADR {adr_id}: {e}")
 
