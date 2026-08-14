@@ -80,16 +80,17 @@ class LSPClient:
             try:
                 self.send_request("shutdown", {}, timeout=2.0)
                 self.send_notification("exit", {})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Error shutting down LSP server: %s", e)
             try:
                 self.process.terminate()
                 self.process.wait(timeout=2.0)
-            except Exception:
+            except Exception as e:
+                logger.debug("Error terminating LSP process, attempting kill: %s", e)
                 try:
                     self.process.kill()
-                except Exception:
-                    pass
+                except Exception as e2:
+                    logger.debug("Error killing LSP process: %s", e2)
             self.process = None
 
         if self.read_thread:
@@ -143,7 +144,8 @@ class LSPClient:
             try:
                 from src.mcp_server.config import settings
                 timeout = settings.lsp_request_timeout
-            except Exception:
+            except Exception as e:
+                logger.debug("Failed to get lsp_request_timeout from settings: %s", e)
                 timeout = 0.8
 
         with self._id_lock:
@@ -319,8 +321,8 @@ class LSPClientPool:
         for client in clients:
             try:
                 client.open_document(filepath, content)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to open document %s in LSP client: %s", filepath, e)
 
     def resolve_definition(self, filepath: str, line: int, character: int, timeout: Optional[float] = None) -> Optional[dict]:
         client = self.get_client()

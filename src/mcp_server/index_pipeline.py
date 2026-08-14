@@ -83,8 +83,8 @@ class CodebaseIndexer:
             if hasattr(self.graph, 'close'):
                 try:
                     self.graph.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Error closing graph: %s", e)
             self.graph = None
 
     def __enter__(self):
@@ -258,8 +258,8 @@ class CodebaseIndexer:
                                             elif isinstance(exports, dict) and isinstance(exports.get('.'), str):
                                                 cand = os.path.abspath(os.path.join(nm_path, exports['.']))
                                                 if os.path.exists(cand): return cand
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug("Failed to parse package.json: %s", e)
                             for ext in exts:
                                 cand = os.path.join(nm_path, f'index{ext}')
                                 if os.path.exists(cand): return os.path.abspath(cand)
@@ -319,8 +319,8 @@ class CodebaseIndexer:
                             if line.strip().startswith('module '):
                                 module_name = line.strip().split()[1]
                                 break
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to read go.mod: %s", e)
             if module_name and dep_string.startswith(module_name):
                 relative_path = dep_string[len(module_name):].lstrip('/')
                 target_path = os.path.abspath(os.path.join(self.repo_path, relative_path))
@@ -851,8 +851,8 @@ class CodebaseIndexer:
                         "def_filepath": res["filepath"],
                         "def_line": res["start_line"]
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to resolve definition: %s", e)
         return resolutions
     def _compute_similarity_edges(self):
         """Compute SIMILAR_TO (MinHash/Jaccard) and SEMANTICALLY_RELATED (Vector) edges."""
@@ -1008,8 +1008,8 @@ class CodebaseIndexer:
                     sym = to_symbol[0].get('cnt', 0) if to_symbol else 0
                     res = to_resolved[0].get('cnt', 0) if to_resolved else 0
                     logger.info("Symbol resolution: %d total CALLS, %d resolved, %d still pointing to Symbol nodes", total, res, sym)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to get resolution stats: %s", e)
 
             # After graph relationships are resolved, calculate and build PageRank
             try:
@@ -1062,8 +1062,8 @@ class CodebaseIndexer:
                 with self.graph:
                     try:
                         self.graph._conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed to drop CodeGraph before projection: %s", e)
                     self.graph._conn.execute("""
                         CALL PROJECT_GRAPH('CodeGraph',
                             ['File', 'CodeNode', 'Identifier'],
@@ -1086,8 +1086,8 @@ class CodebaseIndexer:
                     # Drop projected graph
                     try:
                         self.graph._conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed to drop CodeGraph after sweep: %s", e)
             except Exception as e:
                 logger.warning("Failed to run Leiden sweep: %s", e)
                 logger.debug(traceback.format_exc())
@@ -1293,8 +1293,8 @@ class CodebaseIndexer:
             if self.search_index and self.search_index._conn:
                 rows = self.search_index._conn.execute('SELECT filepath, content_hash, mtime FROM files').fetchall()
                 tracked_metadata = {row[0]: (row[1], row[2]) for row in rows}
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to get tracked metadata: %s", e)
 
         indexed_count = 0
         skipped_count = 0
