@@ -13,7 +13,22 @@ from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
 
 logger = logging.getLogger(__name__)
 
-FTS_URING_LIB_PATH = str(Path(__file__).resolve().parent.parent.parent / "modules" / "c_fts_uring" / "fts_uring.so")
+import glob
+import sys
+
+_base_path = Path(__file__).resolve().parent.parent.parent / "modules" / "c_fts_uring"
+_built_libs = list(_base_path.glob("fts_uring.*"))
+_built_libs = [f for f in _built_libs if f.suffix in ('.so', '.dylib', '.dll', '.pyd')]
+
+if _built_libs:
+    FTS_URING_LIB_PATH = str(_built_libs[0])
+else:
+    if sys.platform == "win32":
+        FTS_URING_LIB_PATH = str(_base_path / "fts_uring.dll")
+    elif sys.platform == "darwin":
+        FTS_URING_LIB_PATH = str(_base_path / "fts_uring.dylib")
+    else:
+        FTS_URING_LIB_PATH = str(_base_path / "fts_uring.so")
 
 def find_repo_root(filepath: str, max_depth: int = 20) -> str:
     """Find the root directory of the repository containing the given filepath."""
@@ -106,7 +121,7 @@ def migrate_codebase(conn: sqlite3.Connection):
     lib_path = FTS_URING_LIB_PATH
     try:
         conn.enable_load_extension(True)
-        conn.load_extension(lib_path)
+        conn.load_extension(lib_path, entrypoint="sqlite3_ftsuring_init")
     except sqlite3.OperationalError as e:
         logger.error(f"Failed to load FTS Uring extension: {e}")
 
@@ -186,7 +201,7 @@ class CodeSearchIndex:
             )
             self._conn.enable_load_extension(True)
             try:
-                self._conn.load_extension(FTS_URING_LIB_PATH)
+                self._conn.load_extension(FTS_URING_LIB_PATH, entrypoint="sqlite3_ftsuring_init")
             except Exception as e:
                 logger.error(f"Failed to load fts_uring.so: {e}")
 
