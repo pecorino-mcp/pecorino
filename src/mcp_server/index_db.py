@@ -179,7 +179,11 @@ class CodeSearchIndex:
             raise IndexNotFoundError(f"Index database not found at {self.db_path}. Run update_index first.")
 
         try:
-            self._conn = sqlite3.connect(f"file:{self.db_path}?mode=ro" if self._read_only else self.db_path, uri=True)
+            self._conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro" if self._read_only else self.db_path,
+                uri=True,
+                check_same_thread=False
+            )
             self._conn.enable_load_extension(True)
             try:
                 self._conn.load_extension(FTS_URING_LIB_PATH)
@@ -195,7 +199,7 @@ class CodeSearchIndex:
             import sys
 
             from src.mcp_server.config import settings
-            max_ram = getattr(settings, 'fts_ram_mb', 6144)
+            max_ram = getattr(settings, 'fts_ram_mb', 256)
             if 'pytest' in sys.modules:
                 max_ram = 128
             self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS pecorino_ast USING fts_uring('{fts_path}', {max_ram});")
@@ -205,16 +209,21 @@ class CodeSearchIndex:
             except Exception as e:
                 logger.error(f"Error querying pecorino_ast during init: {e}")
 
-            # ATTACH other repos for federated querying if we are in read-only mode
+            # ATTACH other repos for federated querying if we are in read-only mode (max 9 to respect SQLite 10 DB limit)
             if read_only:
                 try:
                     from src.mcp_server.registry import registry
+                    attached_count = 0
                     for repo in registry.get_all_repos():
-                        if repo['duckdb_path'] != self.db_path:
+                        if attached_count >= 9:
+                            break
+                        duck_path = repo.get('duckdb_path')
+                        if duck_path and duck_path != self.db_path and Path(duck_path).exists():
                             try:
-                                self._conn.execute(f"ATTACH '{repo['duckdb_path']}' AS repo_{repo['hash']}")
+                                self._conn.execute(f"ATTACH '{duck_path}' AS repo_{repo['hash']}")
+                                attached_count += 1
                             except Exception as e:
-                                logger.warning(f"Failed to attach repo {repo['name']} for federated query: {e}")
+                                logger.warning(f"Failed to attach repo {repo.get('name')} for federated query: {e}")
                 except Exception as e:
                     logger.debug(f"Could not load registry for ATTACH: {e}")
         except sqlite3.OperationalError as e:
@@ -239,13 +248,9 @@ class CodeSearchIndex:
             self._embedder = EmbeddingPipeline()
         return self._embedder
 
-
-
     def close(self):
         """Close the underlying database connections."""
         if self._conn:
-            import time
-            time.sleep(1.0)  # Give fts_uring async I/O time to flush before destroying virtual table
             try:
                 self._conn.close()
             except Exception:
@@ -253,7 +258,7 @@ class CodeSearchIndex:
             if self._fts_engine:
                 try:
                     self._fts_engine.close()
-                except Exception as e:
+                except Exception:
                     pass
             self._conn = None
 
@@ -956,5 +961,36 @@ class CodeSearchIndex:
         except sqlite3.Error as e:
             import logging
             logging.getLogger(__name__).error("Search failed: %s", e)
+            return []
+
+    def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
+        """Retrieve all indexed code nodes for a specific file."""
+        if not self._conn:
+            return []
+        try:
+            cursor = self._conn.execute(
+                "SELECT id, name, kind, filepath, start_line, end_line, start_byte, end_byte, signature FROM code_nodes WHERE filepath = ?",
+                (filepath,)
+            )
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get_file_nodes for {filepath}: {e}")
+            return []
+
+    def get_dir_nodes(self, dirpath: str) -> List[Dict[str, Any]]:
+        """Retrieve all indexed code nodes within a directory tree."""
+        if not self._conn:
+            return []
+        try:
+            normalized_dir = dirpath if dirpath.endswith(os.sep) else dirpath + os.sep
+            cursor = self._conn.execute(
+                "SELECT id, name, kind, filepath, start_line, end_line, start_byte, end_byte, signature FROM code_nodes WHERE filepath LIKE ? OR filepath = ?",
+                (normalized_dir + "%", dirpath)
+            )
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get_dir_nodes for {dirpath}: {e}")
             return []
 

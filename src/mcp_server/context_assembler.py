@@ -32,20 +32,20 @@ def assemble_context(result: Dict[str, Any], graph, workspace_root: str) -> Dict
             # Callers
             callers = graph.query('''
                 MATCH (caller)-[:CALLS]->(n:CodeNode {id: $id})
-                RETURN caller.id as id, caller.name as name, caller.filepath as filepath, caller.start_line as line
+                RETURN caller.id as id, caller.name as name, caller.file as file, caller.line as line
                 LIMIT 5
             ''', {"id": node_id})
             if callers:
-                context["callers"] = [{"name": c["name"], "file": c["filepath"], "line": c["line"]} for c in callers]
+                context["callers"] = [{"name": c["name"], "file": c.get("file") or c.get("filepath", ""), "line": c.get("line", 0)} for c in callers]
 
             # Callees
             callees = graph.query('''
                 MATCH (n:CodeNode {id: $id})-[:CALLS]->(callee)
-                RETURN callee.id as id, callee.name as name, callee.filepath as filepath, callee.start_line as line
+                RETURN callee.id as id, callee.name as name, callee.file as file, callee.line as line
                 LIMIT 5
             ''', {"id": node_id})
             if callees:
-                context["callees"] = [{"name": c["name"], "file": c["filepath"], "line": c["line"]} for c in callees]
+                context["callees"] = [{"name": c["name"], "file": c.get("file") or c.get("filepath", ""), "line": c.get("line", 0)} for c in callees]
 
             # Parent scope (e.g. class containing this method)
             parent_q = graph.query('''

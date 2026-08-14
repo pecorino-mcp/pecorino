@@ -4,6 +4,8 @@ from typing import Any, Optional
 
 from mcp.server import ServerRequestContext
 
+from src.core.errors import AnalysisError, IndexNotFoundError, SecurityValidationError
+
 logger = logging.getLogger(__name__)
 
 async def do_query_graph(
@@ -34,7 +36,7 @@ async def do_query_graph(
             query = generated
             upper_query = query.upper()
         else:
-            return {"status": "error", "message": "Failed to generate Cypher query from natural language."}
+            raise AnalysisError("Failed to generate Cypher query from natural language.")
 
     # Basic Read-Only Check
     # This checks for mutating openCypher keywords to prevent accidental writes.
@@ -43,11 +45,13 @@ async def do_query_graph(
     for kw in mutating_keywords:
         if kw in upper_query:
             if re.search(rf"\b{kw}\b", upper_query):
-                return {
-                    "status": "error",
-                    "message": f"Mutation operations are not allowed in query_graph. Keyword {kw} detected."
-                }
+                raise SecurityValidationError(
+                    f"Mutation operations are not allowed in query_graph. Keyword {kw} detected.",
+                    valid_values=["Read-only openCypher queries: MATCH, RETURN, WITH, CALL"],
+                    suggestion="Use read-only queries only."
+                )
 
+    from pathlib import Path
     from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo
     from src.mcp_server.middleware.security import safe_path
 
@@ -55,10 +59,13 @@ async def do_query_graph(
     repo_root = find_repo_root(str(path))
     db_path = get_db_path_for_repo(repo_root)
 
+    if not Path(db_path).exists():
+        raise IndexNotFoundError("Graph index not found or uninitialized. Run update_index first.")
+
     from src.mcp_server.middleware.caching import _get_cached_api
     graph_api = _get_cached_api(repo_root, db_path, "graph")
     if not graph_api:
-        return {"status": "error", "message": "Graph index not found or uninitialized. Run update_index first."}
+        raise IndexNotFoundError("Graph index not found or uninitialized. Run update_index first.")
 
     # Neo4j compatibility: Kùzu uses LABEL() instead of type() for relationships
     # We use uppercase LABEL() to bypass a naive regex in Gorgonzola that replaces lowercase label() with .kind
@@ -73,4 +80,5 @@ async def do_query_graph(
         }
     except Exception as e:
         logger.error(f"query_graph failed: {e}")
-        return {"status": "error", "message": str(e)}
+        raise AnalysisError(f"openCypher query execution failed: {e}") from e
+
