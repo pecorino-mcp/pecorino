@@ -74,118 +74,123 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
                 env=env
             )
 
-        final_res = {}
+            final_res = {}
 
-        import time
-        start_time = time.time()
+            import time
+            start_time = time.time()
 
-        async def read_stdout():
-            nonlocal final_res
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                line_str = line.decode('utf-8', errors='ignore').strip()
-                if not line_str:
-                    continue
-                try:
-                    data = json.loads(line_str)
-                    if "result" in data:
-                        final_res = data["result"]
-                    elif "current" in data and "total" in data:
-                        current = data["current"]
-                        total = data["total"]
-                        from src.utils.helpers import print_progress_bar
-                        filename = os.path.basename(data.get("file", ""))
-                        msg = f"Indexing {filename} ({current}/{total})"
-                        print_progress_bar(
-                            current,
-                            total,
-                            prefix="[INFO] Indexing",
-                            suffix=f"({current}/{total}) {filename[:30]:<30}",
-                            stream=sys.stderr,
-                            start_time=start_time
-                        )
+            async def read_stdout():
+                nonlocal final_res
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    line_str = line.decode("utf-8", errors="ignore").strip()
+                    if not line_str:
+                        continue
+                    try:
+                        data = json.loads(line_str)
+                        if "result" in data:
+                            final_res = data["result"]
+                        elif "current" in data and "total" in data:
+                            current = data["current"]
+                            total = data["total"]
+                            from src.utils.helpers import print_progress_bar
+                            filename = os.path.basename(data.get("file", ""))
+                            msg = f"Indexing {filename} ({current}/{total})"
+                            print_progress_bar(
+                                current,
+                                total,
+                                prefix="[INFO] Indexing",
+                                suffix=f"({current}/{total}) {filename[:30]:<30}",
+                                stream=sys.stderr,
+                                start_time=start_time
+                            )
 
-                        await helper.report_progress(
-                            progress=current,
-                            total=total,
-                            message=msg
-                        )
-                except Exception as e:
-                    logger.warning("Subprocess parse error: %s for line: %s", e, line_str)
+                            await helper.report_progress(
+                                progress=current,
+                                total=total,
+                                message=msg
+                            )
+                    except Exception as e:
+                        logger.warning("Subprocess parse error: %s for line: %s", e, line_str)
 
-        stderr_logs = []
-        async def read_stderr():
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                line_str = line.decode('utf-8', errors='ignore').strip()
-                if line_str:
-                    stderr_logs.append(line_str)
-                    logger.debug("[index worker] %s", line_str)
+            stderr_logs = []
+            async def read_stderr():
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    line_str = line.decode("utf-8", errors="ignore").strip()
+                    if line_str:
+                        stderr_logs.append(line_str)
+                        logger.debug("[index worker] %s", line_str)
 
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(read_stdout(), read_stderr(), proc.wait()),
-                timeout=INDEX_TIMEOUT_S
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise AnalysisError(f"Indexing timed out after {INDEX_TIMEOUT_S}s") from None
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(read_stdout(), read_stderr(), proc.wait()),
+                    timeout=INDEX_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise AnalysisError(f"Indexing timed out after {INDEX_TIMEOUT_S}s") from None
 
-        if proc.returncode != 0:
-            err_msg = "\n".join(stderr_logs[-50:])
-            raise AnalysisError(f"Index subprocess failed with exit code {proc.returncode}. Stderr: {err_msg}")
+            if proc.returncode != 0:
+                err_msg = "\n".join(stderr_logs[-50:])
+                raise AnalysisError(f"Index subprocess failed with exit code {proc.returncode}. Stderr: {err_msg}")
 
-        final_res["target"] = path.as_posix()
+            final_res["target"] = path.as_posix()
 
-        from src.mcp_server.index_db import get_db_path_for_repo, get_graph_path_for_repo
-        from src.mcp_server.registry import registry
-        duck_path = get_db_path_for_repo(repo_root)
-        graph_path = get_graph_path_for_repo(duck_path)
-        registry.register_repo(repo_root, duck_path, graph_path)
+            from src.mcp_server.index_db import get_db_path_for_repo, get_graph_path_for_repo
+            from src.mcp_server.registry import registry
+            duck_path = get_db_path_for_repo(repo_root)
+            graph_path = get_graph_path_for_repo(duck_path)
+            registry.register_repo(repo_root, duck_path, graph_path)
 
-        # Notify client that resources have been updated
-        await helper.notify_resource_list_changed()
+            # Notify client that resources have been updated
+            await helper.notify_resource_list_changed()
 
-        # Surface FTS errors from the subprocess
-        if final_res.get("status") == "partial" and final_res.get("fts_error"):
-            logger.warning("FTS index rebuild failed: %s", final_res['fts_error'])
-        try:
-            summary_res = await do_browse(target=path.as_posix(), view="summary")
-            final_res["summary"] = summary_res.get("structure", summary_res)
-        except Exception as e:
-            logger.warning("Failed to generate summary after indexing: %s", e)
+            # Surface FTS errors from the subprocess
+            if final_res.get("status") == "partial" and final_res.get("fts_error"):
+                logger.warning("FTS index rebuild failed: %s", final_res["fts_error"])
+            try:
+                summary_res = await do_browse(target=path.as_posix(), view="summary")
+                final_res["summary"] = summary_res.get("structure", summary_res)
+            except Exception as e:
+                logger.warning("Failed to generate summary after indexing: %s", e)
 
-        return final_res
+            return final_res
 
-        if path.suffix not in SUPPORTED:
-            raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
+        elif path.is_file():
+            if path.suffix not in SUPPORTED:
+                raise SecurityValidationError(f"Unsupported extension: {path.suffix}")
 
-        content = await asyncio.to_thread(read_limited, path)
+            content = await asyncio.to_thread(read_limited, path)
 
-        def _index_file():
-            with CodebaseIndexer(repo_path=repo_root) as indexer:
-                indexer.index_file(str(path), content, path.suffix, rebuild_fts=False)
+            def _index_file():
+                with CodebaseIndexer(repo_path=repo_root) as indexer:
+                    indexer.index_file(str(path), content, path.suffix, rebuild_fts=False)
 
-        await asyncio.to_thread(_index_file)
+            await asyncio.to_thread(_index_file)
 
-        from src.mcp_server.index_db import get_db_path_for_repo, get_graph_path_for_repo
-        from src.mcp_server.registry import registry
-        duck_path = get_db_path_for_repo(repo_root)
-        graph_path = get_graph_path_for_repo(duck_path)
-        registry.register_repo(repo_root, duck_path, graph_path)
+            from src.mcp_server.index_db import get_db_path_for_repo, get_graph_path_for_repo
+            from src.mcp_server.registry import registry
+            duck_path = get_db_path_for_repo(repo_root)
+            graph_path = get_graph_path_for_repo(duck_path)
+            registry.register_repo(repo_root, duck_path, graph_path)
 
-        res = {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
-        try:
-            summary_res = await do_browse(target=path.as_posix(), view="summary")
-            res["summary"] = summary_res.get("structure", summary_res)
-        except Exception as e:
-            logger.warning("Failed to generate summary after indexing: %s", e)
-        return res
+            res = {"status": "success", "target": path.as_posix(), "indexed_files": 1, "total_files_found": 1}
+            try:
+                summary_res = await do_browse(target=path.as_posix(), view="summary")
+                res["summary"] = summary_res.get("structure", summary_res)
+            except Exception as e:
+                logger.warning("Failed to generate summary after indexing: %s", e)
+            return res
+            
+        else:
+            from src.core.errors import TargetNotFoundError
+            raise TargetNotFoundError(f"Target is neither a file nor a directory: {path}")
+
     finally:
         if watcher:
             watcher.start()
-

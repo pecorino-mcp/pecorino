@@ -174,8 +174,12 @@ class CodeSearchIndex:
             db_path = get_db_path_for_repo(repo_path)
         self.db_path = db_path
 
+        if self._read_only and not Path(self.db_path).exists():
+            from src.core.errors import IndexNotFoundError
+            raise IndexNotFoundError(f"Index database not found at {self.db_path}. Run update_index first.")
+
         try:
-            self._conn = sqlite3.connect(self.db_path)
+            self._conn = sqlite3.connect(f"file:{self.db_path}?mode=ro" if self._read_only else self.db_path, uri=True)
             self._conn.enable_load_extension(True)
             try:
                 self._conn.load_extension(FTS_URING_LIB_PATH)
