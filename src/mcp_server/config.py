@@ -48,6 +48,9 @@ class Config:
         self.lsp_request_timeout = float(os.getenv("PECORINO_LSP_TIMEOUT", "0.8"))
         self.enable_hcgs = os.getenv("PECORINO_ENABLE_HCGS", "true").lower() in ("true", "1", "yes")
 
+        # FTS buffer pool memory limit (MB)
+        self.fts_ram_mb = int(os.getenv("PECORINO_FTS_RAM_MB", "256"))
+
         # Indexing optimizations
         self.index_chunk_size = int(os.getenv("PECORINO_INDEX_CHUNK_SIZE", "250"))
         default_workers = max(1, int((os.cpu_count() or 4) * 0.75))

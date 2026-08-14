@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -35,11 +36,9 @@ class Embedder:
     def _load_model(self):
         if self._model is not None:
             return
+        max_threads = max(1, int((os.cpu_count() or 4) * 0.75))
         try:
-            import os
-
             import torch
-            max_threads = max(1, int((os.cpu_count() or 4) * 0.75))
             torch.set_num_threads(max_threads)
             os.environ["OMP_NUM_THREADS"] = str(max_threads)
             os.environ["TOKENIZERS_PARALLELISM"] = "false"
