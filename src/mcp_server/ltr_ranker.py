@@ -71,7 +71,7 @@ def extract_candidate_features(
     git_ownership_entropy = float(candidate.get("git_ownership_entropy", 0.0) or 0.0)
 
     # --- FTS normalization ---
-    # BM25 scores from Tantivy are typically < 30; we cap & scale to [0, 1].
+    # BM25 scores from c_fts_uring are typically < 30; we cap & scale to [0, 1].
     if fts_bm25_score <= 1.0:
         norm_fts = max(0.0, min(1.0, fts_bm25_score))
     else:

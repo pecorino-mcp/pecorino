@@ -1,8 +1,5 @@
 import ctypes
-import os
-import hashlib
-from typing import List, Tuple
-from pathlib import Path
+from typing import List
 
 # Constants matching C header
 MAX_FTS_FIELDS = 4
@@ -33,32 +30,43 @@ class UnifiedShard(ctypes.Structure):
 class FTSUringEngine:
     def __init__(self, so_path: str):
         self.lib = ctypes.CDLL(so_path)
-        
-        # python_insert_document(..., const char *text)
+
+        # python_insert_document(..., const char *text, uint64_t mtime, const char* repo, const char* filepath, const char* kind, const char* lang)
         self.lib.python_insert_document.argtypes = [
             ctypes.POINTER(ctypes.c_uint8),
             ctypes.POINTER(ctypes.c_uint32),
             ctypes.POINTER(ctypes.c_uint32),
             ctypes.POINTER(ctypes.c_float),
+            ctypes.c_char_p,
+            ctypes.c_uint64,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
             ctypes.c_char_p
         ]
         self.lib.python_insert_document.restype = ctypes.c_int
-            
-    def insert_document(self, node_uuid_bytes: bytes, tf: List[int], dl: List[int], embedding: List[float], text: str = ""):
+
+    def insert_document(self, node_uuid_bytes: bytes, tf: List[int], dl: List[int], embedding: List[float], text: str = "", mtime: int = 0, repo: str = "", filepath: str = "", kind: str = "", lang: str = ""):
         if len(node_uuid_bytes) != 16:
             raise ValueError("node_uuid_bytes must be 16 bytes")
-            
+
         tf_arr = (ctypes.c_uint32 * MAX_FTS_FIELDS)(*tf[:MAX_FTS_FIELDS])
         dl_arr = (ctypes.c_uint32 * MAX_FTS_FIELDS)(*dl[:MAX_FTS_FIELDS])
-        
+
         if embedding:
             emb_arr = (ctypes.c_float * EMBEDDING_DIM)(*embedding[:EMBEDDING_DIM])
         else:
             emb_arr = (ctypes.c_float * EMBEDDING_DIM)(*[0.0]*EMBEDDING_DIM)
-            
+
+        _keepalive = []
         uuid_arr = (ctypes.c_uint8 * 16)(*node_uuid_bytes)
         text_bytes = text.encode('utf-8') if text else None
-        return self.lib.python_insert_document(uuid_arr, tf_arr, dl_arr, emb_arr, text_bytes)
-        
+        repo_bytes = repo.encode('utf-8') if repo else None
+        filepath_bytes = filepath.encode('utf-8') if filepath else None
+        kind_bytes = kind.encode('utf-8') if kind else None
+        lang_bytes = lang.encode('utf-8') if lang else None
+        _keepalive.append((uuid_arr, tf_arr, dl_arr, emb_arr, text_bytes, repo_bytes, filepath_bytes, kind_bytes, lang_bytes))
+        return self.lib.python_insert_document(uuid_arr, tf_arr, dl_arr, emb_arr, text_bytes, ctypes.c_uint64(mtime), repo_bytes, filepath_bytes, kind_bytes, lang_bytes)
+
     def close(self):
         pass
