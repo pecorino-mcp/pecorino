@@ -84,3 +84,7 @@ bin/
 /examples/
 .ruff_cache/
 scripts/scratch/
+fts_uring_data/
+test_ingest_fts/
+test_kuzu
+test_kuzu/
