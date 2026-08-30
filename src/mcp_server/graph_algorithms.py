@@ -24,7 +24,7 @@ def sweep_gamma(graph, gammas: List[float] = None, graph_name: str = 'g') -> Lis
 
             partition = {}
             for r in rows:
-                # Handle varying dictionary/tuple return shapes from duckdb/gorgonzola
+                # Handle varying dictionary/tuple return shapes from sqlite/gorgonzola
                 if isinstance(r, dict):
                     nid = r.get("node_id")
                     lid = r.get("leiden_id")

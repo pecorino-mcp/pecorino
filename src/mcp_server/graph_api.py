@@ -328,12 +328,10 @@ class GraphAPI:
         '''
         unresolved = self.graph.query(unresolved_q)
         if unresolved:
-            import duckdb
-
             from src.mcp_server.index_db import CodeSearchIndex
             try:
                 index = CodeSearchIndex(db_path=self.db_path, read_only=True)
-            except duckdb.ConnectionException:
+            except Exception:
                 index = CodeSearchIndex(db_path=self.db_path, read_only=False)
             try:
                 # Collect all unique symbol names

@@ -39,8 +39,7 @@ async def _auto_sync_stale(repo_root: str, db_path: str, scope_path: str):
 
             from src.mcp_server.index_pipeline import CodebaseIndexer
 
-            # Must close cached read-only connections before opening a write connection —
-            # DuckDB doesn't allow mixing read_only and read_write to the same file.
+            # Must close cached read-only connections before opening a write connection.
             clear_index_cache()
 
             indexer = CodebaseIndexer(repo_path=repo_root)
@@ -64,6 +63,6 @@ async def _auto_sync_stale(repo_root: str, db_path: str, scope_path: str):
 
     synced = await asyncio.to_thread(_sync)
     if synced:
-        # Clear cached read-only DuckDB connections so they pick up the new data.
+        # Clear cached read-only database connections so they pick up the new data.
         # Preserves GraphAPI (and its PageRank cache) — only invalidates pagerank scores.
         clear_index_cache()

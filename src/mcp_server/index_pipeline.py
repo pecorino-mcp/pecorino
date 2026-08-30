@@ -75,7 +75,7 @@ class CodebaseIndexer:
         self._repo_cache_lock = threading.Lock()
 
     def close(self):
-        """Release the underlying DuckDB and Gorgonzola connections."""
+        """Release the underlying database and Gorgonzola connections."""
         if self.search_index is not None:
             self.search_index.close()
             self.search_index = None
@@ -860,47 +860,60 @@ class CodebaseIndexer:
         try:
             # 1. SEMANTICALLY_RELATED (Vector Similarity)
             if self.enable_embeddings and self.search_index:
-                # Single query: DuckDB cross-join with cosine distance, much faster than N individual queries
                 try:
-                    sem_query = """
-                    WITH ranked AS (
-                        SELECT
-                            a.id AS src_id,
-                            b.id AS dst_id,
-                            1.0 - array_cosine_distance(a.embedding, b.embedding) AS score
-                        FROM code_nodes a, code_nodes b
-                        WHERE a.kind IN ('Function', 'Method', 'Class')
-                          AND b.kind IN ('Function', 'Method', 'Class')
-                          AND a.embedding IS NOT NULL
-                          AND b.embedding IS NOT NULL
-                          AND a.id < b.id
-                          AND a.filepath != b.filepath
-                    )
-                    SELECT src_id, dst_id, score FROM ranked WHERE score >= 0.80
-                    """
-                    rows = self.search_index._conn.execute(sem_query).fetchall()
-                    if rows:
-                        semantic_edges = []
-                        for src_id, dst_id, score in rows:
-                            semantic_edges.extend([
-                                (src_id, dst_id, float(score)),
-                                (dst_id, src_id, float(score))
-                            ])
-                        if semantic_edges:
-                            import csv
-                            import tempfile
-                            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
-                                writer = csv.writer(f)
-                                for edge in semantic_edges:
-                                    writer.writerow(edge)
-                                tmp_path = f.name
-
+                    rows = self.search_index._conn.execute(
+                        "SELECT id, filepath, embedding FROM code_nodes "
+                        "WHERE kind IN ('Function', 'Method', 'Class') AND embedding IS NOT NULL"
+                    ).fetchall()
+                    if rows and len(rows) > 1:
+                        import json
+                        import numpy as np
+                        valid_nodes = []
+                        vecs = []
+                        for r in rows:
+                            if not r[2]:
+                                continue
                             try:
-                                with self.graph:
-                                    self.graph._conn.execute(f"COPY SEMANTICALLY_RELATED FROM '{tmp_path}' (HEADER=false);")
-                                logger.info(f"Loaded {len(semantic_edges)} SEMANTICALLY_RELATED edges.")
-                            finally:
-                                os.remove(tmp_path)
+                                emb = json.loads(r[2]) if isinstance(r[2], str) else r[2]
+                                if emb and isinstance(emb, (list, tuple)):
+                                    valid_nodes.append((r[0], r[1]))
+                                    vecs.append(emb)
+                            except Exception:
+                                continue
+
+                        if len(vecs) > 1:
+                            mat = np.array(vecs, dtype=np.float32)
+                            norms = np.linalg.norm(mat, axis=1, keepdims=True)
+                            norms[norms == 0] = 1.0
+                            normalized = mat / norms
+                            sim = np.dot(normalized, normalized.T)
+
+                            semantic_edges = []
+                            for i in range(len(valid_nodes)):
+                                for j in range(i + 1, len(valid_nodes)):
+                                    if valid_nodes[i][1] != valid_nodes[j][1] and sim[i, j] >= 0.80:
+                                        score = float(sim[i, j])
+                                        semantic_edges.extend([
+                                            (valid_nodes[i][0], valid_nodes[j][0], score),
+                                            (valid_nodes[j][0], valid_nodes[i][0], score)
+                                        ])
+
+                            if semantic_edges:
+                                import csv
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
+                                    writer = csv.writer(f)
+                                    for edge in semantic_edges:
+                                        writer.writerow(edge)
+                                    tmp_path = f.name
+
+                                try:
+                                    with self.graph:
+                                        self.graph._conn.execute(f"COPY SEMANTICALLY_RELATED FROM '{tmp_path}' (HEADER=false);")
+                                    logger.info(f"Loaded {len(semantic_edges)} SEMANTICALLY_RELATED edges.")
+                                finally:
+                                    if os.path.exists(tmp_path):
+                                        os.remove(tmp_path)
                 except Exception as e:
                     logger.warning(f"Failed to generate SEMANTICALLY_RELATED edges: {e}")
 
@@ -1166,7 +1179,7 @@ class CodebaseIndexer:
             logger.debug(traceback.format_exc())
 
     def _verify_index_integrity(self) -> dict:
-        """Post-indexing sanity check: verify DuckDB ↔ Gorgonzola consistency.
+        """Post-indexing sanity check: verify SQLite ↔ Gorgonzola consistency.
 
         Returns a dict with integrity stats and any warnings found.
         Non-blocking: logs warnings but never raises.
@@ -1174,11 +1187,12 @@ class CodebaseIndexer:
         warnings = []
         stats = {}
         try:
-            # 1. Count DuckDB files vs Graph File nodes
-            duck_file_count = self.search_index._conn.execute(
+            # 1. Count SQLite files vs Graph File nodes
+            file_count = self.search_index._conn.execute(
                 "SELECT count(*) FROM files"
             ).fetchone()[0]
-            stats["duckdb_files"] = duck_file_count
+            stats["sqlite_files"] = file_count
+            stats["duckdb_files"] = file_count  # Compatibility alias
 
             try:
                 with self.graph:
@@ -1188,22 +1202,23 @@ class CodebaseIndexer:
                     graph_file_count = graph_file_rows[0].get("cnt", 0) if graph_file_rows else 0
                     stats["graph_file_nodes"] = graph_file_count
 
-                    if duck_file_count > 0 and graph_file_count == 0:
+                    if file_count > 0 and graph_file_count == 0:
                         warnings.append(
-                            f"Graph has 0 File nodes but DuckDB has {duck_file_count} files — "
+                            f"Graph has 0 File nodes but SQLite has {file_count} files — "
                             "graph may be empty or corrupted"
                         )
-                    elif duck_file_count > 0 and graph_file_count < duck_file_count:
+                    elif file_count > 0 and graph_file_count < file_count:
                         warnings.append(
-                            f"File count mismatch: Graph ({graph_file_count}) has fewer files than DuckDB ({duck_file_count}) — "
+                            f"File count mismatch: Graph ({graph_file_count}) has fewer files than SQLite ({file_count}) — "
                             "stores may be out of sync"
                         )
 
-                    # 2. Count DuckDB code_nodes vs Graph Function/Method/Class nodes
-                    duck_symbol_count = self.search_index._conn.execute(
+                    # 2. Count SQLite code_nodes vs Graph Function/Method/Class nodes
+                    symbol_count = self.search_index._conn.execute(
                         "SELECT count(*) FROM code_nodes"
                     ).fetchone()[0]
-                    stats["duckdb_symbols"] = duck_symbol_count
+                    stats["sqlite_symbols"] = symbol_count
+                    stats["duckdb_symbols"] = symbol_count  # Compatibility alias
 
                     graph_symbol_rows = self.graph.query(
                         "MATCH (n:CodeNode) WHERE n.kind IN ['Function', 'Method', 'Class'] "
@@ -1226,7 +1241,7 @@ class CodebaseIndexer:
                 warnings.append(f"Graph integrity check failed: {e}")
 
         except Exception as e:
-            warnings.append(f"DuckDB integrity check failed: {e}")
+            warnings.append(f"SQLite integrity check failed: {e}")
 
         if warnings:
             for w in warnings:
@@ -1632,7 +1647,7 @@ class CodebaseIndexer:
             else:
                 logger.info("OOD features disabled (PECORINO_ENABLE_OOD=false), skipping graph sweep.")
 
-        with profiler.profile("DuckDB FTS Rebuild"):
+        with profiler.profile("SQLite FTS Rebuild"):
             fts_error = None
             try:
                 if progress_callback:

@@ -51,7 +51,7 @@ def clear_api_cache():
                     pass
 
 def clear_index_cache():
-    """Clear only CodeSearchIndex (DuckDB) cache entries, preserving GraphAPI.
+    """Clear only CodeSearchIndex (SQLite) cache entries, preserving GraphAPI.
 
     This avoids destroying the GraphAPI's PageRank cache on every auto-sync,
     which would force expensive recomputation on the next pagerank view.

@@ -158,7 +158,7 @@ class RamdiskIndex:
                 shutil.copy2(self.db_path, tmp_ssd)
                 os.replace(tmp_ssd, self.ssd_db_path)
 
-                # Also copy any DuckDB WAL files (.duckdb.wal)
+                # Also copy any database WAL files (.wal)
                 wal_path = self.db_path + ".wal"
                 if os.path.exists(wal_path):
                     ssd_wal = self.ssd_db_path + ".wal"

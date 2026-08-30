@@ -80,7 +80,7 @@ async def handle_read_resource(
     repo_hash = parts[0]
     resource_type = parts[1]
 
-    # We need to find the actual duckdb file based on the hash
+    # We need to find the actual database file based on the hash
     from src.mcp_server.index_db import get_indexes_dir
     db_path = Path(get_indexes_dir()) / f"{repo_hash}_code_search.sqlite3"
     if not db_path.exists():

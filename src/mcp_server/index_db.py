@@ -67,9 +67,9 @@ def get_db_path_for_repo(repo_path: str) -> str:
     hash_str = hashlib.md5(str(resolved_repo).encode('utf-8')).hexdigest()
     return str(Path(get_indexes_dir()) / f"{hash_str}_code_search.sqlite3")
 
-def get_graph_path_for_repo(duckdb_path: str) -> str:
-    """Convert a duckdb file path to the corresponding gorgonzola directory path."""
-    p = Path(duckdb_path)
+def get_graph_path_for_repo(db_path: str) -> str:
+    """Convert a database file path to the corresponding gorgonzola directory path."""
+    p = Path(db_path)
     graph_dir_name = p.stem.replace("_code_search", "_gorgonzola")
     return str(p.parent / graph_dir_name)
 
@@ -176,7 +176,7 @@ def _get_file_content(filepath: str, mtime: float) -> bytes:
         return f.read()
 
 class CodeSearchIndex:
-    """DuckDB-backed Semantic Code Search Index."""
+    """SQLite-backed Semantic Code Search Index."""
 
     def __init__(self, db_path: str = None, read_only: bool = False):
         self._conn = None
@@ -232,10 +232,10 @@ class CodeSearchIndex:
                     for repo in registry.get_all_repos():
                         if attached_count >= 9:
                             break
-                        duck_path = repo.get('duckdb_path')
-                        if duck_path and duck_path != self.db_path and Path(duck_path).exists():
+                        repo_db = repo.get('db_path') or repo.get('duckdb_path')
+                        if repo_db and repo_db != self.db_path and Path(repo_db).exists():
                             try:
-                                self._conn.execute(f"ATTACH '{duck_path}' AS repo_{repo['hash']}")
+                                self._conn.execute(f"ATTACH '{repo_db}' AS repo_{repo['hash']}")
                                 attached_count += 1
                             except Exception as e:
                                 logger.warning(f"Failed to attach repo {repo.get('name')} for federated query: {e}")
@@ -627,16 +627,14 @@ class CodeSearchIndex:
         if not pairs:
             return
         conn = self._conn
-        import pandas as pd
-        pd.DataFrame([(node_id, emb) for node_id, emb in pairs], columns=["id", "embedding"])
-        pass
+        import json
         try:
-            conn.execute("""
+            data = [(json.dumps(emb) if isinstance(emb, (list, tuple)) else str(emb), node_id) for node_id, emb in pairs]
+            conn.executemany("""
                 UPDATE code_nodes
-                SET embedding = df.embedding
-                FROM df
-                WHERE code_nodes.id = df.id
-            """)
+                SET embedding = ?
+                WHERE id = ?
+            """, data)
             conn.commit()
         except Exception as e:
             conn.rollback()

@@ -90,9 +90,9 @@ async def do_detect_changes(
             for r in rows:
                 changed_nodes.append({"id": r[0], "name": r[1], "kind": r[2]})
         except Exception as e:
-            logger.warning(f"DuckDB query failed for {abs_file}: {e}")
+            logger.warning(f"SQLite query failed for {abs_file}: {e}")
 
-    # Deduplicate nodes by name (since DuckDB IDs include line numbers, we want Gorgonzola IDs which are usually prefixes)
+    # Deduplicate nodes by name (since AST node IDs include line numbers, we want Gorgonzola IDs which are usually prefixes)
     unique_names = list(set(n["name"] for n in changed_nodes))
 
     impact_results = []
