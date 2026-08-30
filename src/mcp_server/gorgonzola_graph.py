@@ -72,9 +72,8 @@ class GorgonzolaGraph:
         self._conn = None
         self._in_context = False
         self._schema_initialized = False
-        # Normalize path
         from src.mcp_server.index_db import get_graph_path_for_repo
-        self.gorgonzola_db_path = get_graph_path_for_repo(db_path) if db_path.endswith('.duckdb') else db_path
+        self.gorgonzola_db_path = get_graph_path_for_repo(db_path) if any(db_path.endswith(ext) for ext in ('.sqlite3', '.sqlite', '.db', '.duckdb')) else db_path
 
         parent_dir = os.path.dirname(self.gorgonzola_db_path)
         if parent_dir:

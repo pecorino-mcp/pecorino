@@ -1,8 +1,7 @@
 import hashlib
 from pathlib import Path
+import sqlite3
 from typing import Dict, List, Optional
-
-import duckdb
 
 from src.mcp_server.config import settings
 
@@ -13,28 +12,30 @@ class RegistryDB:
     This enables federated querying and cross-repository graph traversals.
     """
     def __init__(self):
-        self.registry_path = settings.index_dir / "registry.duckdb"
+        self.registry_path = settings.index_dir / "registry.db"
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _get_conn(self) -> duckdb.DuckDBPyConnection:
-        # We can open the registry DB in read-write mode briefly since it's a small metadata table
-        return duckdb.connect(str(self.registry_path))
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.registry_path), timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def _init_db(self):
         with self._get_conn() as conn:
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS repositories (
-                    hash VARCHAR PRIMARY KEY,
-                    repo_path VARCHAR UNIQUE,
-                    name VARCHAR,
-                    duckdb_path VARCHAR,
-                    gorgonzola_path VARCHAR,
-                    last_indexed TIMESTAMP DEFAULT now()
+                    hash TEXT PRIMARY KEY,
+                    repo_path TEXT UNIQUE,
+                    name TEXT,
+                    db_path TEXT,
+                    gorgonzola_path TEXT,
+                    last_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            conn.commit()
 
-    def register_repo(self, repo_path: str, duckdb_path: str, gorgonzola_path: str):
+    def register_repo(self, repo_path: str, db_path: str, gorgonzola_path: str):
         """Register or update a repository in the global registry."""
         resolved = Path(repo_path).resolve()
         hash_str = hashlib.md5(str(resolved).encode('utf-8')).hexdigest()
@@ -42,25 +43,27 @@ class RegistryDB:
 
         with self._get_conn() as conn:
             conn.execute('''
-                INSERT INTO repositories (hash, repo_path, name, duckdb_path, gorgonzola_path, last_indexed)
-                VALUES (?, ?, ?, ?, ?, now())
-                ON CONFLICT (hash) DO UPDATE SET
-                    duckdb_path = excluded.duckdb_path,
+                INSERT INTO repositories (hash, repo_path, name, db_path, gorgonzola_path, last_indexed)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(hash) DO UPDATE SET
+                    db_path = excluded.db_path,
                     gorgonzola_path = excluded.gorgonzola_path,
-                    last_indexed = now()
-            ''', (hash_str, str(resolved), name, duckdb_path, gorgonzola_path))
+                    last_indexed = CURRENT_TIMESTAMP
+            ''', (hash_str, str(resolved), name, db_path, gorgonzola_path))
+            conn.commit()
 
     def get_all_repos(self) -> List[Dict[str, str]]:
         """Get all registered repositories."""
         with self._get_conn() as conn:
-            rows = conn.execute("SELECT hash, repo_path, name, duckdb_path, gorgonzola_path FROM repositories").fetchall()
+            rows = conn.execute("SELECT hash, repo_path, name, db_path, gorgonzola_path FROM repositories").fetchall()
             return [
                 {
-                    "hash": r[0],
-                    "repo_path": r[1],
-                    "name": r[2],
-                    "duckdb_path": r[3],
-                    "gorgonzola_path": r[4]
+                    "hash": r["hash"],
+                    "repo_path": r["repo_path"],
+                    "name": r["name"],
+                    "db_path": r["db_path"],
+                    "duckdb_path": r["db_path"],  # Backwards compatibility alias
+                    "gorgonzola_path": r["gorgonzola_path"]
                 } for r in rows
             ]
 
@@ -68,14 +71,15 @@ class RegistryDB:
         resolved = Path(repo_path).resolve()
         hash_str = hashlib.md5(str(resolved).encode('utf-8')).hexdigest()
         with self._get_conn() as conn:
-            row = conn.execute("SELECT hash, repo_path, name, duckdb_path, gorgonzola_path FROM repositories WHERE hash = ?", (hash_str,)).fetchone()
+            row = conn.execute("SELECT hash, repo_path, name, db_path, gorgonzola_path FROM repositories WHERE hash = ?", (hash_str,)).fetchone()
             if row:
                 return {
-                    "hash": row[0],
-                    "repo_path": row[1],
-                    "name": row[2],
-                    "duckdb_path": row[3],
-                    "gorgonzola_path": row[4]
+                    "hash": row["hash"],
+                    "repo_path": row["repo_path"],
+                    "name": row["name"],
+                    "db_path": row["db_path"],
+                    "duckdb_path": row["db_path"],  # Backwards compatibility alias
+                    "gorgonzola_path": row["gorgonzola_path"]
                 }
             return None
 

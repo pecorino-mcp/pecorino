@@ -33,7 +33,7 @@ async def do_update_index(target: str, ctx: ServerRequestContext | None = None, 
     except Exception:
         pass  # Best-effort invalidation before full cache clear
     clear_api_cache()
-    # Force garbage collection to release any lingering __del__ DuckDB connections
+    # Force garbage collection to release any lingering __del__ database connections
     # that may hold write locks and block the indexing subprocess.
     # TODO: Audit whether this is still needed now that CodebaseIndexer uses a
     # context manager. Keep as a safety net for other potential leaked connections.

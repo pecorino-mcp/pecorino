@@ -158,7 +158,7 @@ def process_levels_static(
     if not levels:
         return summaries
 
-    # Pre-fetch all symbol properties from DuckDB for fast lookup
+    # Pre-fetch all symbol properties from SQLite for fast lookup
     rows = db_conn.execute(
         "SELECT id, name, kind, signature, complexity, relationships FROM code_nodes"
     ).fetchall()

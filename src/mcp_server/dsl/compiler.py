@@ -5,7 +5,7 @@ logger = logging.getLogger(__name__)
 
 class DSLCompiler:
     """
-    Compiles JSON DSL queries into DuckDB SQL and Kùzu Cypher queries.
+    Compiles JSON DSL queries into SQLite SQL and Gorgonzola Cypher queries.
     """
 
     @staticmethod

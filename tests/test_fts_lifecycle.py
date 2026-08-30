@@ -4,9 +4,9 @@ Verifies that the two-phase write process correctly builds the FTS index
 and that write-lock contention doesn't silently prevent FTS creation.
 """
 import os
-import pytest
-import duckdb
 from pathlib import Path
+import sqlite3
+import pytest
 
 from src.mcp_server.index_db import CodeSearchIndex, get_db_path_for_repo
 from src.mcp_server.index_pipeline import CodebaseIndexer
@@ -17,7 +17,7 @@ class TestCodebaseIndexerLifecycle:
     """Tests for CodebaseIndexer connection management."""
 
     def test_context_manager_releases_connection(self, temp_repo, db_path):
-        """Context manager must close the DuckDB connection on exit."""
+        """Context manager must close the database connection on exit."""
         with CodebaseIndexer(repo_path=str(temp_repo)) as indexer:
             assert indexer.search_index is not None
             assert indexer.search_index._conn is not None
@@ -47,7 +47,7 @@ class TestCodebaseIndexerLifecycle:
             # Index file
             indexer.index_file(str(py_file), content, ".py", rebuild_fts=True)
             
-            # Verify data is stored in DuckDB
+            # Verify data is stored in SQLite
             res = indexer.search_index.search("Foo", limit=5)
             assert len(res) > 0
             
@@ -63,8 +63,8 @@ class TestCodebaseIndexerLifecycle:
         with CodebaseIndexer(repo_path=str(temp_repo)) as indexer:
             indexer.index_file(str(py_file), content, ".py", rebuild_fts=True)
 
-        # Should be able to open a read-write connection (no lingering lock)
-        conn = duckdb.connect(db_path, read_only=False)
+        # Should be able to open a connection (no lingering lock)
+        conn = sqlite3.connect(db_path)
         try:
             count = conn.execute("SELECT count(*) FROM code_nodes").fetchone()[0]
             assert count > 0
