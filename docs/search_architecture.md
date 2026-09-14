@@ -135,7 +135,13 @@ Natural language queries are classified by [`IntentRouter`](file:///run/media/le
 - **Cypher Pass-through & Generation**: If the query is natural language targeting graph relationships, [`generate_cypher`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/llm_client.py) sends a prompt to an LLM and parses the returned Cypher query. It uses IDE sampling (MCP protocol sampling) first, falling back to `litellm` (`PECORINO_LLM_MODEL`).
 
 ### 3.2. Bi-Encoder Embeddings (`embedding.py` & `embedder.py`)
-Code entities and docstrings are converted to dense vector embeddings using local ONNX Bi-Encoders (`all-MiniLM-L12-v2` or `nomic-embed-text-v1.5.onnx`). Embeddings are stored in SQLite's `code_nodes.embedding` columns, allowing cosine distance calculations.
+Code entities and docstrings are converted to dense vector embeddings using local ONNX Bi-Encoders (`Xenova/all-MiniLM-L12-v2`). Embeddings are stored in SQLite's `code_nodes.embedding` columns, allowing cosine distance calculations.
+
+> [!TIP]
+> **Models Used Highlight**
+> - **Embedding Model**: `Xenova/all-MiniLM-L12-v2` (384-dim dense vector embeddings)
+> - **Cross-Encoder Model**: `cross-encoder/ms-marco-MiniLM-L-12-v2` (pairwise candidate reranking)
+> - **Fallback LLM**: `ollama/llama3` (for Cypher generation and heuristic naming analyzer)
 
 ### 3.3. Bottom-Up Call Graph Summaries (`hcgs.py`)
 Implemented in [`hcgs.py`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/hcgs.py), this module generates summaries without calling an LLM:

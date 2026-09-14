@@ -30,6 +30,5 @@ Both database files reside side-by-side in the repository cache directory (`.pec
 - Native openCypher query capabilities with variable-length path traversal remain available in Gorgonzola.
 
 ### Brutal Realities & Flaws
-- **Stale Documentation**: Existing documentation (`docs/search_architecture.md`, `docs/evolution_timeline.md`) still falsely claims DuckDB and Tantivy are used. The architecture evolved faster than the documentation.
 - **Dual-write inconsistency**: There is still no distributed two-phase commit (2PC) between SQLite and Gorgonzola. Partial indexing crashes lead to orphaned nodes or dead edges.
 - **Custom Extension Hell**: Compiling and linking custom SQLite extensions (`fts_uring.so` and HNSW/VSS) creates massive deployment friction on systems without modern Linux kernels (io_uring requires kernel 5.1+) or specific C compilers.

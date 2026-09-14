@@ -8,12 +8,14 @@ Accepted
 
 ## Context
 
-Indexing medium to large codebases produces tens of thousands of AST nodes, embeddings, and relationship edges. Direct random I/O writes to spinning disks or standard SSDs during iterative chunk processing create significant lock contention and write latency on DuckDB WAL and Kùzu storage.
+Indexing medium to large codebases produces tens of thousands of AST nodes, embeddings, and relationship edges. Direct random I/O writes to spinning disks or standard SSDs during iterative chunk processing create significant lock contention and write latency on SQLite3 WAL and Kùzu storage.
+
+The standard pattern of maintaining persistent database connections via local `.pecorino/` databases forces premature disk syncs and slows down bulk ingestion dramatically.
 
 ## Decision
 
-Implement a temporary in-memory staging mechanism using Linux `/dev/shm` (RAM-disk) via `RamdiskIndex`:
-1. When indexing a repository, initialize DuckDB and Gorgonzola databases inside `/dev/shm`.
+Implement a RAM-Disk Staging Pipeline (`ramdisk.py`):
+1. When indexing a repository, initialize SQLite3 and Gorgonzola databases inside `/dev/shm`.
 2. Process all AST parsing, embedding generation, graph edge insertion, and initial ranking in memory.
 3. Upon indexing completion, flush database files atomically to persistent disk storage (`.pecorino/`).
 4. Check available `/dev/shm` capacity before staging; fall back automatically to direct disk operations (`DummyContext`) if memory is insufficient.
