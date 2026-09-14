@@ -15,7 +15,7 @@ A large codebase contains thousands of symbols, but only a small fraction repres
 Implement structural graph analytics directly on Gorgonzola / Kùzu:
 1. **PageRank**: Calculate structural centrality over `CALLS`, `INHERITS`, and `DEPENDS_ON` edges to identify high-centrality foundational components.
 2. **Leiden Community Detection**: Project the code graph (`CodeGraph`) and run resolution sweep algorithms (`sweep_gamma`, `find_stable_partition`) to identify cohesive architectural modules and subsystem clusters.
-3. **Static Hierarchical Code Graph Summarization (HCGS)**: Perform topological level ordering (`build_levels`) and propagate callee summary signals upwards to callers without LLM calls, storing hierarchical context in DuckDB and Tantivy.
+3. **Static Hierarchical Code Graph Summarization (HCGS)**: Perform topological level ordering (`build_levels`) and propagate callee summary signals upwards to callers without LLM calls, storing hierarchical context in SQLite3 and c-fts-uring.
 
 ## Consequences & Trade-offs
 

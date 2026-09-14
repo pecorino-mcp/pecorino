@@ -450,6 +450,12 @@ Truy vấn / Tài liệu
 
 ### 5.1 Bi-Encoder: Embedding Pipeline
 
+> [!TIP]
+> **Các mô hình đang hoạt động (Active Models Highlight)**
+> - **Mô hình Embedding**: `Xenova/all-MiniLM-L12-v2` (384-dim local embeddings)
+> - **Mô hình Cross-Encoder**: `cross-encoder/ms-marco-MiniLM-L-12-v2` (xếp hạng lại ứng viên)
+> - **Fallback LLM**: `ollama/llama3` (phục vụ bộ phân tích đặt tên và sinh Cypher dự phòng qua LiteLLM)
+
 Hệ thống hỗ trợ 2 pipeline sinh vector embedding:
 
 #### A. Sentence Transformer Embedder ([`embedder.py`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/embedder.py))
