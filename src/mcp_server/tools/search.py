@@ -491,7 +491,7 @@ async def _do_callers_callees(
 
     if mode == "callers":
         callers = await asyncio.to_thread(api.find_callers, symbol)
-        page = callers[offset:offset+limit]
+        page = [{k: v for k, v in c.items() if k != "embedding"} for c in callers[offset:offset+limit]]
         result = {"target": symbol, "mode": mode, "callers": page}
         # Auto-expand: include source signatures when few results
         if len(page) <= 5 and page:
@@ -517,7 +517,7 @@ async def _do_callers_callees(
 
     else:  # callees
         callees = await asyncio.to_thread(api.find_callees, symbol)
-        page = callees[offset:offset+limit]
+        page = [{k: v for k, v in c.items() if k != "embedding"} for c in callees[offset:offset+limit]]
         result = {"target": symbol, "mode": mode, "callees": page}
         if len(callees) > limit:
             result["total_count"] = len(callees)
@@ -593,7 +593,7 @@ async def _do_usages(
     try:
         search_res = await _do_fts(
             target=target, query=query, mode="fts", limit=5, offset=0,
-            include_source=True, auto_expand_source=True,
+            include_source=True, include_context=False, auto_expand_source=True,
             output_file=None, allow_external=allow_external, ctx=ctx
         )
     except Exception as e:
