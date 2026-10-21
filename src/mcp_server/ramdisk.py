@@ -87,6 +87,25 @@ class RamdiskIndex:
             ssd_wal = f"{self.ssd_db_path}{wal_suffix}"
             if os.path.exists(ssd_wal):
                 shutil.copy2(ssd_wal, f"{self.db_path}{wal_suffix}")
+        if os.path.exists(self.db_path):
+            try:
+                with open(self.db_path, "rb") as f:
+                    is_sqlite = f.read(16) == b"SQLite format 3\x00"
+                if is_sqlite:
+                    import sqlite3
+                    conn = sqlite3.connect(self.db_path)
+                    try:
+                        conn.execute("PRAGMA writable_schema = ON")
+                        conn.execute(
+                            "UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'pecorino_ast'",
+                            (self.ssd_fts_path, self.fts_path),
+                        )
+                        conn.execute("PRAGMA writable_schema = OFF")
+                        conn.commit()
+                    finally:
+                        conn.close()
+            except Exception as e:
+                logger.debug(f"[ramdisk] Could not update pecorino_ast metadata on RAM copy: {e}")
         if os.path.exists(self.ssd_fts_path):
             if os.path.isfile(self.ssd_fts_path):
                 shutil.copy2(self.ssd_fts_path, self.fts_path)

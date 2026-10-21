@@ -195,20 +195,19 @@ class GorgonzolaGraph:
                 return self._label_cache[node_id]
         conn = conn or self._conn
         if not conn:
-            return "File" if os.path.exists(node_id) else None
-        try:
-            res = conn.execute("MATCH (n:CodeNode {id: $id}) RETURN n.kind", {"id": node_id})
-            lbl = None
-            if res.has_next():
-                lbl = res.get_next()[0]
-            res.close()
-            if lbl:
-                with self._label_cache_lock:
-                    self._label_cache[node_id] = lbl
-                return lbl
-        except Exception:
-            pass
-        return "File" if os.path.exists(node_id) else None
+            return None
+        for candidate_lbl in ("File", "Function", "Method", "Class", "Variable", "Symbol", "External", "ADR"):
+            try:
+                res = conn.execute(f"MATCH (n:{candidate_lbl} {{id: $id}}) RETURN '{candidate_lbl}'", {"id": node_id})
+                if res.has_next():
+                    res.close()
+                    with self._label_cache_lock:
+                        self._label_cache[node_id] = candidate_lbl
+                    return candidate_lbl
+                res.close()
+            except Exception:
+                pass
+        return None
 
     def _write_and_copy_csv(self, conn, csv_path, rows, copy_query):
         try:

@@ -300,7 +300,7 @@ class CodeSearchIndex:
         try:
             fts_dir = Path(self.db_path).parent / f"{Path(self.db_path).stem}_fts"
             shard0 = fts_dir / "shard_0.dat"
-            needs_repopulate = not shard0.exists() or shard0.stat().st_size <= 4096
+            needs_repopulate = not shard0.exists() or shard0.stat().st_size <= 12288
             if self._fts_engine and not self._read_only and needs_repopulate:
                 import json
                 rows = self._conn.execute(
@@ -585,6 +585,11 @@ class CodeSearchIndex:
         graph.query(
             "MATCH (f:CodeNode {kind: 'File'}) WHERE f.id IN $ids DETACH DELETE f",
             {"ids": file_ids})
+
+        if hasattr(graph, "_label_cache"):
+            with graph._label_cache_lock:
+                for nid in all_to_clean:
+                    graph._label_cache.pop(nid, None)
 
         graph.purge_orphaned_identifiers()
 

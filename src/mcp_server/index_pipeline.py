@@ -831,6 +831,14 @@ def main():
     try:
         indexer = CodebaseIndexer(repo_path=repo_root)
         res = indexer.index_directory(target_path, progress_callback=progress_callback)
+        try:
+            from src.mcp_server.index_db import get_graph_path_for_repo
+            from src.mcp_server.registry import registry
+            db_p = get_db_path_for_repo(indexer.repo_path)
+            registry.register_repo(indexer.repo_path, db_p, get_graph_path_for_repo(db_p))
+        except Exception as reg_err:
+            logger.debug("Failed to register repo in main: %s", reg_err)
+        indexer.close()
         print(json.dumps({"result": res}), flush=True)
     except Exception as e:
         sys.stderr.write(f"Error during indexing subprocess: {e}\n")
