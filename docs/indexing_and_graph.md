@@ -45,8 +45,8 @@ flowchart TD
 
 ## 2. Pipeline Components & Optimizations
 
-### 2.1. `IndexProfiler` & Phase Observability
-The indexing pipeline in [`index_pipeline.py`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/index_pipeline.py) instruments every execution stage with [`IndexProfiler`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/index_pipeline.py#L20-L40), tracking wall-clock time and profiling breakdowns:
+### 2.1. `IndexProfiler` & Modular Pipeline Components
+The indexing pipeline is orchestrated by [`index_pipeline.py`](../src/mcp_server/index_pipeline.py) and modularized under [`src/mcp_server/indexing/`](../src/mcp_server/indexing/__init__.py) (`profiler.py`, `dependency_resolver.py`, `git_analytics.py`, `lsp_resolver.py`, `graph_post_processor.py`). Every execution stage is instrumented with [`IndexProfiler`](../src/mcp_server/indexing/profiler.py), tracking wall-clock time and profiling breakdowns:
 - `Vector Embeddings Generation`: Dense embeddings generation across batch chunks.
 - `Bulk Database Ingestion`: Tabular insertion of search nodes and metadata.
 - `LSP Call Resolution`: Cross-file symbol reference lookup.
@@ -69,13 +69,13 @@ Total                         : 33.56s
 
 ### 2.2. RAM-Disk Staging (`ramdisk.py`)
 To prevent SSD write amplification during initial indexing and large repository sweeps:
-- [`RamdiskIndex`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/ramdisk.py) stages the database files in `/dev/shm` (tmpfs).
+- [`RamdiskIndex`](../src/mcp_server/ramdisk.py) stages the database and FTS files in `/dev/shm` (tmpfs) when `PECORINO_USE_RAMDISK` is enabled.
 - **Quota & Memory Protection**: Checks available tmpfs memory (`shutil.disk_usage('/dev/shm')`) against projected index requirements (~40× source code bytes). If memory is constrained, it automatically falls back to SSD direct writes without failing.
-- **Atomic Synchronization**: When the indexing context exits, files are copied sequentially to SSD and the tmpfs staging directory is unlinked.
+- **Atomic Synchronization**: When the indexing context exits, SQLite, Gorgonzola, and FTS files are copied sequentially to SSD and the tmpfs staging directory is unlinked.
 
 ### 2.3. Incremental Dirty Tracking & File Watcher
-- **Metadata Hash Cache**: [`upsert_file_hashes_bulk`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/index_db.py) caches `(filepath, content_hash, mtime, lang)` tuples. Unmodified files (mtime delta < 0.01s and identical content hash) are skipped entirely during directory sweeps.
-- **Dynamic File Watcher**: [`DebouncedFileEventHandler`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/middleware/file_watcher.py) listens to filesystem modification events via `watchdog`, debounces rapid edits (default 2.0s window), and triggers granular updates for modified AST nodes and embeddings in real-time.
+- **Metadata Hash Cache**: [`upsert_file_hashes_bulk`](../src/mcp_server/index_db.py) caches `(filepath, content_hash, mtime, lang)` tuples. Unmodified files (mtime delta < 0.01s and identical content hash) are skipped entirely during directory sweeps.
+- **Dynamic File Watcher**: [`DebouncedFileEventHandler`](../src/mcp_server/middleware/file_watcher.py) listens to filesystem modification, move, and deletion events via `watchdog`, debounces rapid edits (default 2.0s window), and triggers granular updates for modified AST nodes and embeddings in real-time.
 
 ### 2.4. OpenMP & ThreadPoolExecutor Parallelism
 - **Parallel Chunking**: Workloads are partitioned into chunked batches configured by `PECORINO_INDEX_CHUNK_SIZE=250`.
@@ -86,7 +86,7 @@ To prevent SSD write amplification during initial indexing and large repository 
 
 ## 3. Gorgonzola Graph Database
 
-Pecorino utilizes **Gorgonzola** (a fork of the Kùzu embedded property graph engine) exposed through [`GorgonzolaGraph`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/gorgonzola_graph.py) and [`GraphAPI`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/graph_api.py).
+Pecorino utilizes **Gorgonzola** (a fork of the Kùzu embedded property graph engine) exposed through [`GorgonzolaGraph`](../src/mcp_server/gorgonzola_graph.py) and [`GraphAPI`](../src/mcp_server/graph_api.py).
 
 ### 3.1. Node & Relationship Schema
 The graph model separates structural AST components from external and file entities:
@@ -145,7 +145,7 @@ classDiagram
 
 ## 4. Graph Analytics & Structural Algorithms
 
-Implemented in [`graph_algorithms.py`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/graph_algorithms.py):
+Implemented in [`graph_algorithms.py`](../src/mcp_server/graph_algorithms.py) and [`graph_post_processor.py`](../src/mcp_server/indexing/graph_post_processor.py):
 
 ### 4.1. PageRank & Personalized PageRank (PPR)
 - **Global PageRank**: Computes authority scores across the call and dependency graph, persisting scores into SQLite's `code_nodes.pagerank` for retrieval score weighting.
@@ -167,7 +167,7 @@ During graph post-processing (`_post_process_graph`):
   $$\text{MATCH } (a)\text{-[:CALLS]->}(n)\text{-[:CALLS]->}(b) \text{ WHERE } a \neq b$$
 - **Coupling & Instability**: Martin's metric calculated from incoming/outgoing degree:
   $$I = \frac{\text{OutDegree}}{\text{InDegree} + \text{OutDegree}}$$
-- **Inheritance & Containment Depth**: Recursive graph path evaluation (`[:EXTENDS*]`, `[:CONTAINS*]`).
+- **Inheritance & Containment Depth**: Bounded recursive graph path evaluation (`[:INHERITS*1..10]`, `[:CONTAINS*1..10]`).
 
 ### 4.4. Leiden Community Detection & Gamma Sweep
 - Runs native C++ Leiden clustering (`CALL leiden(...)`) across resolution parameters $\gamma \in [0.05 \dots 3.0]$.
@@ -178,7 +178,7 @@ During graph post-processing (`_post_process_graph`):
 
 ## 5. Git Evolution & Temporal Metrics
 
-Extracted via [`GitDataCollector`](file:///run/media/lechibang/work/projects/pecorino/src/core/gitdatacollector.py) and [`_compute_git_features`](file:///run/media/lechibang/work/projects/pecorino/src/mcp_server/index_pipeline.py#L650-L740):
+Extracted via [`GitDataCollector`](../src/core/gitdatacollector.py) and [`git_analytics.py`](../src/mcp_server/indexing/git_analytics.py):
 
 ```mermaid
 graph LR

@@ -5,15 +5,16 @@ PREFIX_DENYLIST = {"m_", "_", "__", "g_", "s_", "k_"}
 TYPE_PREFIXES = {"I", "C", "T", "E", "k"}
 SUFFIX_DENYLIST = {"_t", "_v", "_impl", "_"}
 VERB_SET = {
-    "get", "fetch", "load", "query", "find", "read", "retrieve",
+    "get", "fetch", "load", "query", "find", "read", "retrieve", "select",
     "set", "put", "update", "patch",
     "create", "make", "new", "build", "construct", "init",
     "delete", "remove", "drop", "destroy", "clear",
     "is", "has", "can", "should", "will", "does",
-    "save", "store", "write", "persist", "insert",
-    "validate", "check", "ensure", "parse", "format"
+    "save", "store", "write", "persist", "insert", "upsert",
+    "validate", "check", "ensure", "verify", "parse", "format"
 }
 STOP_WORDS = {"by", "with", "for", "of", "and", "or", "to", "in", "on"}
+
 
 def strip_affixes(raw: str) -> Tuple[str, str, str, bool]:
     if not raw:
@@ -48,6 +49,7 @@ def strip_affixes(raw: str) -> Tuple[str, str, str, bool]:
 
     return core, prefix, suffix, is_magic
 
+
 def detect_case_style(core: str) -> str:
     if not core:
         return "unknown"
@@ -73,14 +75,16 @@ def detect_case_style(core: str) -> str:
         return "flatcase"
     return "unknown"
 
+
 def tokenize_identifier(core: str) -> List[str]:
     if not core:
         return []
-    tmp = core.replace("-", "_")
+    tmp = re.sub(r'[^a-zA-Z0-9]+', '_', core)
     s1 = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', tmp)
     s2 = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s1)
     parts = [p for p in s2.split("_") if p]
     return [p.lower() for p in parts]
+
 
 def analyze_grammar(tokens: List[str]) -> Dict[str, Any]:
     if not tokens:
@@ -98,6 +102,7 @@ def analyze_grammar(tokens: List[str]) -> Dict[str, Any]:
     qualifier = "_".join(qual_tokens) if qual_tokens else None
 
     return {"verb": verb, "entity": entity, "qualifier": qualifier}
+
 
 def analyze_name(raw: str, file_path: str = "") -> Dict[str, Any]:
     if not raw:
@@ -140,20 +145,25 @@ def analyze_name(raw: str, file_path: str = "") -> Dict[str, Any]:
         "intent": intent
     }
 
+
 VERB_SYNONYMS = {
     # retrieve
     "get": "retrieve", "fetch": "retrieve", "load": "retrieve",
-    "query": "retrieve", "find": "retrieve", "read": "retrieve", "select": "retrieve",
+    "query": "retrieve", "find": "retrieve", "read": "retrieve",
+    "retrieve": "retrieve", "select": "retrieve",
     # persist
     "save": "persist", "store": "persist", "write": "persist",
     "persist": "persist", "insert": "persist", "upsert": "persist",
-    # update, create, delete, check
+    # update, create, delete, check, parse, format
     "set": "update", "put": "update", "update": "update", "patch": "update",
     "create": "create", "make": "create", "build": "create", "new": "create",
+    "construct": "create", "init": "create",
     "delete": "delete", "remove": "delete", "drop": "delete", "clear": "delete",
     "destroy": "delete",
     "is": "check", "has": "check", "can": "check", "should": "check",
+    "will": "check", "does": "check", "check": "check", "ensure": "check",
     "validate": "check", "verify": "check",
+    "parse": "parse", "format": "format",
 }
 
 INTENT_MAP = {
@@ -163,8 +173,11 @@ INTENT_MAP = {
     'update': 'mutation',
     'delete': 'mutation',
     'check': 'validation',
-    'validate': 'validation'
+    'validate': 'validation',
+    'parse': 'transformation',
+    'format': 'transformation',
 }
+
 
 def canonicalize_verb(tokens: List[str]) -> str:
     for t in tokens:
@@ -172,16 +185,21 @@ def canonicalize_verb(tokens: List[str]) -> str:
             return VERB_SYNONYMS[t]
     return "unknown"
 
+
 def canonicalize_entity(tokens: List[str]) -> str:
     # Filter out verbs, stop words, and common noisy trailing tokens
     noisy = {"id", "type", "status", "state", "list", "array"}
-    filtered = [t for t in tokens if t not in VERB_SYNONYMS and t not in STOP_WORDS and t not in noisy]
+    filtered = [
+        t for t in tokens
+        if t not in VERB_SET and t not in VERB_SYNONYMS and t not in STOP_WORDS and t not in noisy
+    ]
 
     if not filtered:
         # Fallback to just non-verbs if filtering removed everything
-        filtered = [t for t in tokens if t not in VERB_SYNONYMS]
+        filtered = [t for t in tokens if t not in VERB_SET and t not in VERB_SYNONYMS]
 
-    if not filtered: return "unknown"
+    if not filtered:
+        return "unknown"
 
     # take first meaningful token (which is usually the entity in get_user_by_id)
     # wait, if it's UserRepository.insert -> user, repository -> repository
@@ -192,6 +210,7 @@ def canonicalize_entity(tokens: List[str]) -> str:
     entity = re.sub(r'(info|data|record|model|repository|service|controller|handler)$', '', entity)
     return entity or "unknown"
 
+
 def infer_domain(file_path: str) -> str:
     p = file_path.lower()
     if "/auth" in p or "auth" in p.split("/")[-1]: return "auth"
@@ -199,6 +218,7 @@ def infer_domain(file_path: str) -> str:
     if "/user" in p or "/account" in p: return "user"
     if "/infra" in p or "/config" in p: return "infra"
     return "core"
+
 
 def infer_intent(canonical_verb: str) -> str:
     return INTENT_MAP.get(canonical_verb, 'operation')

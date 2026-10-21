@@ -25,7 +25,7 @@ async def do_set_workspace(path_arg: str, helper=None) -> list[dict]:
         watcher.start(new_path)
 
     # Clear index cache to force re-indexing of the new workspace
-    from src.mcp_server.index_db import clear_index_cache
+    from src.mcp_server.middleware.caching import clear_index_cache
     clear_index_cache()
 
     # Notify clients that roots and resources changed

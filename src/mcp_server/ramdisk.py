@@ -18,7 +18,6 @@ Usage as a context manager:
 
 import os
 import shutil
-import sys
 import time
 import uuid
 
@@ -50,9 +49,13 @@ class RamdiskIndex:
         self.ssd_db_path = os.path.abspath(ssd_db_path)
         self.max_bytes = max_bytes
 
-        # Derive the Gorgonzola dir name exactly as index_db does
+        # Derive the Gorgonzola dir name and FTS dir name exactly as index_db does
+        from pathlib import Path
+
         from src.mcp_server.index_db import get_graph_path_for_repo
         self.ssd_gorgonzola_path = get_graph_path_for_repo(self.ssd_db_path)
+        ssd_p = Path(self.ssd_db_path)
+        self.ssd_fts_path = str(ssd_p.parent / f"{ssd_p.stem}_fts")
 
         # Session directory under /dev/shm
         session_id = f"pecorino_{uuid.uuid4().hex[:12]}"
@@ -61,9 +64,11 @@ class RamdiskIndex:
         # Mirror the filenames inside the ramdisk dir
         db_basename = os.path.basename(self.ssd_db_path)
         gorgonzola_basename = os.path.basename(self.ssd_gorgonzola_path)
+        fts_basename = os.path.basename(self.ssd_fts_path)
 
         self.db_path = os.path.join(self.ram_dir, db_basename)
         self.gorgonzola_path = os.path.join(self.ram_dir, gorgonzola_basename)
+        self.fts_path = os.path.join(self.ram_dir, fts_basename)
 
         self._active = False
 
@@ -78,6 +83,15 @@ class RamdiskIndex:
         # Copy existing database and graph files from SSD to RAM disk if they exist
         if os.path.exists(self.ssd_db_path):
             shutil.copy2(self.ssd_db_path, self.db_path)
+        for wal_suffix in ("-wal", "-shm", ".wal"):
+            ssd_wal = f"{self.ssd_db_path}{wal_suffix}"
+            if os.path.exists(ssd_wal):
+                shutil.copy2(ssd_wal, f"{self.db_path}{wal_suffix}")
+        if os.path.exists(self.ssd_fts_path):
+            if os.path.isfile(self.ssd_fts_path):
+                shutil.copy2(self.ssd_fts_path, self.fts_path)
+            elif os.path.isdir(self.ssd_fts_path):
+                shutil.copytree(self.ssd_fts_path, self.fts_path)
         if os.path.exists(self.ssd_gorgonzola_path):
             if os.path.isfile(self.ssd_gorgonzola_path):
                 shutil.copy2(self.ssd_gorgonzola_path, self.gorgonzola_path)
@@ -93,8 +107,7 @@ class RamdiskIndex:
         if exc_type is not None:
             # On error, clean up ramdisk but do NOT overwrite SSD data
             logger.info(f"[ramdisk] Indexing failed ({exc_type.__name__}), "
-                  f"discarding ramdisk build.",
-                  file=sys.stderr, flush=True)
+                  f"discarding ramdisk build.")
             self._cleanup()
             return False  # re-raise the exception
 
@@ -156,24 +169,72 @@ class RamdiskIndex:
                 # Copy to a temp name first, then atomic rename
                 tmp_ssd = self.ssd_db_path + ".tmp"
                 shutil.copy2(self.db_path, tmp_ssd)
-                os.replace(tmp_ssd, self.ssd_db_path)
 
-                # Also copy any database WAL files (.wal)
-                wal_path = self.db_path + ".wal"
-                if os.path.exists(wal_path):
-                    ssd_wal = self.ssd_db_path + ".wal"
-                    tmp_wal = ssd_wal + ".tmp"
-                    shutil.copy2(wal_path, tmp_wal)
-                    os.replace(tmp_wal, ssd_wal)
-                else:
-                    # Remove stale WAL on SSD if ramdisk has none
-                    ssd_wal = self.ssd_db_path + ".wal"
-                    if os.path.exists(ssd_wal):
-                        os.remove(ssd_wal)
+                #Also copy any database WAL/SHM files (-wal, -shm, .wal)
+                for wal_suffix in ("-wal", "-shm", ".wal"):
+                    wal_path = f"{self.db_path}{wal_suffix}"
+                    ssd_wal = f"{self.ssd_db_path}{wal_suffix}"
+                    if os.path.exists(wal_path):
+                        tmp_wal = ssd_wal + ".tmp"
+                        shutil.copy2(wal_path, tmp_wal)
+                        os.replace(tmp_wal, ssd_wal)
+                    else:
+                        # Remove stale WAL/SHM on SSD if ramdisk has none
+                        if os.path.exists(ssd_wal):
+                            os.remove(ssd_wal)
+
+                # Update pecorino_ast virtual table path and _meta in SQLite DB so SSD queries don't reference /dev/shm
+                try:
+                    with open(tmp_ssd, "rb") as f:
+                        is_sqlite = f.read(16) == b"SQLite format 3\x00"
+                    if is_sqlite:
+                        import sqlite3
+                        conn = sqlite3.connect(tmp_ssd)
+                        try:
+                            conn.execute("PRAGMA writable_schema = ON")
+                            conn.execute(
+                                "UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'pecorino_ast'",
+                                (self.fts_path, self.ssd_fts_path),
+                            )
+                            conn.execute("PRAGMA writable_schema = OFF")
+                            if not os.path.exists(self.fts_path):
+                                has_meta = conn.execute(
+                                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_meta'"
+                                ).fetchone()
+                                if has_meta:
+                                    conn.execute("""
+                                        INSERT INTO _meta (key, value) VALUES ('fts_dirty', 'true')
+                                        ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = CURRENT_TIMESTAMP
+                                    """)
+                            conn.commit()
+                        finally:
+                            conn.close()
+                except Exception as e:
+                    logger.debug(f"[ramdisk] Could not update pecorino_ast metadata on SSD copy: {e}")
+
+                os.replace(tmp_ssd, self.ssd_db_path)
 
             db_size = os.path.getsize(self.ssd_db_path)
             logger.info(f"[ramdisk] Synced SQLite to SSD: "
                   f"{db_size / 1024 / 1024:.2f} MB")
+
+        # 1b. Sync FTS directory (<stem>_fts)
+        if os.path.exists(self.fts_path):
+            ssd_fts_parent = os.path.dirname(self.ssd_fts_path)
+            os.makedirs(ssd_fts_parent, exist_ok=True)
+            with FileLock(self.ssd_fts_path + ".lock"):
+                if os.path.isfile(self.fts_path):
+                    tmp_fts = self.ssd_fts_path + ".tmp"
+                    shutil.copy2(self.fts_path, tmp_fts)
+                    os.replace(tmp_fts, self.ssd_fts_path)
+                elif os.path.isdir(self.fts_path):
+                    tmp_fts = self.ssd_fts_path + ".tmp"
+                    if os.path.exists(tmp_fts):
+                        shutil.rmtree(tmp_fts)
+                    shutil.copytree(self.fts_path, tmp_fts)
+                    if os.path.exists(self.ssd_fts_path):
+                        shutil.rmtree(self.ssd_fts_path)
+                    os.rename(tmp_fts, self.ssd_fts_path)
 
         # 2. Sync Gorgonzola file (single file, not a directory)
         if os.path.exists(self.gorgonzola_path):
@@ -213,7 +274,7 @@ class RamdiskIndex:
                     if os.path.exists(ssd_gwal):
                         os.remove(ssd_gwal)
         else:
-            logger.warning(f"[ramdisk] Expected Gorgonzola graph at {self.gorgonzola_path} but it was not found. Graph data will be missing on SSD.", file=sys.stderr, flush=True)
+            logger.warning(f"[ramdisk] Expected Gorgonzola graph at {self.gorgonzola_path} but it was not found. Graph data will be missing on SSD.")
 
         elapsed = time.monotonic() - t0
         total_bytes = self.get_usage_bytes()

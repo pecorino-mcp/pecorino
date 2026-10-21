@@ -8,7 +8,7 @@ from src.mcp_server.index_db import find_repo_root, get_db_path_for_repo, get_gr
 
 
 class GraphAPI:
-    def __init__(self, repo_path: str = None, graph: GorgonzolaGraph = None):
+    def __init__(self, repo_path: str = None, graph: GorgonzolaGraph = None, search_index = None):
         self.repo_path = repo_path if repo_path else find_repo_root(os.getcwd())
         self.db_path = get_db_path_for_repo(self.repo_path)
         if graph is not None:
@@ -17,6 +17,7 @@ class GraphAPI:
         else:
             self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
             self._owns_graph = True
+        self.search_index = search_index
         self._pagerank_cache = None
         self._pagerank_lock = threading.Lock()
 
@@ -288,32 +289,38 @@ class GraphAPI:
         """
         queries = [
             '''
-            MATCH (caller:CodeNode {kind: 'Method'})-[r:CALLS]->(s:CodeNode {kind: 'Symbol'}), (target:CodeNode {kind: 'Method', name: s.name})
+            MATCH (caller:CodeNode {kind: 'Method'})-[r:CALLS]->(s:CodeNode), (target:CodeNode {kind: 'Method', name: s.name})
+            WHERE s.kind IN ['Symbol', 'External']
             MERGE (caller)-[:CALLS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (caller:CodeNode {kind: 'Method'})-[r:CALLS]->(s:CodeNode {kind: 'Symbol'}), (target:CodeNode {kind: 'Function', name: s.name})
+            MATCH (caller:CodeNode {kind: 'Method'})-[r:CALLS]->(s:CodeNode), (target:CodeNode {kind: 'Function', name: s.name})
+            WHERE s.kind IN ['Symbol', 'External']
             MERGE (caller)-[:CALLS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (caller:CodeNode {kind: 'Function'})-[r:CALLS]->(s:CodeNode {kind: 'Symbol'}), (target:CodeNode {kind: 'Method', name: s.name})
+            MATCH (caller:CodeNode {kind: 'Function'})-[r:CALLS]->(s:CodeNode), (target:CodeNode {kind: 'Method', name: s.name})
+            WHERE s.kind IN ['Symbol', 'External']
             MERGE (caller)-[:CALLS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (caller:CodeNode {kind: 'Function'})-[r:CALLS]->(s:CodeNode {kind: 'Symbol'}), (target:CodeNode {kind: 'Function', name: s.name})
+            MATCH (caller:CodeNode {kind: 'Function'})-[r:CALLS]->(s:CodeNode), (target:CodeNode {kind: 'Function', name: s.name})
+            WHERE s.kind IN ['Symbol', 'External']
             MERGE (caller)-[:CALLS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (c:CodeNode {kind: 'Class'})-[r:EXTENDS]->(s:CodeNode {kind: 'Symbol'}), (target:CodeNode {kind: 'Class', name: s.name})
+            MATCH (c:CodeNode {kind: 'Class'})-[r:EXTENDS]->(s:CodeNode), (target:CodeNode {kind: 'Class', name: s.name})
+            WHERE s.kind IN ['Symbol', 'External']
             MERGE (c)-[:EXTENDS]->(target)
             DELETE r
             ''',
             '''
-            MATCH (c:CodeNode {kind: 'Class'})-[r:IMPLEMENTS]->(s:CodeNode {kind: 'Symbol'}), (target:CodeNode {kind: 'Interface', name: s.name})
+            MATCH (c:CodeNode {kind: 'Class'})-[r:IMPLEMENTS]->(s:CodeNode), (target:CodeNode {kind: 'Interface', name: s.name})
+            WHERE s.kind IN ['Symbol', 'External']
             MERGE (c)-[:IMPLEMENTS]->(target)
             DELETE r
             '''
@@ -322,17 +329,23 @@ class GraphAPI:
 
         # 2. Semantic Fallback for unresolved symbols — batched FTS instead of per-symbol search
         unresolved_q = '''
-        MATCH (caller)-[r:CALLS]->(s:CodeNode {kind: 'Symbol'})
+        MATCH (caller)-[r:CALLS]->(s:CodeNode)
+        WHERE s.kind IN ['Symbol', 'External']
         RETURN caller.id AS caller_id, s.name AS symbol_name, s.id AS symbol_id
         LIMIT 100
         '''
         unresolved = self.graph.query(unresolved_q)
         if unresolved:
             from src.mcp_server.index_db import CodeSearchIndex
-            try:
-                index = CodeSearchIndex(db_path=self.db_path, read_only=True)
-            except Exception:
-                index = CodeSearchIndex(db_path=self.db_path, read_only=False)
+            owns_index = False
+            if self.search_index is not None:
+                index = self.search_index
+            else:
+                owns_index = True
+                try:
+                    index = CodeSearchIndex(db_path=self.db_path, read_only=True)
+                except Exception:
+                    index = CodeSearchIndex(db_path=self.db_path, read_only=False)
             try:
                 # Collect all unique symbol names
                 symbol_map = {}  # symbol_name → [(caller_id, symbol_id)]
@@ -376,7 +389,8 @@ class GraphAPI:
                 import logging
                 logging.getLogger(__name__).warning(f"Semantic fallback resolution failed: {e}")
             finally:
-                index.close()
+                if owns_index:
+                    index.close()
 
     def analyze_functional_purity(self) -> Dict[str, Any]:
         """Aggregate functional purity metrics: Lambda density, State mutations, Recursive loops."""

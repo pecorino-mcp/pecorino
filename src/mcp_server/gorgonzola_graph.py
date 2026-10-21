@@ -1,3 +1,4 @@
+import contextlib
 import csv
 import logging
 import os
@@ -36,8 +37,10 @@ _RELATIONSHIP_SCHEMA = [
     "CREATE REL TABLE HAS_PARAMETER (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE USES (FROM CodeNode TO CodeNode)",
     "CREATE REL TABLE CONTAINS_LAMBDA (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE ACCESSES_STATE (FROM CodeNode TO CodeNode)",
-    "CREATE REL TABLE RECURSES_TO (FROM CodeNode TO CodeNode)"
+    "CREATE REL TABLE ACCESSES_STATE (FROM CodeNode TO CodeNode, is_read BOOLEAN, is_mutation BOOLEAN, is_taint BOOLEAN)",
+    "CREATE REL TABLE RECURSES_TO (FROM CodeNode TO CodeNode)",
+    "CREATE REL TABLE SEMANTICALLY_RELATED (FROM CodeNode TO CodeNode, weight DOUBLE)",
+    "CREATE REL TABLE SIMILAR_TO (FROM CodeNode TO CodeNode, score DOUBLE)"
 ]
 
 def init_gorgonzola_schema(conn):
@@ -51,17 +54,24 @@ def init_gorgonzola_schema(conn):
     except Exception:
         existing_tables = set()
 
-    if "CodeNode" not in existing_tables:
-        queries = [
-            # Create node tables
-            "CREATE NODE TABLE CodeNode (id STRING, kind STRING, name STRING, qualified_name STRING, file STRING, line INT64, end_line INT64, mtime DOUBLE, complexity INT64, docstring STRING, embedding DOUBLE[384], PRIMARY KEY (id))",
-            "CREATE NODE TABLE Identifier (id STRING, raw STRING, tokens STRING[], case_style STRING, prefix STRING, suffix STRING, verb STRING, entity STRING, qualifier STRING, is_magic BOOLEAN, canonical_verb STRING, canonical_entity STRING, domain STRING, intent STRING, embedding DOUBLE[384], PRIMARY KEY (id))",
-            "CREATE NODE TABLE File (id STRING, name STRING, path STRING, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, PRIMARY KEY (id))",
-
-            # Create relationship tables
-        ] + _RELATIONSHIP_SCHEMA
-        for q in queries:
+    node_tables = [
+        ("CodeNode", "CREATE NODE TABLE IF NOT EXISTS CodeNode (id STRING, kind STRING, name STRING, qualified_name STRING, file STRING, line INT64, end_line INT64, mtime DOUBLE, complexity INT64, docstring STRING, embedding DOUBLE[384], PRIMARY KEY (id))"),
+        ("Identifier", "CREATE NODE TABLE IF NOT EXISTS Identifier (id STRING, raw STRING, tokens STRING[], case_style STRING, prefix STRING, suffix STRING, verb STRING, entity STRING, qualifier STRING, is_magic BOOLEAN, canonical_verb STRING, canonical_entity STRING, domain STRING, intent STRING, embedding DOUBLE[384], PRIMARY KEY (id))"),
+        ("File", "CREATE NODE TABLE IF NOT EXISTS File (id STRING, name STRING, path STRING, extension STRING, content_hash STRING, mtime DOUBLE, lang STRING, PRIMARY KEY (id))"),
+    ]
+    for tbl_name, q in node_tables:
+        if tbl_name not in existing_tables:
             r = conn.execute(q)
+            r.close()
+
+    for rel_q in _RELATIONSHIP_SCHEMA:
+        after_prefix = rel_q.split("CREATE REL TABLE ", 1)[1]
+        if after_prefix.startswith("IF NOT EXISTS "):
+            after_prefix = after_prefix[len("IF NOT EXISTS "):]
+        rel_name = after_prefix.split(" (", 1)[0].strip()
+        if rel_name not in existing_tables:
+            q_safe = rel_q if "IF NOT EXISTS" in rel_q else rel_q.replace("CREATE REL TABLE ", "CREATE REL TABLE IF NOT EXISTS ", 1)
+            r = conn.execute(q_safe)
             r.close()
 
 class GorgonzolaGraph:
@@ -71,9 +81,11 @@ class GorgonzolaGraph:
         self._db = None
         self._conn = None
         self._in_context = False
+        self._context_depth = 0
         self._schema_initialized = False
         from src.mcp_server.index_db import get_graph_path_for_repo
         self.gorgonzola_db_path = get_graph_path_for_repo(db_path) if any(db_path.endswith(ext) for ext in ('.sqlite3', '.sqlite', '.db', '.duckdb')) else db_path
+        self.db_path = self.gorgonzola_db_path
 
         parent_dir = os.path.dirname(self.gorgonzola_db_path)
         if parent_dir:
@@ -82,8 +94,8 @@ class GorgonzolaGraph:
         # Prevent runaway disk usage from Kuzu lack of compaction
         if os.path.exists(self.gorgonzola_db_path) and os.path.isdir(self.gorgonzola_db_path):
             total_size = sum(
-                os.path.getsize(os.path.join(dirpath, f)) 
-                for dirpath, _, filenames in os.walk(self.gorgonzola_db_path) 
+                os.path.getsize(os.path.join(dirpath, f))
+                for dirpath, _, filenames in os.walk(self.gorgonzola_db_path)
                 for f in filenames if not os.path.islink(os.path.join(dirpath, f))
             )
             # 5 GB threshold
@@ -115,12 +127,12 @@ class GorgonzolaGraph:
                     r.close()
                 except Exception as e:
                     logger.warning(f"Failed to build index with query {q}: {e}")
-        try:
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            ext_path = os.path.join(base_dir, "modules/gorgonzola/modules/extension/algo/build/libalgo.gorgonzola_extension")
-            conn.execute(f"LOAD EXTENSION '{ext_path}';")
-        except Exception as e:
-            logger.warning(f"Failed to load Leiden extension: {e}")
+            try:
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                ext_path = os.path.join(base_dir, "modules/gorgonzola/modules/extension/algo/build/libalgo.gorgonzola_extension")
+                self._conn.execute(f"LOAD EXTENSION '{ext_path}';")
+            except Exception as e:
+                logger.warning(f"Failed to load Leiden extension: {e}")
 
     def _open_db(self, buffer_pool_size=64 * 1024 * 1024, max_db_size=None, max_num_threads=None):
         if max_db_size is None:
@@ -135,30 +147,43 @@ class GorgonzolaGraph:
         )
 
     def __enter__(self):
-        self._db_ctx = self._open_db()
-        self._db = self._db_ctx.__enter__()
-        self._conn_ctx = self.gorgonzola.Connection(self._db)
-        self._conn = self._conn_ctx.__enter__()
-        self._in_context = True
-        self._ensure_schema(self._conn)
+        self._context_depth = getattr(self, '_context_depth', 0)
+        if self._context_depth == 0:
+            self._db_ctx = self._open_db()
+            self._db = self._db_ctx.__enter__()
+            self._conn_ctx = self.gorgonzola.Connection(self._db)
+            self._conn = self._conn_ctx.__enter__()
+            self._in_context = True
+            self._ensure_schema(self._conn)
+        self._context_depth += 1
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._in_context = False
-        if hasattr(self, '_conn_ctx') and self._conn_ctx:
-            try:
-                self._conn_ctx.__exit__(exc_type, exc_val, exc_tb)
-            except Exception:
-                pass
-            self._conn_ctx = None
-        if hasattr(self, '_db_ctx') and self._db_ctx:
-            try:
-                self._db_ctx.__exit__(exc_type, exc_val, exc_tb)
-            except Exception:
-                pass
-            self._db_ctx = None
-        self._conn = None
-        self._db = None
+        self._context_depth = max(0, getattr(self, '_context_depth', 1) - 1)
+        if self._context_depth == 0:
+            self._in_context = False
+            if hasattr(self, '_conn_ctx') and self._conn_ctx:
+                try:
+                    self._conn_ctx.__exit__(exc_type, exc_val, exc_tb)
+                except Exception:
+                    pass
+                self._conn_ctx = None
+            if hasattr(self, '_db_ctx') and self._db_ctx:
+                try:
+                    self._db_ctx.__exit__(exc_type, exc_val, exc_tb)
+                except Exception:
+                    pass
+                self._db_ctx = None
+            self._conn = None
+            self._db = None
+
+    @contextlib.contextmanager
+    def _connection(self):
+        if self._in_context and self._conn is not None:
+            yield self._conn
+        else:
+            with self:
+                yield self._conn
 
     def _get_csv_dir(self) -> str:
         """Return directory for temporary CSV files (same parent as DB)."""
@@ -214,7 +239,12 @@ class GorgonzolaGraph:
 
     def _rewrite_cypher_query(self, query: str) -> str:
         import re
-        target_nodes = ["Project", "Package", "Folder", "Module", "Class", "Function", "Method", "Interface", "Enum", "Type", "Route", "Resource", "Symbol"]
+        target_nodes = [
+            "Class", "Function", "Method", "Interface", "Module", "Type", "Symbol",
+            "Macro", "Field", "Enum", "Property", "Struct", "Trait", "Variable",
+            "Lambda", "ControlFlow", "Parameter", "ExternalType", "External",
+            "Project", "Package", "Folder", "Route", "Resource"
+        ]
         pattern = r'(\([a-zA-Z0-9_]*)\s*:\s*(' + '|'.join(target_nodes) + r')\b(\s*\{?)'
         def repl(m):
             var_part = m.group(1)
@@ -236,13 +266,8 @@ class GorgonzolaGraph:
 
         query = self._rewrite_cypher_query(query)
 
-        if self._in_context:
-            return self._query_conn(query, parameters, self._conn)
-        else:
-            with self._open_db() as db:
-                with self.gorgonzola.Connection(db) as conn:
-                    self._ensure_schema(conn)
-                    return self._query_conn(query, parameters, conn)
+        with self._connection() as conn:
+            return self._query_conn(query, parameters, conn)
 
     def compute_leiden_communities(self) -> dict:
         """
@@ -273,6 +298,7 @@ class GorgonzolaGraph:
 
     def close(self):
         """Close the active connection and database contexts."""
+        self._context_depth = 1
         self.__exit__(None, None, None)
 
     def _query_conn(self, query: str, parameters: dict, conn) -> list:
@@ -327,25 +353,21 @@ class GorgonzolaGraph:
         Returns:
             dict mapping node_id -> label
         """
-        if self._in_context:
-            return self._insert_nodes_bulk_conn(nodes, self._conn)
-        else:
-            with self._open_db() as db:
-                with self.gorgonzola.Connection(db) as conn:
-                    self._ensure_schema(conn)
-                    return self._insert_nodes_bulk_conn(nodes, conn)
+        with self._connection() as conn:
+            return self._insert_nodes_bulk_conn(nodes, conn)
 
     def _insert_nodes_bulk_conn(self, nodes, conn) -> dict:
         # Group nodes by label
         groups = {}
         for node_id, properties, label in nodes:
+            props = dict(properties) if properties else {}
             if label == "Identifier":
-                groups.setdefault("Identifier", []).append((node_id, properties))
+                groups.setdefault("Identifier", []).append((node_id, props))
             else:
-                if "type" in properties:
-                    properties["cf_type"] = properties.get("type", "")
-                properties.setdefault("kind", label)
-                groups.setdefault("CodeNode", []).append((node_id, properties))
+                if "type" in props:
+                    props["cf_type"] = props.get("type", "")
+                props.setdefault("kind", label)
+                groups.setdefault("CodeNode", []).append((node_id, props))
 
         csv_dir = self._get_csv_dir()
 
@@ -367,7 +389,7 @@ class GorgonzolaGraph:
                         ids_to_check.append(norm_id)
 
             existing_ids = set()
-            chunk_size = 1
+            chunk_size = 1000
             for i in range(0, len(ids_to_check), chunk_size):
                 chunk = ids_to_check[i:i+chunk_size]
                 try:
@@ -396,7 +418,7 @@ class GorgonzolaGraph:
             if not filtered_group:
                 continue
 
-            csv_path = os.path.join(csv_dir, f"_bulk_nodes_{label}.csv")
+            csv_path = os.path.join(csv_dir, f"_bulk_nodes_{os.getpid()}_{id(self)}_{label}.csv")
             rows = []
             final_seen = set()
             for node_id, properties in filtered_group:
@@ -415,7 +437,14 @@ class GorgonzolaGraph:
                             emb = val if (isinstance(val, list) and len(val) == 384) else [0.0] * 384
                             row.append("[" + ",".join(str(v) for v in emb) + "]")
                         elif isinstance(val, list):
-                            row.append("[" + ",".join(str(v).replace('\n', ' ').replace('\r', '') for v in val) + "]")
+                            row.append(
+                                "["
+                                + ",".join(
+                                    str(v).replace('\n', ' ').replace('\r', '').replace('[', '').replace(']', '').replace(',', '')
+                                    for v in val
+                                )
+                                + "]"
+                            )
                         else:
                             row.append(str(val).replace('\n', ' ').replace('\r', ''))
                     else:
@@ -450,13 +479,8 @@ class GorgonzolaGraph:
         if label_map:
             with self._label_cache_lock:
                 self._label_cache.update(label_map)
-        if self._in_context:
-            self._insert_edges_bulk_conn(edges, self._conn, label_map)
-        else:
-            with self._open_db() as db:
-                with self.gorgonzola.Connection(db) as conn:
-                    self._ensure_schema(conn)
-                    self._insert_edges_bulk_conn(edges, conn, label_map)
+        with self._connection() as conn:
+            self._insert_edges_bulk_conn(edges, conn, label_map)
 
     def purge_orphaned_identifiers(self, conn=None):
         """Purge Identifier nodes that have no incoming HAS_IDENTIFIER relationships."""
@@ -465,14 +489,10 @@ class GorgonzolaGraph:
             if conn:
                 r = conn.execute(query)
                 r.close()
-            elif self._in_context:
-                r = self._conn.execute(query)
-                r.close()
             else:
-                with self._open_db() as db:
-                    with self.gorgonzola.Connection(db) as conn_ctx:
-                        r = conn_ctx.execute(query)
-                        r.close()
+                with self._connection() as c:
+                    r = c.execute(query)
+                    r.close()
         except Exception as e:
             logger.debug("Failed to purge orphaned identifiers: %s", e)
 
@@ -503,7 +523,7 @@ class GorgonzolaGraph:
         csv_dir = self._get_csv_dir()
 
         for (rel_type, src_label, dst_label), items in groups.items():
-            csv_path = os.path.join(csv_dir, f"_bulk_edges_{rel_type}_{src_label}_{dst_label}.csv")
+            csv_path = os.path.join(csv_dir, f"_bulk_edges_{os.getpid()}_{id(self)}_{rel_type}_{src_label}_{dst_label}.csv")
             try:
                 rows = []
                 for src_id, dst_id, props in items:
@@ -529,6 +549,12 @@ class GorgonzolaGraph:
                     elif rel_type == "FILE_CHANGES_WITH":
                         props = props or {}
                         row.append(str(props.get("weight", 0)))
+                    elif rel_type == "SEMANTICALLY_RELATED":
+                        props = props or {}
+                        row.append(str(props.get("weight", 0.0)))
+                    elif rel_type == "SIMILAR_TO":
+                        props = props or {}
+                        row.append(str(props.get("score", 0.0)))
                     rows.append(row)
 
                 copy_query = f"COPY {rel_type} FROM '{csv_path}' (HEADER=false, PARALLEL=false, FROM='{src_label}', TO='{dst_label}', ESCAPE='\"', QUOTE='\"', DELIM=',', AUTO_DETECT=false)"
@@ -540,13 +566,8 @@ class GorgonzolaGraph:
         """Execute multiple queries within a single connection."""
         if parameters is None:
             parameters = {}
-        if self._in_context:
-            self._query_batch_conn(queries, parameters, self._conn)
-        else:
-            with self._open_db() as db:
-                with self.gorgonzola.Connection(db) as conn:
-                    self._ensure_schema(conn)
-                    self._query_batch_conn(queries, parameters, conn)
+        with self._connection() as conn:
+            self._query_batch_conn(queries, parameters, conn)
 
     def _query_batch_conn(self, queries, parameters, conn):
         for q in queries:
@@ -559,33 +580,30 @@ class GorgonzolaGraph:
     def pagerank(self) -> list:
         try:
             results = []
-            with self._open_db() as db:
-                with self.gorgonzola.Connection(db) as conn:
-                    self._ensure_schema(conn)
+            with self._connection() as conn:
+                # Project graph
+                try:
+                    conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
+                except Exception:
+                    pass
 
-                    # Project graph
-                    try:
-                        conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
-                    except Exception:
-                        pass
+                conn.execute("""
+                    CALL PROJECT_GRAPH('CodeGraph',
+                        ['File', 'CodeNode', 'Identifier'],
+                        ['DEPENDS_ON', 'CONTAINS', 'DEFINES', 'INHERITS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS', 'IMPORTS', 'READS', 'WRITES', 'RETURNS', 'HAS_PARAMETER', 'USES']
+                    );
+                """)
 
-                    conn.execute("""
-                        CALL PROJECT_GRAPH('CodeGraph',
-                            ['File', 'CodeNode', 'Identifier'],
-                            ['DEPENDS_ON', 'CONTAINS', 'DEFINES', 'INHERITS', 'IMPLEMENTS', 'CALLS', 'FILE_CHANGES_WITH', 'RAISES', 'TESTS', 'HTTP_CALLS', 'IMPORTS', 'READS', 'WRITES', 'RETURNS', 'HAS_PARAMETER', 'USES']
-                        );
-                    """)
+                res = conn.execute("CALL page_rank('CodeGraph') RETURN node.id AS id, rank;")
+                while res.has_next():
+                    row = res.get_next()
+                    results.append({"node_id": row[0], "score": row[1]})
+                res.close()
 
-                    res = conn.execute("CALL page_rank('CodeGraph') RETURN node.id AS id, rank;")
-                    while res.has_next():
-                        row = res.get_next()
-                        results.append({"node_id": row[0], "score": row[1]})
-                    res.close()
-
-                    try:
-                        conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
-                    except Exception:
-                        pass
+                try:
+                    conn.execute("CALL DROP_PROJECTED_GRAPH('CodeGraph');")
+                except Exception:
+                    pass
 
             return results
         except Exception as e:

@@ -17,8 +17,8 @@ The standard pattern of maintaining persistent database connections via local `.
 Implement a RAM-Disk Staging Pipeline (`ramdisk.py`):
 1. When indexing a repository, initialize SQLite3 and Gorgonzola databases inside `/dev/shm`.
 2. Process all AST parsing, embedding generation, graph edge insertion, and initial ranking in memory.
-3. Upon indexing completion, flush database files atomically to persistent disk storage (`.pecorino/`).
-4. Check available `/dev/shm` capacity before staging; fall back automatically to direct disk operations (`DummyContext`) if memory is insufficient.
+3. Upon indexing completion, flush database files atomically to persistent disk storage (`~/.pecorino/indexes/`, including SQLite WAL/SHM and `c-fts-uring` FTS shards).
+4. Check available `/dev/shm` capacity and `PECORINO_USE_RAMDISK` before staging; fall back automatically to direct disk operations (`DummyContext`) if memory is insufficient or disabled.
 
 ## Consequences & Trade-offs
 

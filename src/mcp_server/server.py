@@ -80,36 +80,54 @@ def main():
     except Exception as e:
         logger.warning(f"Failed to start file watcher: {e}")
 
-    if not args.legacy:
-        from src.mcp_server.highlevel_core import server as fast_mcp_server
-        kwargs = {}
-        if settings.transport in ("sse", "streamable-http"):
-            if settings.host: kwargs["host"] = settings.host
-            if settings.port: kwargs["port"] = settings.port
-        fast_mcp_server.run(transport=settings.transport, **kwargs)
-        return
+    try:
+        if not args.legacy:
+            from src.mcp_server.highlevel_core import server as fast_mcp_server
+            kwargs = {}
+            if settings.transport in ("sse", "streamable-http"):
+                if settings.host: kwargs["host"] = settings.host
+                if settings.port: kwargs["port"] = settings.port
+            fast_mcp_server.run(transport=settings.transport, **kwargs)
+            return
 
-    if settings.transport == "stdio":
-        from src.transports.stdio_adapter import run_stdio
-        asyncio.run(run_stdio(mcp_server))
-    elif settings.transport == "sse":
+        if settings.transport == "stdio":
+            from src.transports.stdio_adapter import run_stdio
+            asyncio.run(run_stdio(mcp_server))
+        elif settings.transport == "sse":
+            try:
+                import fastapi  # noqa: F401
+                import uvicorn  # noqa: F401
+            except ImportError:
+                logger.warning("Error: fastapi and uvicorn must be installed to use SSE transport.")
+                sys.exit(1)
+            from src.transports.fastapi_adapter import run_sse
+            asyncio.run(run_sse(mcp_server))
+        elif settings.transport == "streamable-http":
+            try:
+                import fastapi  # noqa: F401
+                import uvicorn  # noqa: F401
+            except ImportError:
+                logger.warning("Error: fastapi and uvicorn must be installed to use streamable-http transport.")
+                sys.exit(1)
+            from src.transports.fastapi_adapter import run_streamable_http
+            asyncio.run(run_streamable_http(mcp_server))
+    except KeyboardInterrupt:
+        pass
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            raise
+    except BaseExceptionGroup as eg:
+        _, rest = eg.split((KeyboardInterrupt, SystemExit, asyncio.CancelledError))
+        if rest is not None:
+            raise rest
+    finally:
         try:
-            import fastapi  # noqa: F401
-            import uvicorn  # noqa: F401
-        except ImportError:
-            logger.warning("Error: fastapi and uvicorn must be installed to use SSE transport.")
-            sys.exit(1)
-        from src.transports.fastapi_adapter import run_sse
-        asyncio.run(run_sse(mcp_server))
-    elif settings.transport == "streamable-http":
-        try:
-            import fastapi  # noqa: F401
-            import uvicorn  # noqa: F401
-        except ImportError:
-            logger.warning("Error: fastapi and uvicorn must be installed to use streamable-http transport.")
-            sys.exit(1)
-        from src.transports.fastapi_adapter import run_streamable_http
-        asyncio.run(run_streamable_http(mcp_server))
+            from src.mcp_server.middleware.file_watcher import get_file_watcher
+            w = get_file_watcher()
+            if w:
+                w.stop()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()

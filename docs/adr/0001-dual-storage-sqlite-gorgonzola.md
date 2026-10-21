@@ -20,7 +20,7 @@ Migrate to a dual embedded storage architecture utilizing SQLite3 and Gorgonzola
 - **SQLite3**: Serves as the relational metadata store. It utilizes a custom HNSW vector extension for `ARRAY` embedding similarity and an io_uring-backed custom C-extension (`c-fts-uring`) for high-performance async full-text search.
 - **Gorgonzola (Kùzu/openCypher adapter)**: Serves as the embedded property graph database storing AST entities (`File`, `CodeNode`, `Identifier`, etc.) and relationship edges (`CALLS`, `INHERITS`, etc.).
 
-Both database files reside side-by-side in the repository cache directory (`.pecorino/`). 
+Both database files reside side-by-side in the centralized index directory (`~/.pecorino/indexes/`, configurable via `PECORINO_INDEX_DIR`).
 
 ## Consequences & Trade-offs
 

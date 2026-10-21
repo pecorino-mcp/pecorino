@@ -22,6 +22,17 @@ class DebouncedFileEventHandler(FileSystemEventHandler):
         self._timer = None
         self._lock = threading.Lock()
 
+    def has_pending_files(self) -> bool:
+        with self._lock:
+            return bool(self.changed_files) or self._timer is not None
+
+    def cancel_timer(self):
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            self.changed_files.clear()
+
     def _trigger_sync(self):
         with self._lock:
             files_to_sync = list(self.changed_files)
@@ -29,23 +40,21 @@ class DebouncedFileEventHandler(FileSystemEventHandler):
             self._timer = None
 
         if files_to_sync:
-            # We must schedule this on the asyncio event loop since the watcher runs in a background thread
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.watcher_service.sync_files(files_to_sync))
-            except RuntimeError:
-                # If no running loop, we can run it synchronously in this thread
-                # This usually only happens during tests or unusual shutdown sequences
-                asyncio.run(self.watcher_service.sync_files(files_to_sync))
+            loop = getattr(self.watcher_service, "_loop", None)
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self.watcher_service.sync_files(files_to_sync), loop
+                )
+            else:
+                try:
+                    running_loop = asyncio.get_running_loop()
+                    running_loop.create_task(self.watcher_service.sync_files(files_to_sync))
+                except RuntimeError:
+                    # Run directly on the timer thread without spinning up a throwaway event loop
+                    self.watcher_service._do_sync_sync(files_to_sync)
 
-    def _on_event(self, event):
-        if event.is_directory:
-            return
-
-        filepath = event.src_path
-
-        # Check against exclusions before adding
-        if not self.watcher_service._is_supported_file(filepath):
+    def _queue_path(self, filepath: str):
+        if not filepath or not self.watcher_service._is_supported_file(filepath):
             return
 
         with self._lock:
@@ -53,7 +62,13 @@ class DebouncedFileEventHandler(FileSystemEventHandler):
             if self._timer is not None:
                 self._timer.cancel()
             self._timer = threading.Timer(self.debounce_seconds, self._trigger_sync)
+            self._timer.daemon = True
             self._timer.start()
+
+    def _on_event(self, event):
+        if event.is_directory:
+            return
+        self._queue_path(event.src_path)
 
     def on_created(self, event):
         self._on_event(event)
@@ -69,16 +84,34 @@ class DebouncedFileEventHandler(FileSystemEventHandler):
         # Let's just track it for sync.
         self._on_event(event)
 
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        self._queue_path(getattr(event, "src_path", None))
+        self._queue_path(getattr(event, "dest_path", None))
+
 
 class FileWatcherService:
     def __init__(self, workspace_root: str):
-        self.workspace_root = workspace_root
+        self.workspace_root = str(workspace_root)
         self.db_path = get_db_path_for_repo(self.workspace_root)
         self.observer = None
+        self._handler: DebouncedFileEventHandler | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._sync_lock = threading.Lock()
 
         from src.core.constants import SUPPORTED_EXTENSIONS
         self.supported_extensions = SUPPORTED_EXTENSIONS
+
+    def is_active_for(self, repo_root: str) -> bool:
+        """Check whether this watcher is actively watching repo_root with no pending events."""
+        if self.observer is None or not self.observer.is_alive():
+            return False
+        if os.path.abspath(str(self.workspace_root)) != os.path.abspath(str(repo_root)):
+            return False
+        if self._handler is not None and self._handler.has_pending_files():
+            return False
+        return True
 
     def _is_supported_file(self, filepath: str) -> bool:
         """Check if a file should be indexed."""
@@ -113,69 +146,98 @@ class FileWatcherService:
             logger.warning(f"File watcher cannot start: {self.workspace_root} is not a directory")
             return
 
-        event_handler = DebouncedFileEventHandler(self, debounce_seconds=2.0)
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
+
+        self._handler = DebouncedFileEventHandler(self, debounce_seconds=2.0)
         self.observer = Observer()
-        self.observer.schedule(event_handler, self.workspace_root, recursive=True)
+        self.observer.schedule(self._handler, self.workspace_root, recursive=True)
         self.observer.start()
         logger.info(f"File watcher started on {self.workspace_root}")
 
     def stop(self):
         """Stop the file watcher."""
+        if self._handler is not None:
+            self._handler.cancel_timer()
         if self.observer is not None:
             self.observer.stop()
             self.observer.join(timeout=5.0)
             self.observer = None
             logger.info("File watcher stopped")
 
+    def _do_sync_sync(self, filepaths: list[str]) -> bool:
+        """Synchronously re-index modified files and clear deleted files."""
+        if not filepaths:
+            return False
+
+        existing_filepaths = []
+        deleted_filepaths = []
+        for path in filepaths:
+            if os.path.exists(path):
+                existing_filepaths.append(path)
+            else:
+                deleted_filepaths.append(path)
+
+        if not existing_filepaths and not deleted_filepaths:
+            return False
+
+        with self._sync_lock:
+            logger.info(
+                f"File watcher syncing {len(existing_filepaths)} modified and {len(deleted_filepaths)} deleted files..."
+            )
+
+            import hashlib
+
+            from src.core.constants import get_language_for_extension
+            from src.mcp_server.index_pipeline import CodebaseIndexer
+
+            # Must close cached read-only connections before opening a write connection
+            clear_index_cache()
+
+            changed = False
+            indexer = CodebaseIndexer(repo_path=self.workspace_root)
+            try:
+                for filepath in deleted_filepaths:
+                    try:
+                        indexer.search_index.clear_file(filepath)
+                        changed = True
+                    except Exception as e:
+                        logger.warning(f"Watcher auto-sync clear failed for {filepath}: {e}")
+
+                for filepath in existing_filepaths:
+                    try:
+                        content = Path(filepath).read_text(encoding='utf-8', errors='ignore')
+                        ext = os.path.splitext(filepath)[1]
+                        indexer.index_file(filepath, content, ext, rebuild_fts=False)
+                        mtime = os.path.getmtime(filepath)
+                        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                        lang = get_language_for_extension(ext)
+                        indexer.search_index.upsert_file_hash(filepath, content_hash, mtime, lang)
+                        changed = True
+                    except Exception as e:
+                        logger.warning(f"Watcher auto-sync failed for {filepath}: {e}")
+
+                if changed:
+                    indexer.search_index.mark_fts_dirty()
+                    indexer.search_index.rebuild_fts()
+            finally:
+                indexer.close()
+
+            if changed:
+                clear_index_cache()
+                logger.debug("Index cache cleared after watcher sync")
+            return changed
+
     async def sync_files(self, filepaths: list[str]):
         """Re-index a batch of changed files."""
-        # Check which files actually need syncing (some might be fast deletes or temporary)
-        valid_filepaths = []
-        for path in filepaths:
-            # We don't try to index files that don't exist anymore,
-            # though we should remove them from the index.
-            # Currently `update_index` handles full cleanup. For incremental,
-            # let's just index what we can read.
-            if os.path.exists(path):
-                valid_filepaths.append(path)
-
-        if not valid_filepaths:
+        if not filepaths:
             return
 
-        def _do_sync():
-            with self._sync_lock:
-                logger.info(f"File watcher syncing {len(valid_filepaths)} files...")
-
-                import hashlib
-
-                from src.mcp_server.index_pipeline import CodebaseIndexer
-
-                # Must close cached read-only connections before opening a write connection
-                clear_index_cache()
-
-                indexer = CodebaseIndexer(repo_path=self.workspace_root)
-                try:
-                    for filepath in valid_filepaths:
-                        try:
-                            content = Path(filepath).read_text(encoding='utf-8', errors='ignore')
-                            ext = os.path.splitext(filepath)[1]
-                            indexer.index_file(filepath, content, ext, rebuild_fts=False)
-                            mtime = os.path.getmtime(filepath)
-                            content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
-                            lang = ext.lstrip('.')
-                            indexer.search_index.upsert_file_hash(filepath, content_hash, mtime, lang)
-                        except Exception as e:
-                            logger.warning(f"Watcher auto-sync failed for {filepath}: {e}")
-                finally:
-                    indexer.close()
-
-                return True
-
         # Run the sync in a thread to avoid blocking the asyncio loop
-        success = await asyncio.to_thread(_do_sync)
+        success = await asyncio.to_thread(self._do_sync_sync, filepaths)
         if success:
-            clear_index_cache()
-            logger.debug("Index cache cleared after watcher sync")
             from mcp.shared.subscriptions import ResourcesListChanged
             await bus.publish(ResourcesListChanged())
 # Global watcher instance

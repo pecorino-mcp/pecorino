@@ -54,7 +54,8 @@ class Embedder:
             logger.warning(f"sentence-transformers/torch unavailable ({e}). Falling back to fastembed.")
             try:
                 from fastembed import TextEmbedding
-                self._model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", threads=max_threads)
+                self.model_name = "BAAI/bge-small-en-v1.5"
+                self._model = TextEmbedding(model_name=self.model_name, threads=max_threads)
                 self._encode = lambda texts: [[float(x) for x in v] for v in self._model.embed(texts)]
                 logger.info(f"Loaded fastembed model {self.model_name}")
             except (ImportError, Exception) as e2:
@@ -76,9 +77,15 @@ class Embedder:
         hash_list_str = ", ".join(f"'{h}'" for h in hashes)
         cached = {}
         if hash_list_str:
-            res = self.db_conn.execute(
-                f"SELECT text_hash, embedding FROM embeddings_cache WHERE text_hash IN ({hash_list_str}) AND model = '{self.model_name}'"
-            ).fetchall()
+            try:
+                res = self.db_conn.execute(
+                    f"SELECT text_hash, embedding FROM embeddings_cache WHERE text_hash IN ({hash_list_str}) AND model = '{self.model_name}'"
+                ).fetchall()
+            except Exception:
+                self._ensure_cache_table()
+                res = self.db_conn.execute(
+                    f"SELECT text_hash, embedding FROM embeddings_cache WHERE text_hash IN ({hash_list_str}) AND model = '{self.model_name}'"
+                ).fetchall()
             for r in res:
                 emb = r[1]
                 if isinstance(emb, str):
@@ -110,10 +117,15 @@ class Embedder:
                 insert_data.append((h, t, emb_val, self.model_name))
 
             if insert_data:
-                self.db_conn.executemany(
-                    "INSERT OR REPLACE INTO embeddings_cache (text_hash, text, embedding, model) VALUES (?, ?, ?, ?)",
-                    insert_data
-                )
+                try:
+                    self._ensure_cache_table()
+                    self.db_conn.executemany(
+                        "INSERT OR REPLACE INTO embeddings_cache (text_hash, text, embedding, model) VALUES (?, ?, ?, ?)",
+                        insert_data
+                    )
+                    self.db_conn.commit()
+                except Exception as e:
+                    logger.debug(f"Failed to cache embeddings: {e}")
 
         # Return in original order
         return [cached[h] for h in hashes]

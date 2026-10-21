@@ -32,15 +32,27 @@ server = MCPServer("OOP Metrics Analyzer Server 🚀")
 
 _cached_roots_paths: list[str] = []
 
-async def _get_roots(ctx: Context) -> ListRoots:
-    return ListRoots()
+async def _get_roots(target: Optional[str] = None, ctx: Context = None) -> Optional[ListRoots]:
+    if target:
+        return None
+    if settings.workspace_root and os.path.exists(settings.workspace_root):
+        return None
+    try:
+        if ctx is not None and ctx.session is not None:
+            caps = getattr(ctx, "client_capabilities", None)
+            if caps is None:
+                client_params = getattr(ctx.session, "client_params", None)
+                caps = getattr(client_params, "capabilities", None) if client_params else None
+            if caps and getattr(caps, "roots", None):
+                return ListRoots()
+    except Exception:
+        pass
+    return None
 
-from mcp.server.context import ServerRequestContext
-from mcp_types import NotificationParams
 
 
 
-async def _resolve_target(target: Any, roots_result: ListRootsResult) -> str:
+async def _resolve_target(target: Any, roots_result: Optional[ListRootsResult]) -> str:
     global _cached_roots_paths
     if target is None or (isinstance(target, str) and not target.strip()):
         try:
@@ -244,14 +256,14 @@ async def metrics(
     return format_output(res)
 
 
-@server.prompt()
-def browse(target: str = "", view: str = "tree") -> list[dict]:
+@server.prompt(name="browse")
+def prompt_browse(target: str = "", view: str = "tree") -> list[dict]:
     """Browse codebase structure (tree, deps, classes, functions, pagerank, summary)."""
     target_str = f" on target '{target}'" if target else ""
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the browse tool{target_str} with view '{view}'."}}]
 
-@server.prompt()
-def search(query: str = "", target: str = "", mode: str = "fts", intent: str = "", include_source: bool = False) -> list[dict]:
+@server.prompt(name="search")
+def prompt_search(query: str = "", target: str = "", mode: str = "fts", intent: str = "", include_source: bool = False) -> list[dict]:
     """Unified search and analysis. Supports FTS, callers/callees, impact, usages, intent presets, and DSL queries."""
     target_str = f" on target '{target}'" if target else ""
     if mode == "intent" and intent:
@@ -263,35 +275,35 @@ def search(query: str = "", target: str = "", mode: str = "fts", intent: str = "
         q_str = f" for query '{query}'" if query else ""
         return [{"role": "user", "content": {"type": "text", "text": f"Please use the search tool{target_str} with mode='{mode}'{q_str}."}}]
 
-@server.prompt()
-def update_index(target: str = "") -> list[dict]:
+@server.prompt(name="update_index")
+def prompt_update_index(target: str = "") -> list[dict]:
     """Update the AST index for the codebase and return a structural summary."""
     target_str = f" on target '{target}'" if target else ""
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the update_index tool{target_str}."}}]
-@server.prompt()
-def detect_changes(base: str = "HEAD", target: str = "") -> list[dict]:
+@server.prompt(name="detect_changes")
+def prompt_detect_changes(base: str = "HEAD", target: str = "") -> list[dict]:
     """Detect changed symbols and their impact using git diff and the AST index."""
     target_str = f" on target '{target}'" if target else ""
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the detect_changes tool{target_str} against base '{base}'."}}]
 
-@server.prompt()
-def manage_adr(action: str = "", title: str = "", adr_id: str = "", context: str = "", decision: str = "", consequences: str = "") -> list[dict]:
+@server.prompt(name="manage_adr")
+def prompt_manage_adr(action: str = "", title: str = "", adr_id: str = "", context: str = "", decision: str = "", consequences: str = "") -> list[dict]:
     """Manage Architecture Decision Records (ADRs)."""
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the manage_adr tool with action '{action}'."}}]
 
-@server.prompt()
-def manage_snapshot(action: str = "", file_path: str = "snapshot.zst") -> list[dict]:
+@server.prompt(name="manage_snapshot")
+def prompt_manage_snapshot(action: str = "", file_path: str = "snapshot.zst") -> list[dict]:
     """Export or import a .zst graph snapshot for the current repository."""
     return [{"role": "user", "content": {"type": "text", "text": f"Please use the manage_snapshot tool to {action} using '{file_path}'."}}]
 
-@server.prompt()
-def query_graph(query: str = "") -> list[dict]:
+@server.prompt(name="query_graph")
+def prompt_query_graph(query: str = "") -> list[dict]:
     """Execute an openCypher query directly against the Kùzu graph."""
     return [{"role": "user", "content": {"type": "text", "text": f"Please execute this openCypher query against the graph:\n\n{query}"}}]
 
 
-@server.prompt()
-def metrics(target: str = "", what: str = "all") -> list[dict]:
+@server.prompt(name="metrics")
+def prompt_metrics(target: str = "", what: str = "all") -> list[dict]:
     """Calculate OOP metrics, cyclomatic complexity, or hotspot risk analysis."""
     target_str = f" on target '{target}'" if target else ""
     return [{"role": "user", "content": {"type": "text", "text": f"Please calculate {what} metrics{target_str}."}}]

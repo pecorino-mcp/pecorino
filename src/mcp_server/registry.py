@@ -1,6 +1,7 @@
+import contextlib
 import hashlib
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.mcp_server.config import settings
@@ -12,28 +13,55 @@ class RegistryDB:
     This enables federated querying and cross-repository graph traversals.
     """
     def __init__(self):
-        self.registry_path = settings.index_dir / "registry.db"
-        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        self._custom_path: Optional[Path] = None
+        self._initialized_path: Optional[Path] = None
 
-    def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.registry_path), timeout=10.0)
+    @property
+    def registry_path(self) -> Path:
+        if self._custom_path is not None:
+            return self._custom_path
+        return Path(settings.index_dir) / "registry.db"
+
+    @registry_path.setter
+    def registry_path(self, value: Path):
+        self._custom_path = Path(value) if value is not None else None
+        self._initialized_path = None
+
+    @property
+    def db_path(self) -> Path:
+        return self.registry_path
+
+    @db_path.setter
+    def db_path(self, value: Path):
+        self.registry_path = value
+
+    @contextlib.contextmanager
+    def _get_conn(self):
+        current_path = self.registry_path
+        current_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(current_path), timeout=10.0)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            if self._initialized_path != current_path:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS repositories (
+                        hash TEXT PRIMARY KEY,
+                        repo_path TEXT UNIQUE,
+                        name TEXT,
+                        db_path TEXT,
+                        gorgonzola_path TEXT,
+                        last_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                conn.commit()
+                self._initialized_path = current_path
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
-        with self._get_conn() as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS repositories (
-                    hash TEXT PRIMARY KEY,
-                    repo_path TEXT UNIQUE,
-                    name TEXT,
-                    db_path TEXT,
-                    gorgonzola_path TEXT,
-                    last_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            conn.commit()
+        with self._get_conn():
+            pass
 
     def register_repo(self, repo_path: str, db_path: str, gorgonzola_path: str):
         """Register or update a repository in the global registry."""

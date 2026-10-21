@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+
 def build_levels(graph) -> List[List[str]]:
     """
     Query CALLS edges from the Kùzu graph and organize Function/Method nodes into dependency levels.
@@ -12,6 +13,12 @@ def build_levels(graph) -> List[List[str]]:
     Level 1 contains functions that only call Level 0 functions.
     Cycle breaking is performed if cyclic call dependencies exist.
     """
+    nodes_query = """
+    MATCH (n:CodeNode)
+    WHERE n.kind IN ['Function', 'Method']
+    RETURN n.id AS node_id
+    """
+
     query = """
     MATCH (caller:CodeNode)-[:CALLS]->(callee:CodeNode)
     WHERE caller.kind IN ['Function', 'Method'] AND callee.kind IN ['Function', 'Method']
@@ -23,6 +30,16 @@ def build_levels(graph) -> List[List[str]]:
 
     try:
         with graph:
+            try:
+                node_rows = graph.query(nodes_query)
+                for row in node_rows:
+                    if isinstance(row, dict):
+                        n_id = row.get("node_id")
+                        if n_id:
+                            nodes.add(n_id)
+            except Exception as e:
+                logger.debug("Failed to query Function/Method nodes for level construction: %s", e)
+
             rows = graph.query(query)
             for row in rows:
                 c_id = row.get("caller_id")
@@ -74,6 +91,7 @@ def build_levels(graph) -> List[List[str]]:
 
     return levels
 
+
 def build_static_summary(
     node_id: str,
     name: str,
@@ -82,7 +100,7 @@ def build_static_summary(
     signature: str = "",
     parameters: Optional[List[Dict[str, Any]]] = None,
     return_type: str = "",
-    called_summaries: Optional[List[Tuple[str, str]]] = None, # [(callee_name, callee_short_summary)]
+    called_summaries: Optional[List[Tuple[str, str]]] = None,  # [(callee_name, callee_short_summary)]
     reads: Optional[List[str]] = None,
     writes: Optional[List[str]] = None,
     complexity: int = 0,
@@ -93,8 +111,9 @@ def build_static_summary(
     parts = []
 
     # 1. Header & Signature
+    normalized_kind = kind.capitalize() if kind and kind.islower() else (kind or "Function")
     clean_name = name.split(".")[-1] if "." in name else name
-    parts.append(f"{kind} {clean_name}.")
+    parts.append(f"{normalized_kind} {clean_name}.")
 
     if docstring:
         clean_doc = docstring.strip().replace("\n", " ")
@@ -123,7 +142,7 @@ def build_static_summary(
     # 3. Bottom-up Context (Called Functions & Summaries)
     if called_summaries:
         call_descriptions = []
-        for c_name, c_sum in called_summaries[:5]: # Limit to top 5 callees to prevent token blowout
+        for c_name, c_sum in called_summaries[:5]:  # Limit to top 5 callees to prevent token blowout
             if c_sum:
                 # Use first line or short snippet of child summary
                 short_child = c_sum.split(".")[0]
@@ -142,6 +161,7 @@ def build_static_summary(
         parts.append(f"Complexity score: {complexity}.")
 
     return " ".join(parts)
+
 
 def process_levels_static(
     levels: List[List[str]],

@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import tree_sitter
@@ -36,8 +37,10 @@ def _load_graph_query(language: str, lang_obj) -> Optional[tree_sitter.Query]:
 def make_qname(parent_qname: str, name: str) -> str:
     return f"{parent_qname}.{name}" if parent_qname else name
 
+
 def make_id(file: str, kind: str, qname: str, line: int) -> str:
     return f"{file}::{kind}::{qname}::{line}"
+
 
 class TreeSitterExtractor:
     def __init__(self, file_path: str, repo_path: str, resolve_import_fn):
@@ -93,6 +96,189 @@ class TreeSitterExtractor:
                     if doc.startswith("'") and doc.endswith("'"): return doc[1:-1].strip()
                     return doc.strip()
         return ""
+
+    # ── Shared extraction helpers ───────────────────────────────
+
+    def _extract_inheritance(self, node, node_id: str, source: bytes):
+        """Extract INHERITS edges for a class/interface node."""
+        seen_inherits = set()
+
+        def _add_base(base_name: str):
+            if not base_name or base_name in seen_inherits:
+                return
+            seen_inherits.add(base_name)
+            base_id = self.symbol_table.get(base_name)
+            if not base_id:
+                base_id = f"external::{base_name}"
+                self.ensure_node(base_id, "External", base_name, base_name, "__external__", 0, 0)
+            self.edges["INHERITS"].append((node_id, base_id, {}))
+
+        # Check superclasses/superclass/base list via fields
+        for field_name in ('superclasses', 'superclass', 'super_class'):
+            superclasses_node = node.child_by_field_name(field_name)
+            if superclasses_node:
+                for child in superclasses_node.children:
+                    if child.is_named:
+                        _add_base(self.ts_text(child, source))
+
+        # Also check Java-style superclass/interfaces via tree children
+        for child in node.children:
+            if child.type in ('superclass', 'super_interfaces'):
+                for item in child.children:
+                    if item.is_named:
+                        _add_base(self.ts_text(item, source))
+
+    def _extract_return_type(self, node, node_id: str, source: bytes):
+        """Extract RETURNS edge for a function/method node."""
+        return_type_node = node.child_by_field_name('return_type')
+        if return_type_node:
+            ret_type = self.ts_text(return_type_node, source)
+            if ret_type:
+                type_id = self.symbol_table.get(ret_type)
+                if not type_id:
+                    type_id = f"external_type::{ret_type}"
+                    self.ensure_node(type_id, "ExternalType", ret_type, ret_type, "__external__", 0, 0)
+                self.edges["RETURNS"].append((node_id, type_id, {}))
+
+    def _extract_parameters(self, node, node_id: str, qname: str, source: bytes):
+        """Extract Parameter nodes and PARAMETER_OF edges for a function/method node."""
+        parameters_node = node.child_by_field_name('parameters')
+        if not parameters_node:
+            return
+        pos = 0
+        for child in parameters_node.children:
+            if child.type in ('identifier', 'typed_parameter', 'formal_parameter',
+                              'required_parameter', 'optional_parameter',
+                              'spread_parameter', 'parameter'):
+                param_name_node = child.child_by_field_name('name') if child.type != 'identifier' else child
+                if param_name_node:
+                    param_name = self.ts_text(param_name_node, source)
+                    if param_name and param_name not in ('self', 'cls', 'this'):
+                        param_qname = make_qname(qname, param_name)
+                        param_id = make_id(self.file_path, "Parameter", param_qname, child.start_point[0] + 1)
+                        self.ensure_node(
+                            param_id,
+                            "Parameter",
+                            param_name,
+                            param_qname,
+                            self.file_path,
+                            child.start_point[0] + 1,
+                            child.end_point[0] + 1,
+                        )
+                        self.edges["PARAMETER_OF"].append((param_id, node_id, {"position": pos}))
+                        pos += 1
+
+    def _extract_call(self, node, parent_id: str, source: bytes):
+        """Extract CALLS edge from a call expression node."""
+        func_node = (
+            node.child_by_field_name('function')
+            or node.child_by_field_name('name')
+            or node.child_by_field_name('method')
+        )
+        if func_node:
+            raw_call = self.ts_text(func_node, source)
+            if raw_call:
+                simple_name = raw_call.split(".")[-1]
+                target_id = self.symbol_table.get(simple_name)
+                if not target_id:
+                    target_id = f"external::{raw_call}"
+                    self.ensure_node(target_id, "External", raw_call, raw_call, "__external__", 0, 0)
+                self.edges["CALLS"].append((parent_id, target_id, {"line": node.start_point[0] + 1}))
+
+    def _clean_import_target(self, node, import_text: str, source: bytes) -> str:
+        """Extract the clean module/file specifier from an import statement."""
+        # 1. Try AST field lookups first
+        if node is not None:
+            if node.type == 'import_from_statement':
+                mod_node = node.child_by_field_name('module_name')
+                if mod_node:
+                    return self.ts_text(mod_node, source).strip()
+            elif node.type == 'preproc_include':
+                path_node = node.child_by_field_name('path')
+                if path_node:
+                    return self.ts_text(path_node, source).strip('"\'<> ')
+            elif node.type == 'import_statement':
+                src_node = node.child_by_field_name('source')
+                if src_node:
+                    return self.ts_text(src_node, source).strip('"\'` ')
+                name_node = node.child_by_field_name('name')
+                if name_node:
+                    inner = name_node.child_by_field_name('name') if name_node.type == 'aliased_import' else name_node
+                    return self.ts_text(inner, source).strip()
+
+        # 2. Text-based fallback parsing
+        text = import_text.strip().rstrip(';').strip()
+        if text.startswith('#include'):
+            m = re.search(r'["<]([^">]+)[">]', text)
+            if m:
+                return m.group(1).strip()
+            return text[len('#include'):].strip('"\'<> ')
+
+        if text.startswith('from ') and ' import ' in text:
+            before_import, after_import = text[5:].split(' import ', 1)
+            mod = before_import.strip()
+            if mod and set(mod) == {'.'}:
+                first_sym = after_import.split(',')[0].split(' as ')[0].strip('() ')
+                return f"{mod}{first_sym}" if first_sym else mod
+            return mod
+
+        if ' from ' in text and text.startswith('import '):
+            after_from = text.rsplit(' from ', 1)[1].strip()
+            return after_from.strip('"\'` ')
+
+        if text.startswith('import '):
+            rest = text[len('import '):].strip()
+            if rest.startswith('static '):
+                rest = rest[len('static '):].strip()
+            rest = rest.split(',')[0].split(' as ')[0].strip()
+            m = re.search(r'["\']([^"\']+)["\']', rest)
+            if m:
+                return m.group(1).strip()
+            return rest.strip('"\'`() ')
+
+        if text.startswith('use '):
+            rest = text[len('use '):].strip()
+            rest = rest.split('::{')[0].split(' as ')[0].strip()
+            return rest
+
+        return text.strip('"\'<> ')
+
+    def _extract_import(self, node, parent_id: str, source: bytes):
+        """Extract IMPORTS edge and target File/External node."""
+        import_text = self.ts_text(node, source)
+        module_target = self._clean_import_target(node, import_text, source)
+        resolved_path = (
+            self.resolve_import_fn(module_target, self.file_path, self.repo_path)
+            if self.resolve_import_fn and module_target
+            else None
+        )
+        if resolved_path and os.path.exists(resolved_path):
+            target_file_node_id = resolved_path
+            is_external = False
+            self.ensure_node(
+                target_file_node_id,
+                "File",
+                os.path.basename(resolved_path),
+                resolved_path,
+                resolved_path,
+                0,
+                0,
+            )
+        else:
+            target_file_node_id = f"external_file::{import_text}"
+            is_external = True
+            self.ensure_node(
+                target_file_node_id,
+                "External",
+                import_text,
+                import_text,
+                "__external__",
+                0,
+                0,
+            )
+        self.edges["IMPORTS"].append(
+            (parent_id, target_file_node_id, {"is_external": is_external, "import_text": import_text})
+        )
 
     def extract(self, tree, source: bytes):
         file_node_id = self.file_path
@@ -176,46 +362,7 @@ class TreeSitterExtractor:
             self.symbol_table[name] = node_id
             self.edges["CONTAINS"].append((parent_id, node_id, {}))
 
-            # INHERITS — check superclasses/superclass/base list via fields
-            seen_inherits = set()
-            for field_name in ('superclasses', 'superclass', 'super_class'):
-                superclasses_node = node.child_by_field_name(field_name)
-                if superclasses_node:
-                    for child in superclasses_node.children:
-                        if child.is_named:
-                            base_name = self.ts_text(child, source)
-                            if base_name and base_name not in seen_inherits:
-                                seen_inherits.add(base_name)
-                                base_id = self.symbol_table.get(base_name)
-                                if not base_id:
-                                    ext_id = f"external::{base_name}"
-                                    self.ensure_node(ext_id, "External", base_name, base_name, "__external__", 0, 0)
-                                    base_id = ext_id
-                                self.edges["INHERITS"].append((node_id, base_id, {}))
-
-            # Also check Java-style superclass/interfaces via tree children
-            for child in node.children:
-                if child.type == 'superclass':
-                    for sc in child.children:
-                        if sc.is_named:
-                            base_name = self.ts_text(sc, source)
-                            if base_name and base_name not in seen_inherits:
-                                seen_inherits.add(base_name)
-                                base_id = self.symbol_table.get(base_name, f"external::{base_name}")
-                                if base_id.startswith("external::"):
-                                    self.ensure_node(base_id, "External", base_name, base_name, "__external__", 0, 0)
-                                self.edges["INHERITS"].append((node_id, base_id, {}))
-                elif child.type == 'super_interfaces':
-                    for si in child.children:
-                        if si.is_named:
-                            iface_name = self.ts_text(si, source)
-                            if iface_name and iface_name not in seen_inherits:
-                                seen_inherits.add(iface_name)
-                                iface_id = self.symbol_table.get(iface_name, f"external::{iface_name}")
-                                if iface_id.startswith("external::"):
-                                    self.ensure_node(iface_id, "External", iface_name, iface_name, "__external__", 0, 0)
-                                self.edges["INHERITS"].append((node_id, iface_id, {}))
-
+            self._extract_inheritance(node, node_id, source)
             containers.append((node.start_byte, node.end_byte, node_id, qname))
 
         # Process impl blocks (Rust)
@@ -283,35 +430,8 @@ class TreeSitterExtractor:
             self.symbol_table[name] = node_id
             self.edges["CONTAINS"].append((parent_id, node_id, {}))
 
-            # RETURNS
-            return_type_node = node.child_by_field_name('return_type')
-            if return_type_node:
-                ret_type = self.ts_text(return_type_node, source)
-                type_id = self.symbol_table.get(ret_type)
-                if not type_id:
-                    ext_id = f"external_type::{ret_type}"
-                    self.ensure_node(ext_id, "ExternalType", ret_type, ret_type, "__external__", 0, 0)
-                    type_id = ext_id
-                self.edges["RETURNS"].append((node_id, type_id, {}))
-
-            # PARAMETER_OF
-            parameters_node = node.child_by_field_name('parameters')
-            if parameters_node:
-                pos = 0
-                for child in parameters_node.children:
-                    if child.type in ('identifier', 'typed_parameter', 'formal_parameter',
-                                      'required_parameter', 'optional_parameter',
-                                      'spread_parameter', 'parameter'):
-                        param_name_node = child.child_by_field_name('name') if child.type != 'identifier' else child
-                        if param_name_node:
-                            param_name = self.ts_text(param_name_node, source)
-                            if param_name and param_name not in ('self', 'cls', 'this'):
-                                param_qname = make_qname(qname, param_name)
-                                param_id = make_id(self.file_path, "Parameter", param_qname, child.start_point[0] + 1)
-                                self.ensure_node(param_id, "Parameter", param_name, param_qname, self.file_path,
-                                                 child.start_point[0] + 1, child.end_point[0] + 1)
-                                self.edges["PARAMETER_OF"].append((param_id, node_id, {"position": pos}))
-                                pos += 1
+            self._extract_return_type(node, node_id, source)
+            self._extract_parameters(node, node_id, qname, source)
 
             containers.append((node.start_byte, node.end_byte, node_id, qname))
 
@@ -320,37 +440,13 @@ class TreeSitterExtractor:
 
         # Process imports
         for node in import_nodes:
-            import_text = self.ts_text(node, source)
             parent_id, _ = self._find_parent(node, containers, file_node_id)
-            resolved_path = self.resolve_import_fn(import_text, self.file_path, self.repo_path) if self.resolve_import_fn else None
-            if resolved_path:
-                target_file_node_id = resolved_path
-                is_external = False
-                self.ensure_node(target_file_node_id, "File", os.path.basename(resolved_path), resolved_path, resolved_path, 0, 0)
-            else:
-                target_file_node_id = f"external_file::{import_text}"
-                is_external = True
-                self.ensure_node(target_file_node_id, "External", import_text, import_text, "__external__", 0, 0)
-            self.edges["IMPORTS"].append((parent_id, target_file_node_id, {"is_external": is_external, "import_text": import_text}))
+            self._extract_import(node, parent_id, source)
 
         # Process calls
         for node in call_nodes:
             parent_id, _ = self._find_parent(node, containers, file_node_id)
-
-            # Extract the function/method name from the call
-            # Different languages use different field names
-            func_node = (node.child_by_field_name('function') or
-                         node.child_by_field_name('name') or
-                         node.child_by_field_name('method'))
-            if func_node:
-                raw_call = self.ts_text(func_node, source)
-                simple_name = raw_call.split(".")[-1]
-                target_id = self.symbol_table.get(simple_name)
-                if not target_id:
-                    ext_id = f"external::{raw_call}"
-                    self.ensure_node(ext_id, "External", raw_call, raw_call, "__external__", 0, 0)
-                    target_id = ext_id
-                self.edges["CALLS"].append((parent_id, target_id, {"line": node.start_point[0] + 1}))
+            self._extract_call(node, parent_id, source)
 
     def _find_parent(self, node, containers, file_node_id: str) -> Tuple[str, str]:
         """Find the innermost container that encloses this node."""
@@ -384,22 +480,21 @@ class TreeSitterExtractor:
                 current_qname = make_qname(parent_qname, name)
                 current_id = make_id(self.file_path, "Class", current_qname, node.start_point[0] + 1)
                 docstring = self.extract_docstring(node, source)
-                self.ensure_node(current_id, "Class", name, current_qname, self.file_path, node.start_point[0] + 1, node.end_point[0] + 1, docstring)
+                self.ensure_node(
+                    current_id,
+                    "Class",
+                    name,
+                    current_qname,
+                    self.file_path,
+                    node.start_point[0] + 1,
+                    node.end_point[0] + 1,
+                    docstring,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                )
                 self.symbol_table[name] = current_id
                 self.edges["CONTAINS"].append((parent_id, current_id, {}))
-
-                superclasses_node = node.child_by_field_name('superclasses')
-                if superclasses_node:
-                    for child in superclasses_node.children:
-                        if child.is_named:
-                            base_name = self.ts_text(child, source)
-                            if base_name:
-                                base_id = self.symbol_table.get(base_name)
-                                if not base_id:
-                                    ext_id = f"external::{base_name}"
-                                    self.ensure_node(ext_id, "External", base_name, base_name, "__external__", 0, 0)
-                                    base_id = ext_id
-                                self.edges["INHERITS"].append((current_id, base_id, {}))
+                self._extract_inheritance(node, current_id, source)
 
         elif node.type in ('function_definition', 'method_declaration',
                             'constructor_declaration', 'function_item',
@@ -411,59 +506,30 @@ class TreeSitterExtractor:
                 kind = "Method" if "Class" in parent_id else "Function"
                 current_id = make_id(self.file_path, kind, current_qname, node.start_point[0] + 1)
                 docstring = self.extract_docstring(node, source)
-                self.ensure_node(current_id, kind, name, current_qname, self.file_path, node.start_point[0] + 1, node.end_point[0] + 1, docstring)
+                self.ensure_node(
+                    current_id,
+                    kind,
+                    name,
+                    current_qname,
+                    self.file_path,
+                    node.start_point[0] + 1,
+                    node.end_point[0] + 1,
+                    docstring,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                )
                 self.symbol_table[name] = current_id
                 self.edges["CONTAINS"].append((parent_id, current_id, {}))
 
-                return_type_node = node.child_by_field_name('return_type')
-                if return_type_node:
-                    ret_type = self.ts_text(return_type_node, source)
-                    type_id = self.symbol_table.get(ret_type)
-                    if not type_id:
-                        ext_id = f"external_type::{ret_type}"
-                        self.ensure_node(ext_id, "ExternalType", ret_type, ret_type, "__external__", 0, 0)
-                        type_id = ext_id
-                    self.edges["RETURNS"].append((current_id, type_id, {}))
-
-                parameters_node = node.child_by_field_name('parameters')
-                if parameters_node:
-                    pos = 0
-                    for child in parameters_node.children:
-                        if child.type in ('identifier', 'typed_parameter'):
-                            param_name_node = child.child_by_field_name('name') if child.type == 'typed_parameter' else child
-                            param_name = self.ts_text(param_name_node, source)
-                            if param_name and param_name not in ('self', 'cls'):
-                                param_qname = make_qname(current_qname, param_name)
-                                param_id = make_id(self.file_path, "Parameter", param_qname, child.start_point[0] + 1)
-                                self.ensure_node(param_id, "Parameter", param_name, param_qname, self.file_path, child.start_point[0] + 1, child.end_point[0] + 1)
-                                self.edges["PARAMETER_OF"].append((param_id, current_id, {"position": pos}))
-                                pos += 1
+                self._extract_return_type(node, current_id, source)
+                self._extract_parameters(node, current_id, current_qname, source)
 
         elif node.type in ('call_expression', 'method_invocation'):
-            func_node = node.child_by_field_name('function') or node.child_by_field_name('name')
-            if func_node:
-                raw_call = self.ts_text(func_node, source)
-                simple_name = raw_call.split(".")[-1]
-                target_id = self.symbol_table.get(simple_name)
-                if not target_id:
-                    ext_id = f"external::{raw_call}"
-                    self.ensure_node(ext_id, "External", raw_call, raw_call, "__external__", 0, 0)
-                    target_id = ext_id
-                self.edges["CALLS"].append((parent_id, target_id, {"line": node.start_point[0] + 1}))
+            self._extract_call(node, parent_id, source)
 
         elif node.type in ('import_statement', 'import_from_statement', 'preproc_include',
                             'import_declaration', 'use_declaration'):
-            import_text = self.ts_text(node, source)
-            resolved_path = self.resolve_import_fn(import_text, self.file_path, self.repo_path) if self.resolve_import_fn else None
-            if resolved_path:
-                target_file_node_id = resolved_path
-                is_external = False
-                self.ensure_node(target_file_node_id, "File", os.path.basename(resolved_path), resolved_path, resolved_path, 0, 0)
-            else:
-                target_file_node_id = f"external_file::{import_text}"
-                is_external = True
-                self.ensure_node(target_file_node_id, "External", import_text, import_text, "__external__", 0, 0)
-            self.edges["IMPORTS"].append((parent_id, target_file_node_id, {"is_external": is_external, "import_text": import_text}))
+            self._extract_import(node, parent_id, source)
 
         for child in node.children:
             if child.is_named:

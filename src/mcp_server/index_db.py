@@ -10,10 +10,10 @@ from typing import Any, Dict, List, Tuple
 from src.core.errors import SecurityValidationError
 from src.mcp_server.fts_uring_bindings import FTSUringEngine
 from src.mcp_server.gorgonzola_graph import GorgonzolaGraph
+from src.mcp_server.middleware.caching import clear_index_cache  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-import glob
 import sys
 
 _base_path = Path(__file__).resolve().parent.parent.parent / "modules" / "c_fts_uring"
@@ -82,7 +82,32 @@ def migrate_codebase(conn: sqlite3.Connection):
             kind VARCHAR,
             filepath VARCHAR,
             start_line INTEGER,
-            end_line INTEGER
+            end_line INTEGER,
+            relationships VARCHAR,
+            pagerank DOUBLE DEFAULT 0.0,
+            start_byte INTEGER,
+            end_byte INTEGER,
+            community_id INTEGER,
+            uuid BLOB,
+            complexity INTEGER DEFAULT 0,
+            signature VARCHAR,
+            in_degree INTEGER DEFAULT 0,
+            out_degree INTEGER DEFAULT 0,
+            hcgs_summary VARCHAR,
+            embedding TEXT,
+            git_survival_days INTEGER DEFAULT 0,
+            git_rename_count INTEGER DEFAULT 0,
+            git_ownership_entropy DOUBLE DEFAULT 0.0,
+            git_commit_count INTEGER DEFAULT 0,
+            git_days_since_change INTEGER DEFAULT 0,
+            git_churn INTEGER DEFAULT 0,
+            git_authors INTEGER DEFAULT 0,
+            git_bug_fix_ratio DOUBLE DEFAULT 0.0,
+            instability DOUBLE DEFAULT 0.0,
+            coupling DOUBLE DEFAULT 0.0,
+            depth INTEGER DEFAULT 0,
+            inheritance_depth INTEGER DEFAULT 0,
+            betweenness DOUBLE DEFAULT 0.0
         )
     ''')
 
@@ -101,6 +126,7 @@ def migrate_codebase(conn: sqlite3.Connection):
         'ALTER TABLE code_nodes ADD COLUMN in_degree INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN out_degree INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN hcgs_summary VARCHAR',
+        'ALTER TABLE code_nodes ADD COLUMN embedding TEXT',
         # Phase 0: Git features (stable)
         'ALTER TABLE code_nodes ADD COLUMN git_survival_days INTEGER DEFAULT 0',
         'ALTER TABLE code_nodes ADD COLUMN git_rename_count INTEGER DEFAULT 0',
@@ -131,11 +157,6 @@ def migrate_codebase(conn: sqlite3.Connection):
         except Exception as e:
             logger.debug("Migration query failed (likely already applied): %s", e)
 
-    try:
-        conn.execute("CREATE INDEX IF NOT EXISTS code_vss_idx ON code_nodes USING HNSW (embedding)")
-    except Exception as e:
-        logger.debug("Failed to create HNSW index (might require VSS extension to be fully loaded or data inserted): %s", e)
-
     # Files tracking table for incremental indexing
     conn.execute('''
         CREATE TABLE IF NOT EXISTS files (
@@ -155,20 +176,6 @@ def migrate_codebase(conn: sqlite3.Connection):
         )
     ''')
 
-    # Extension loading
-
-
-def migrate_all():
-    """Scan the indexes directory and safely run migrations."""
-    indexes_dir = get_indexes_dir()
-    for fname in os.listdir(indexes_dir):
-        if fname.endswith(".sqlite3"):
-            db_path = Path(indexes_dir) / fname
-            try:
-                with sqlite3.connect(str(db_path)) as conn:
-                    migrate_codebase(conn)
-            except Exception as e:
-                logger.warning("Failed to migrate %s: %s", fname, e)
 
 @functools.lru_cache(maxsize=32)
 def _get_file_content(filepath: str, mtime: float) -> bytes:
@@ -217,12 +224,20 @@ class CodeSearchIndex:
             max_ram = getattr(settings, 'fts_ram_mb', 256)
             if 'pytest' in sys.modules:
                 max_ram = 128
-            self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS pecorino_ast USING fts_uring('{fts_path}', {max_ram});")
-            # Force SQLite to call xConnect to initialize g_engine in the C extension
-            try:
-                self._conn.execute("SELECT 1 FROM pecorino_ast WHERE query = 'init' LIMIT 1")
-            except Exception as e:
-                logger.error(f"Error querying pecorino_ast during init: {e}")
+
+            has_ast_table = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pecorino_ast'"
+            ).fetchone() is not None
+            if not self._read_only:
+                self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS pecorino_ast USING fts_uring('{fts_path}', {max_ram});")
+                has_ast_table = True
+
+            if has_ast_table:
+                # Force SQLite to call xConnect to initialize g_engine in the C extension
+                try:
+                    self._conn.execute("SELECT 1 FROM pecorino_ast WHERE query = 'init' LIMIT 1")
+                except Exception as e:
+                    logger.error(f"Error querying pecorino_ast during init: {e}")
 
             # ATTACH other repos for federated querying if we are in read-only mode (max 9 to respect SQLite 10 DB limit)
             if read_only:
@@ -256,13 +271,6 @@ class CodeSearchIndex:
             self.graph = GorgonzolaGraph(db_path=get_graph_path_for_repo(self.db_path))
         return self.graph
 
-    def _get_embedder(self):
-        """Lazily initialize the embedding pipeline."""
-        if self._embedder is None:
-            from src.mcp_server.embedding import EmbeddingPipeline
-            self._embedder = EmbeddingPipeline()
-        return self._embedder
-
     def close(self):
         """Close the underlying database connections."""
         if self._conn:
@@ -290,6 +298,31 @@ class CodeSearchIndex:
     def rebuild_fts(self):
         """Rebuild the FTS index."""
         try:
+            fts_dir = Path(self.db_path).parent / f"{Path(self.db_path).stem}_fts"
+            shard0 = fts_dir / "shard_0.dat"
+            needs_repopulate = not shard0.exists() or shard0.stat().st_size <= 4096
+            if self._fts_engine and not self._read_only and needs_repopulate:
+                import json
+                rows = self._conn.execute(
+                    "SELECT id, uuid, name, kind, filepath, embedding FROM code_nodes"
+                ).fetchall()
+                for node_id, node_uuid, name, kind, filepath, emb_raw in rows:
+                    if not node_uuid or len(node_uuid) != 16:
+                        node_uuid = hashlib.md5(str(node_id).encode("utf-8")).digest()
+                    tf = [1, 0, 0, 0]
+                    dl = [len(name or "") or 1, 0, 0, 0]
+                    emb = None
+                    if emb_raw:
+                        try:
+                            emb = json.loads(emb_raw) if isinstance(emb_raw, str) else emb_raw
+                        except Exception:
+                            emb = None
+                    text = f"{name or ''} {kind or ''} {filepath or ''}"
+                    try:
+                        self._fts_engine.insert_document(node_uuid, tf, dl, emb, text)
+                    except Exception as e:
+                        logger.debug("Failed to re-insert node into fts_uring during rebuild_fts: %s", e)
+
             self._conn.execute("""
                 INSERT INTO _meta (key, value) VALUES ('fts_built', 'true')
                 ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = CURRENT_TIMESTAMP
@@ -412,7 +445,6 @@ class CodeSearchIndex:
                 n.get('hcgs_summary', None),
             ))
         if data:
-            pass
             try:
                 insert_cols = (
                     "id, uuid, name, kind, filepath, start_line, end_line, "
@@ -462,7 +494,6 @@ class CodeSearchIndex:
         if not filepaths:
             return
         conn = self._conn
-        pass
         try:
             chunk_size = 500
             for i in range(0, len(filepaths), chunk_size):
@@ -562,7 +593,6 @@ class CodeSearchIndex:
         if not files_data:
             return
         conn = self._conn
-        pass
         try:
             conn.executemany('''
                 INSERT INTO files (filepath, content_hash, mtime, lang)
@@ -614,7 +644,6 @@ class CodeSearchIndex:
             return
         conn = self._conn
         data = [(text, node_id) for node_id, text in summaries.items()]
-        pass
         try:
             conn.executemany("UPDATE code_nodes SET hcgs_summary = ? WHERE id = ?", data)
             conn.commit()
@@ -674,69 +703,78 @@ class CodeSearchIndex:
         except Exception:
             pass
 
+    def _bulk_update_via_temp_table(
+        self,
+        temp_table: str,
+        columns_def: str,
+        placeholders: str,
+        rows: list,
+        update_sql: str,
+    ):
+        """Helper to perform a bulk UPDATE on code_nodes via a temporary table."""
+        if not rows:
+            return
+        conn = self._conn
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            conn.execute(f"CREATE TEMP TABLE {temp_table} ({columns_def})")
+            conn.executemany(f"INSERT INTO {temp_table} VALUES ({placeholders})", rows)
+            conn.execute(update_sql)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            try:
+                conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            except Exception:
+                pass
+
     def update_pagerank_bulk(self, scores: List[Dict[str, Any]]):
         """Bulk update pagerank scores for code nodes."""
         if not scores:
             return
-        conn = self._conn
-        pass
         try:
-            data = []
-            for s in scores:
-                node_id = s.get("node_id", "")
-                score = s.get("score", 0.0)
-                if "::" not in node_id:
-                    continue # Likely a File node
-                parts = node_id.split("::")
-                filepath = parts[0]
-                if len(parts) == 2:
-                    name = parts[1] # Class or Function
-                elif len(parts) == 3:
-                    name = f"{parts[1]}.{parts[2]}" # Method
-                else:
-                    continue
-                data.append((filepath, name, score))
-
-            conn.execute("CREATE TEMP TABLE temp_pr (filepath VARCHAR, name VARCHAR, pagerank DOUBLE)")
-            conn.executemany("INSERT INTO temp_pr VALUES (?, ?, ?)", data)
-            conn.execute('''
+            data = [
+                (s.get("node_id", ""), float(s.get("score", 0.0)))
+                for s in scores
+                if s.get("node_id")
+            ]
+            self._bulk_update_via_temp_table(
+                "temp_pr",
+                "node_id VARCHAR, pagerank DOUBLE",
+                "?, ?",
+                data,
+                """
                 UPDATE code_nodes
                 SET pagerank = temp_pr.pagerank
                 FROM temp_pr
-                WHERE code_nodes.filepath = temp_pr.filepath AND code_nodes.name = temp_pr.name
-            ''')
-            conn.execute("DROP TABLE temp_pr")
-            conn.commit()
+                WHERE code_nodes.id = temp_pr.node_id
+                   OR (code_nodes.filepath = temp_pr.node_id AND code_nodes.kind = 'file')
+                """,
+            )
         except Exception as e:
-            conn.rollback()
             logger.warning("Failed to bulk update pagerank: %s", e)
 
     def update_community_bulk(self, partitions: List[Dict[str, Any]]):
         """Bulk update the community_id for nodes."""
         if not partitions:
             return
-
-        conn = self._conn
         try:
-            pass
-            conn.execute("CREATE TEMP TABLE temp_comm (id VARCHAR, community_id INTEGER)")
-
-            # Insert into temp table
-            stmt = "INSERT INTO temp_comm VALUES (?, ?)"
-            for p in partitions:
-                conn.execute(stmt, (p['node_id'], p['community_id']))
-
-            # Update the main table
-            conn.execute('''
+            data = [(p["node_id"], p["community_id"]) for p in partitions]
+            self._bulk_update_via_temp_table(
+                "temp_comm",
+                "id VARCHAR, community_id INTEGER",
+                "?, ?",
+                data,
+                """
                 UPDATE code_nodes
                 SET community_id = temp_comm.community_id
                 FROM temp_comm
-                WHERE code_nodes.id LIKE temp_comm.id || '%'
-            ''')
-            conn.execute("DROP TABLE temp_comm")
-            conn.commit()
+                WHERE code_nodes.id = temp_comm.id OR code_nodes.filepath = temp_comm.id
+                """,
+            )
         except Exception as e:
-            conn.rollback()
             logger.warning("Failed to bulk update community: %s", e)
 
     def update_degrees_bulk(self, degree_data: List[Dict[str, Any]]):
@@ -746,24 +784,26 @@ class CodeSearchIndex:
         """
         if not degree_data:
             return
-        conn = self._conn
         try:
-            pass
-            conn.execute("CREATE TEMP TABLE temp_deg (name VARCHAR, in_deg INTEGER, out_deg INTEGER)")
-            data = [(d['name'], d.get('in_degree', 0), d.get('out_degree', 0)) for d in degree_data]
-            conn.executemany("INSERT INTO temp_deg VALUES (?, ?, ?)", data)
-            conn.execute('''
+            data = [
+                (d.get("id") or d["name"], d.get("in_degree", 0), d.get("out_degree", 0))
+                for d in degree_data
+            ]
+            self._bulk_update_via_temp_table(
+                "temp_deg",
+                "name VARCHAR, in_deg INTEGER, out_deg INTEGER",
+                "?, ?, ?",
+                data,
+                """
                 UPDATE code_nodes
                 SET in_degree = temp_deg.in_deg,
                     out_degree = temp_deg.out_deg
                 FROM temp_deg
-                WHERE code_nodes.name = temp_deg.name
-            ''')
-            conn.execute("DROP TABLE temp_deg")
-            conn.commit()
+                WHERE code_nodes.id = temp_deg.name OR code_nodes.name = temp_deg.name
+                """,
+            )
             logger.info("Updated in/out degree for %d nodes", len(degree_data))
         except Exception as e:
-            conn.rollback()
             logger.warning("Failed to bulk update degrees: %s", e)
 
     def update_git_features_bulk(self, git_features: List[Dict[str, Any]]):
@@ -775,22 +815,7 @@ class CodeSearchIndex:
         """
         if not git_features:
             return
-        conn = self._conn
         try:
-            pass
-            conn.execute("""
-                CREATE TEMP TABLE temp_git (
-                    filepath VARCHAR,
-                    git_survival_days INTEGER,
-                    git_rename_count INTEGER,
-                    git_ownership_entropy DOUBLE,
-                    git_commit_count INTEGER,
-                    git_days_since_change INTEGER,
-                    git_churn INTEGER,
-                    git_authors INTEGER,
-                    git_bug_fix_ratio DOUBLE
-                )
-            """)
             data = [
                 (
                     f.get("filepath", ""),
@@ -805,8 +830,22 @@ class CodeSearchIndex:
                 )
                 for f in git_features
             ]
-            conn.executemany("INSERT INTO temp_git VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
-            conn.execute("""
+            self._bulk_update_via_temp_table(
+                "temp_git",
+                """
+                filepath VARCHAR,
+                git_survival_days INTEGER,
+                git_rename_count INTEGER,
+                git_ownership_entropy DOUBLE,
+                git_commit_count INTEGER,
+                git_days_since_change INTEGER,
+                git_churn INTEGER,
+                git_authors INTEGER,
+                git_bug_fix_ratio DOUBLE
+                """,
+                "?, ?, ?, ?, ?, ?, ?, ?, ?",
+                data,
+                """
                 UPDATE code_nodes
                 SET git_survival_days = temp_git.git_survival_days,
                     git_rename_count = temp_git.git_rename_count,
@@ -818,12 +857,10 @@ class CodeSearchIndex:
                     git_bug_fix_ratio = temp_git.git_bug_fix_ratio
                 FROM temp_git
                 WHERE code_nodes.filepath = temp_git.filepath
-            """)
-            conn.execute("DROP TABLE temp_git")
-            conn.commit()
+                """,
+            )
             logger.info("Updated git features for %d files", len(git_features))
         except Exception as e:
-            conn.rollback()
             logger.warning("Failed to bulk update git features: %s", e)
 
     def update_ood_features_bulk(self, ood_data: List[Dict[str, Any]]):
@@ -834,19 +871,7 @@ class CodeSearchIndex:
         """
         if not ood_data:
             return
-        conn = self._conn
         try:
-            pass
-            conn.execute("""
-                CREATE TEMP TABLE temp_ood (
-                    id VARCHAR,
-                    instability DOUBLE,
-                    coupling DOUBLE,
-                    depth INTEGER,
-                    inheritance_depth INTEGER,
-                    betweenness DOUBLE
-                )
-            """)
             data = [
                 (
                     item.get("id", ""),
@@ -858,8 +883,19 @@ class CodeSearchIndex:
                 )
                 for item in ood_data
             ]
-            conn.executemany("INSERT INTO temp_ood VALUES (?, ?, ?, ?, ?, ?)", data)
-            conn.execute("""
+            self._bulk_update_via_temp_table(
+                "temp_ood",
+                """
+                id VARCHAR,
+                instability DOUBLE,
+                coupling DOUBLE,
+                depth INTEGER,
+                inheritance_depth INTEGER,
+                betweenness DOUBLE
+                """,
+                "?, ?, ?, ?, ?, ?",
+                data,
+                """
                 UPDATE code_nodes
                 SET instability = temp_ood.instability,
                     coupling = temp_ood.coupling,
@@ -868,12 +904,10 @@ class CodeSearchIndex:
                     betweenness = temp_ood.betweenness
                 FROM temp_ood
                 WHERE code_nodes.id = temp_ood.id
-            """)
-            conn.execute("DROP TABLE temp_ood")
-            conn.commit()
+                """,
+            )
             logger.info("Updated OOD features for %d nodes", len(ood_data))
         except Exception as e:
-            conn.rollback()
             logger.warning("Failed to bulk update OOD features: %s", e)
 
     def get_file_hash(self, filepath: str) -> str:
@@ -940,6 +974,7 @@ class CodeSearchIndex:
 
             sql = f'''
                 SELECT c.id, c.name, c.kind, c.filepath, c.start_line, c.end_line, c.start_byte, c.end_byte,
+                       c.hcgs_summary,
                        a.bm25f_score AS bm25_score,
                        ((a.rrf_score) * (1.0 + COALESCE(c.pagerank, 0.0))){boost_clause} AS score,
                        a.cosine_score AS vec_sim
@@ -953,16 +988,14 @@ class CodeSearchIndex:
 
             params.extend([limit, offset])
 
-            # Use dict cursor equivalent
-            conn.row_factory = sqlite3.Row
-            res = conn.execute(sql, params).fetchall()
-            conn.row_factory = None
+            cursor = conn.execute(sql, params)
+            columns = [col[0] for col in cursor.description]
+            res = cursor.fetchall()
 
             results = []
             for row in res:
-                r = dict(row)
-                r['id']
-                r['hcgs_summary'] = ''
+                r = dict(zip(columns, row))
+                r['hcgs_summary'] = r.get('hcgs_summary') or ''
 
                 if explain:
                     r['explanation'] = "Score computed via fts_uring RRF + PageRank."
@@ -974,6 +1007,21 @@ class CodeSearchIndex:
         except sqlite3.Error as e:
             import logging
             logging.getLogger(__name__).error("Search failed: %s", e)
+            return []
+
+    def get_community_nodes(self, community_id: int) -> List[Dict[str, Any]]:
+        """Retrieve all indexed code nodes belonging to a specific community."""
+        if not self._conn:
+            return []
+        try:
+            cursor = self._conn.execute(
+                "SELECT id, name, filepath, start_line, end_line, kind, pagerank FROM code_nodes WHERE community_id = ? ORDER BY pagerank DESC",
+                (community_id,)
+            )
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get_community_nodes for {community_id}: {e}")
             return []
 
     def get_file_nodes(self, filepath: str) -> List[Dict[str, Any]]:
