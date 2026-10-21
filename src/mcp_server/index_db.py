@@ -225,10 +225,17 @@ class CodeSearchIndex:
             if 'pytest' in sys.modules:
                 max_ram = 128
 
-            has_ast_table = self._conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pecorino_ast'"
-            ).fetchone() is not None
+            row_ast = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='pecorino_ast'"
+            ).fetchone()
+            has_ast_table = row_ast is not None
             if not self._read_only:
+                if has_ast_table and fts_path not in (row_ast[0] or ""):
+                    try:
+                        self._conn.execute("DROP TABLE IF EXISTS pecorino_ast;")
+                        has_ast_table = False
+                    except Exception:
+                        pass
                 self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS pecorino_ast USING fts_uring('{fts_path}', {max_ram});")
                 has_ast_table = True
 
@@ -295,18 +302,18 @@ class CodeSearchIndex:
     def __del__(self):
         self.close()
 
-    def rebuild_fts(self):
+    def rebuild_fts(self, force: bool = False):
         """Rebuild the FTS index."""
         try:
             fts_dir = Path(self.db_path).parent / f"{Path(self.db_path).stem}_fts"
             shard0 = fts_dir / "shard_0.dat"
-            needs_repopulate = not shard0.exists() or shard0.stat().st_size <= 12288
+            needs_repopulate = force or not shard0.exists() or shard0.stat().st_size <= 12288
             if self._fts_engine and not self._read_only and needs_repopulate:
                 import json
                 rows = self._conn.execute(
-                    "SELECT id, uuid, name, kind, filepath, embedding FROM code_nodes"
+                    "SELECT id, uuid, name, kind, filepath, start_line, end_line, start_byte, end_byte, signature, hcgs_summary, embedding FROM code_nodes"
                 ).fetchall()
-                for node_id, node_uuid, name, kind, filepath, emb_raw in rows:
+                for node_id, node_uuid, name, kind, filepath, s_line, e_line, s_byte, e_byte, sig, hcgs, emb_raw in rows:
                     if not node_uuid or len(node_uuid) != 16:
                         node_uuid = hashlib.md5(str(node_id).encode("utf-8")).digest()
                     tf = [1, 0, 0, 0]
@@ -317,7 +324,8 @@ class CodeSearchIndex:
                             emb = json.loads(emb_raw) if isinstance(emb_raw, str) else emb_raw
                         except Exception:
                             emb = None
-                    text = f"{name or ''} {kind or ''} {filepath or ''}"
+                    body = self._lazy_load_body(filepath or "", s_line or 1, e_line or 1, s_byte or 0, e_byte or 0)
+                    text = f"{name or ''} {kind or ''} {filepath or ''} {sig or ''} {hcgs or ''} {body or ''}"[:4000]
                     try:
                         self._fts_engine.insert_document(node_uuid, tf, dl, emb, text)
                     except Exception as e:
@@ -418,7 +426,17 @@ class CodeSearchIndex:
 
             if self._fts_engine:
                 try:
-                    text = f"{n.get('name', '')} {n.get('kind', '')} {n.get('filepath', '')}"
+                    body = n.get('body_text') or self._lazy_load_body(
+                        n.get('filepath', ''),
+                        n.get('start_line', 1),
+                        n.get('end_line', 1),
+                        n.get('start_byte', 0) or 0,
+                        n.get('end_byte', 0) or 0,
+                    )
+                    text = (
+                        f"{n.get('name', '')} {n.get('kind', '')} {n.get('filepath', '')} "
+                        f"{n.get('signature', '') or ''} {n.get('hcgs_summary', '') or ''} {body or ''}"
+                    )[:4000]
                     res = self._fts_engine.insert_document(node_uuid, tf, dl, embedding, text)
                     if res != 0:
                         logger.error(f"insert_document returned {res}")
@@ -536,7 +554,7 @@ class CodeSearchIndex:
                 "MATCH (n:CodeNode)-[:CONTAINS]->(c:CodeNode) "
                 "WHERE n.id IN $ids RETURN c.id",
                 {"ids": list(current_ids)})
-            next_level = {r[0] for r in rows} - to_delete
+            next_level = {(r.get("c.id") if isinstance(r, dict) else r[0]) for r in rows if r} - to_delete
             to_delete.update(next_level)
             current_ids = next_level
 
@@ -553,7 +571,7 @@ class CodeSearchIndex:
                 "MATCH (src:CodeNode)-[:CONTAINS_LAMBDA]->(l:CodeNode {kind: 'Lambda'}) "
                 "WHERE src.id IN $ids RETURN l.id",
                 {"ids": list(lambda_sources)})
-            new_lambdas = {r[0] for r in rows} - lambdas
+            new_lambdas = {(r.get("l.id") if isinstance(r, dict) else r[0]) for r in rows if r} - lambdas
             lambdas.update(new_lambdas)
             lambda_sources = new_lambdas
         to_delete.update(lambdas)
@@ -565,7 +583,7 @@ class CodeSearchIndex:
                 "MATCH (src:CodeNode)-[:ACCESSES_STATE]->(v:CodeNode {kind: 'Variable'}) "
                 "WHERE src.id IN $ids RETURN v.id",
                 {"ids": list(access_sources)})
-            to_delete.update(r[0] for r in rows)
+            to_delete.update((r.get("v.id") if isinstance(r, dict) else r[0]) for r in rows if r)
 
         # 4. Delete HAS_IDENTIFIER edges from all collected nodes
         all_to_clean = to_delete | set(file_ids)
@@ -1001,6 +1019,13 @@ class CodeSearchIndex:
             for row in res:
                 r = dict(zip(columns, row))
                 r['hcgs_summary'] = r.get('hcgs_summary') or ''
+                r['body_text'] = self._lazy_load_body(
+                    r.get('filepath', ''),
+                    r.get('start_line', 1),
+                    r.get('end_line', 1),
+                    r.get('start_byte', 0) or 0,
+                    r.get('end_byte', 0) or 0,
+                )
 
                 if explain:
                     r['explanation'] = "Score computed via fts_uring RRF + PageRank."

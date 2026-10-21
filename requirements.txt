@@ -14,7 +14,6 @@ datasketch==2.0.0
 docker==7.2.0
 fastapi==0.141.1
 filelock==3.32.2
-gorgonzola==0.2.0
 h11==0.16.0
 httpcore2==2.13.0
 httpx2==2.13.0

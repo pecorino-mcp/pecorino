@@ -606,12 +606,15 @@ class CodebaseIndexer:
                                             texts_to_embed.append(text)
                                             all_nodes_to_embed.append(n)
 
+                                node_emb_map = {}
                                 if texts_to_embed:
                                     try:
                                         embeddings = self.embedder.embed_texts(texts_to_embed)
                                         for i, n in enumerate(all_nodes_to_embed):
                                             if i < len(embeddings):
                                                 n['embedding'] = embeddings[i]
+                                                if n.get('id'):
+                                                    node_emb_map[n['id']] = embeddings[i]
                                     except Exception:
                                         logger.debug(traceback.format_exc())
 
@@ -622,16 +625,17 @@ class CodebaseIndexer:
                                     for nid, props, lbl in res.get("graph_nodes", []):
                                         if nid in seen_embed_nids:
                                             continue
-                                        if lbl in ("External", "ExternalType", "File", "Parameter"):
+                                        if lbl in ("External", "ExternalType", "File", "Parameter", "Identifier"):
                                             continue
-                                        if lbl == "Identifier":
-                                            text = f"{props.get('raw', '')} {props.get('canonical_verb', '')} {props.get('canonical_entity', '')}"
-                                        else:
-                                            name = props.get("name", "")
-                                            doc = props.get("docstring", "")
-                                            fp = nid.split("::")[0] if "::" in nid else ""
-                                            cv = props.get("canonical_verb", "")
-                                            text = f"{name} {doc} {fp} {cv}"
+                                        if nid in node_emb_map:
+                                            props["embedding"] = node_emb_map[nid]
+                                            seen_embed_nids.add(nid)
+                                            continue
+                                        name = props.get("name", "")
+                                        doc = props.get("docstring", "")
+                                        fp = nid.split("::")[0] if "::" in nid else ""
+                                        cv = props.get("canonical_verb", "")
+                                        text = f"{name} {doc} {fp} {cv}"
                                         if text.strip():
                                             seen_embed_nids.add(nid)
                                             graph_texts_to_embed.append(text)

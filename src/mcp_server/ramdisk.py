@@ -164,13 +164,17 @@ class RamdiskIndex:
     # ------------------------------------------------------------------
 
     def _dir_size(self, path: str) -> int:
-        """Recursively compute total size of files under `path`."""
+        """Recursively compute total allocated size of files under `path`."""
         total = 0
         for dirpath, _dirnames, filenames in os.walk(path):
             for f in filenames:
                 fp = os.path.join(dirpath, f)
                 try:
-                    total += os.path.getsize(fp)
+                    st = os.stat(fp)
+                    if hasattr(st, "st_blocks") and st.st_blocks > 0:
+                        total += min(st.st_size, st.st_blocks * 512)
+                    else:
+                        total += st.st_size
                 except OSError:
                     pass
         return total
@@ -262,6 +266,8 @@ class RamdiskIndex:
 
             with FileLock(self.ssd_gorgonzola_path + ".lock"):
                 if os.path.isfile(self.gorgonzola_path):
+                    if os.path.isdir(self.ssd_gorgonzola_path):
+                        shutil.rmtree(self.ssd_gorgonzola_path)
                     tmp_gorgonzola = self.ssd_gorgonzola_path + ".tmp"
                     shutil.copy2(self.gorgonzola_path, tmp_gorgonzola)
                     os.replace(tmp_gorgonzola, self.ssd_gorgonzola_path)
@@ -275,22 +281,24 @@ class RamdiskIndex:
                         shutil.rmtree(tmp_gorgonzola)
                     shutil.copytree(self.gorgonzola_path, tmp_gorgonzola)
                     if os.path.exists(self.ssd_gorgonzola_path):
-                        shutil.rmtree(self.ssd_gorgonzola_path)
+                        if os.path.isdir(self.ssd_gorgonzola_path):
+                            shutil.rmtree(self.ssd_gorgonzola_path)
+                        else:
+                            os.remove(self.ssd_gorgonzola_path)
                     os.rename(tmp_gorgonzola, self.ssd_gorgonzola_path)
                     gorg_size = self._dir_size(self.ssd_gorgonzola_path)
                     logger.info(f"[ramdisk] Synced Gorgonzola (dir) to SSD: "
                           f"{gorg_size / 1024 / 1024:.2f} MB")
 
-                # Also sync any Gorgonzola WAL
-                gorg_wal = self.gorgonzola_path + ".wal"
-                if os.path.exists(gorg_wal):
-                    ssd_gwal = self.ssd_gorgonzola_path + ".wal"
-                    tmp_gwal = ssd_gwal + ".tmp"
-                    shutil.copy2(gorg_wal, tmp_gwal)
-                    os.replace(tmp_gwal, ssd_gwal)
-                else:
-                    ssd_gwal = self.ssd_gorgonzola_path + ".wal"
-                    if os.path.exists(ssd_gwal):
+                # Also sync any Gorgonzola WAL/SHM files
+                for g_suffix in (".wal", "-wal", "-shm"):
+                    gorg_wal = self.gorgonzola_path + g_suffix
+                    ssd_gwal = self.ssd_gorgonzola_path + g_suffix
+                    if os.path.exists(gorg_wal):
+                        tmp_gwal = ssd_gwal + ".tmp"
+                        shutil.copy2(gorg_wal, tmp_gwal)
+                        os.replace(tmp_gwal, ssd_gwal)
+                    elif os.path.exists(ssd_gwal):
                         os.remove(ssd_gwal)
         else:
             logger.warning(f"[ramdisk] Expected Gorgonzola graph at {self.gorgonzola_path} but it was not found. Graph data will be missing on SSD.")

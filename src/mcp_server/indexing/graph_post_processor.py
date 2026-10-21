@@ -56,19 +56,12 @@ def compute_similarity_edges(search_index, graph, enable_embeddings: bool = True
                                     ])
 
                         if semantic_edges:
-                            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
-                                writer = csv.writer(f)
-                                for edge in semantic_edges:
-                                    writer.writerow(edge)
-                                tmp_path = f.name
-
-                            try:
-                                with graph:
-                                    graph._conn.execute(f"COPY SEMANTICALLY_RELATED FROM '{tmp_path}' (HEADER=false);")
-                                logger.info(f"Loaded {len(semantic_edges)} SEMANTICALLY_RELATED edges.")
-                            finally:
-                                if os.path.exists(tmp_path):
-                                    os.remove(tmp_path)
+                            bulk_sem = [
+                                (src, dst, {"weight": score}, "SEMANTICALLY_RELATED")
+                                for src, dst, score in semantic_edges
+                            ]
+                            graph.insert_edges_bulk(bulk_sem)
+                            logger.info(f"Loaded {len(semantic_edges)} SEMANTICALLY_RELATED edges.")
             except Exception as e:
                 logger.warning(f"Failed to generate SEMANTICALLY_RELATED edges: {e}")
 
@@ -128,19 +121,12 @@ def compute_similarity_edges(search_index, graph, enable_embeddings: bool = True
                                     seen_pairs.add((nid, r_id))
 
                     if similar_edges:
-                        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
-                            writer = csv.writer(f)
-                            for edge in similar_edges:
-                                writer.writerow(edge)
-                            tmp_path = f.name
-
-                        try:
-                            with graph:
-                                graph._conn.execute(f"COPY SIMILAR_TO FROM '{tmp_path}' (HEADER=false);")
-                            logger.info(f"Loaded {len(similar_edges)} SIMILAR_TO edges.")
-                        finally:
-                            if os.path.exists(tmp_path):
-                                os.remove(tmp_path)
+                        bulk_sim = [
+                            (src, dst, {"score": score}, "SIMILAR_TO")
+                            for src, dst, score in similar_edges
+                        ]
+                        graph.insert_edges_bulk(bulk_sim)
+                        logger.info(f"Loaded {len(similar_edges)} SIMILAR_TO edges.")
 
             except ImportError:
                 logger.warning("datasketch not installed. Skipping SIMILAR_TO edge generation.")
